@@ -1,0 +1,14 @@
+{"name": "settings_old", "mode": "pty", "runs": 20, "median_ms": 189.02, "p95_ms": 192.79, "min_ms": 181.33, "max_ms": 197.35, "cmd": ["python3", "/home/user/justlinux/legacy/bin/hypr-settings"]}
+{"name": "settings_new", "mode": "pty", "runs": 20, "median_ms": 3.47, "p95_ms": 3.73, "min_ms": 3.3, "max_ms": 3.84, "cmd": ["/home/user/justlinux/rust/target/release/justlinux", "hypr-settings"]}
+{"name": "launcher_old", "mode": "pty", "runs": 20, "median_ms": 188.6, "p95_ms": 194.68, "min_ms": 185.38, "max_ms": 225.21, "cmd": ["python3", "/home/user/justlinux/legacy/bin/hypr-launcher", "menu"]}
+{"name": "launcher_new", "mode": "pty", "runs": 20, "median_ms": 3.27, "p95_ms": 3.63, "min_ms": 3.14, "max_ms": 3.67, "cmd": ["/home/user/justlinux/rust/target/release/justlinux", "hypr-launcher", "menu"]}
+{"name": "stash_old", "mode": "exec", "runs": 20, "median_ms": 79.69, "p95_ms": 86.18, "min_ms": 76.79, "max_ms": 92.66, "cmd": ["/home/user/justlinux/legacy/bin/hypr-tools.sh", "stash"]}
+{"name": "stash_new", "mode": "exec", "runs": 20, "median_ms": 9.34, "p95_ms": 12.39, "min_ms": 8.3, "max_ms": 13.33, "cmd": ["/home/user/justlinux/rust/target/release/justlinux", "hypr-tools", "stash"]}
+{"name": "av_old", "mode": "exec", "runs": 20, "median_ms": 5.12, "p95_ms": 5.48, "min_ms": 4.86, "max_ms": 5.94, "cmd": ["/home/user/justlinux/legacy/bin/av-status.sh"]}
+{"name": "av_new", "mode": "exec", "runs": 20, "median_ms": 3.62, "p95_ms": 4.14, "min_ms": 3.34, "max_ms": 4.24, "cmd": ["/home/user/justlinux/rust/target/release/justlinux", "av-status"]}
+{"name": "shot_old", "mode": "exec", "runs": 20, "median_ms": 35.26, "p95_ms": 37.46, "min_ms": 33.58, "max_ms": 43.64, "cmd": ["/home/user/justlinux/legacy/bin/screenshot.sh", "screen"]}
+{"name": "shot_new", "mode": "exec", "runs": 20, "median_ms": 9.12, "p95_ms": 9.61, "min_ms": 8.77, "max_ms": 9.73, "cmd": ["/home/user/justlinux/rust/target/release/justlinux", "screenshot", "screen"]}
+{"name":"autohide_old","vmrss_kb":11036,"vmhwm_kb":11036,"cpu_ticks_5s":2}
+{"name":"autohide_new","vmrss_kb":2712,"vmhwm_kb":2712,"cpu_ticks_5s":0}
+{"name":"spawns_stash6","old_processes":10,"new_processes":1,"new_ipc_requests":8}
+{"name":"sizes","rust_binary_bytes":1428032,"textual_pkg_bytes":6390877}

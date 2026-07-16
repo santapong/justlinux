@@ -5,7 +5,14 @@ with a set of **custom-built TUI panels** instead of the usual rofi-for-everythi
 every menu is a click-and-pick interface running in a glass kitty float,
 auto-themed from the wallpaper by wallust.
 
-## The custom apps (bin/)
+All the tools are **one Rust binary** (`rust/` → `justlinux`), installed as
+symlinks that keep the original script names. They were bash/python once
+(preserved in `legacy/bin/`); the Rust port opens the panels in ~3.5 ms
+instead of ~190 ms and talks to Hyprland's IPC socket directly instead of
+forking `hyprctl`+`python3`. Measurements, acceptance criteria and an
+honest bias check: [docs/MIGRATION.md](docs/MIGRATION.md).
+
+## The custom apps (one binary, many names)
 
 | App | Bind | What it is |
 |---|---|---|
@@ -16,7 +23,7 @@ auto-themed from the wallpaper by wallust.
 | `hypr-launcher menu` | `ALT+D` | Tools hub — every desktop tool as a tile with live status ("ufw is ON") and keybind hints |
 | `hypr-tools.sh` | — | The glue: dispatcher for all of the above + reminders (systemd timers), workspace stash, per-window hide/unhide, bar reorder, keybind cheatsheet |
 | `wallpaper.sh` | `ALT+SHIFT+W` | Random/pick wallpaper + wallust recolor of the whole desktop (hypr borders, waybar, rofi, swaync — live) |
-| `waybar-autohide.sh` | `ALT+B` pins | Auto-hide daemon — zero-fork Python, reads cursor from Hyprland's socket |
+| `waybar-autohide.sh` | `ALT+B` pins | Auto-hide daemon — reads the cursor from Hyprland's socket, ~2.6 MB resident |
 | `screenshot.sh` | `ALT+SHIFT+S` | Region/screen/all screenshots → file + clipboard + notification |
 
 ## Requirements
@@ -27,19 +34,23 @@ sudo apt install hyprland hyprpaper hyprlock hypridle waybar rofi swaync \
                  kitty thunar grim slurp wl-clipboard cliphist brightnessctl \
                  imagemagick lxpolkit network-manager-gnome sddm
 
+# rust toolchain (builds the panels; also needed for wallust)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
 # wallust (wallpaper -> colors) via cargo
 cargo install wallust --locked
-
-# TUI framework for the custom panels
-pip install --user --break-system-packages textual textual-image
 ```
+
+No python dependencies — the former `pip install textual textual-image`
+requirement is gone with the Rust port.
 
 Fonts: JetBrainsMono Nerd Font. Icon theme: Flat-Remix-Blue-Dark.
 
 ## Install
 
 ```sh
-./install.sh    # backs up existing configs, copies everything into place
+./install.sh    # backs up existing configs, builds the Rust binary,
+                # installs it + symlinks with the original tool names
 ```
 
 Then log into Hyprland (SDDM session). Notes:
@@ -65,5 +76,9 @@ Then log into Hyprland (SDDM session). Notes:
 | `ALT+1-0`, `ALT+SHIFT+1-0` | workspace switch / move |
 | `ALT+G`, `ALT+SHIFT+TAB` | window group (tabs) / cycle tabs |
 
-Everything was built and verified with automated tests (Textual pilot harness,
-`HYPRSETTINGS_DRYRUN=1`).
+Everything was built and verified with automated tests: 50 Rust unit tests
+plus 19 end-to-end tests that drive the real binary against a fake Hyprland
+IPC socket (`cd rust && cargo test`). The legacy Textual pilot harness and
+`HYPRSETTINGS_DRYRUN=1` contract carried over to the port. Benchmarks and
+their bias check live in [docs/MIGRATION.md](docs/MIGRATION.md); re-run
+them anywhere with `bench/run.sh`.

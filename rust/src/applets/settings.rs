@@ -25,8 +25,17 @@ use std::time::{Duration, Instant};
 
 pub const GAUGE_SLOTS: usize = 12;
 
-// key -> (hyprctl option, config path, min, max, label)
-pub const INTS: [(&str, &str, [&str; 2], i64, i64, &str); 4] = [
+/// (key, hyprctl option, config path, min, max, label)
+pub type IntSpec = (
+    &'static str,
+    &'static str,
+    [&'static str; 2],
+    i64,
+    i64,
+    &'static str,
+);
+
+pub const INTS: [IntSpec; 4] = [
     ("gaps_in", "general:gaps_in", ["general", "gaps_in"], 0, 40, "Inner gaps (between windows)"),
     ("gaps_out", "general:gaps_out", ["general", "gaps_out"], 0, 60, "Outer gaps (screen edges)"),
     ("border_size", "general:border_size", ["general", "border_size"], 0, 10, "Border thickness"),

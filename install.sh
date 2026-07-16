@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Install these dots: backs up anything it would overwrite, then copies.
+# The desktop tools are one Rust binary (rust/) installed as symlinks that
+# keep the original script names, so keybinds & waybar hooks stay valid.
 set -euo pipefail
 cd "$(dirname "$0")"
 STAMP=$(date +%Y%m%d-%H%M%S)
@@ -16,11 +18,26 @@ for c in config/*/; do
     echo "installed: ~/.config/$name"
 done
 
+# --- build the tools binary (cargo is already required, for wallust) ---
+command -v cargo >/dev/null || {
+    echo "cargo not found — install rustup (https://rustup.rs), it is also needed for wallust"
+    exit 1
+}
+export PATH="$HOME/.cargo/bin:$PATH"
+echo "building justlinux (rust/)…"
+(cd rust && cargo build --release)
+
 mkdir -p "$HOME/.local/bin"
-for f in bin/*; do
-    cp "$f" "$HOME/.local/bin/"
-    chmod +x "$HOME/.local/bin/$(basename "$f")"
-    echo "installed: ~/.local/bin/$(basename "$f")"
+install -m755 rust/target/release/justlinux "$HOME/.local/bin/justlinux"
+echo "installed: ~/.local/bin/justlinux"
+
+# applet symlinks — SAME names as the old scripts (hyprland.conf keybinds,
+# waybar exec hooks and `pgrep -f waybar-autohide.sh` depend on them)
+for name in hypr-tools.sh hypr-settings hypr-launcher wallpaper.sh \
+            screenshot.sh bar-toggle.sh waybar-autohide.sh \
+            av-status.sh fw-status.sh; do
+    ln -sf "$HOME/.local/bin/justlinux" "$HOME/.local/bin/$name"
+    echo "installed: ~/.local/bin/$name -> justlinux"
 done
 
 # terminal colors follow the wallpaper

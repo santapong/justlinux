@@ -3,9 +3,9 @@
 //! replaced a bash loop that forked `hyprctl` ~7×/second).
 //!
 //! Manual toggle while running: SIGUSR1 (bar-toggle sends it — ALT+B):
-//!   - if hidden  → show and PIN (auto-hide paused)
-//!   - if pinned  → hide and resume auto-hide
-//! Stop the daemon: pkill -f waybar-autohide (bar stays visible).
+//! if hidden → show and PIN (auto-hide paused); if pinned → hide and
+//! resume auto-hide. Stop the daemon with `pkill -f waybar-autohide`
+//! (the bar stays visible).
 
 use crate::{hypr, proc};
 use std::process::ExitCode;

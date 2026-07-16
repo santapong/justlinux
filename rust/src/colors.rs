@@ -4,6 +4,9 @@
 use crate::util;
 use std::collections::HashMap;
 
+// red/cyan are carried for palette completeness (the python dict did the
+// same); only some slots are referenced by the current UIs.
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct Palette {
     pub base: String,
