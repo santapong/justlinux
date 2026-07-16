@@ -1,0 +1,28 @@
+[package]
+name = "justlinux"
+version = "1.0.0"
+edition = "2021"
+description = "Hyprland desktop tools (settings panel, launcher, wallpaper, bar, daemons) — Rust port of the original bash/python suite"
+license = "MIT"
+
+[[bin]]
+name = "justlinux"
+path = "src/main.rs"
+
+[dependencies]
+# JSON for hyprctl IPC / waybar config / launcher state.
+# preserve_order keeps waybar's config key order intact when rewriting it.
+serde = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
+# TUIs (settings panel, launcher)
+ratatui = "0.29"
+crossterm = "0.28"
+# signals / kill / process handling
+libc = "0.2"
+# kitty graphics protocol payload encoding
+base64 = "0.22"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
