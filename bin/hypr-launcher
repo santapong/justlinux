@@ -1,0 +1,1029 @@
+#!/usr/bin/env python3
+"""Hypr Launcher — app / window / wallpaper pickers, Hypr Settings style.
+
+    hypr-launcher apps        launch an application   (icon grid)
+    hypr-launcher windows     focus an open window    (list)
+    hypr-launcher wallpaper   pick wallpaper          (thumbnail grid + LIVE preview)
+
+Apps & wallpaper show a Windows-style icon grid: real app icons and real
+wallpaper thumbnails, drawn with the kitty graphics protocol. Click to
+select, double-click or Enter to open. Arrow keys move box to box.
+The grid re-flows when you resize the window (ALT + right-drag).
+
+Wallpaper mode: the monitor step shows each monitor's CURRENT wallpaper
+so you can tell them apart; selecting an image previews it on the actual
+desktop instantly; Enter keeps it (recolors the desktop), Esc restores.
+"""
+
+import hashlib
+import json
+import time
+import os
+import re
+import shlex
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
+from textual.message import Message
+from textual.widgets import (Button, Footer, Input, Label, ListItem,
+                             ListView, Static)
+
+try:
+    from textual_image.widget import Image
+except Exception:
+    Image = None
+
+HOME = Path.home()
+COLORS_CSS = HOME / ".config/waybar/colors.css"
+HYPRPAPER = HOME / ".config/hypr/hyprpaper.conf"
+WALLPAPER_SH = str(HOME / ".local/bin/wallpaper.sh")
+CACHE = HOME / ".cache/hypr-launcher"
+ICON_CACHE = CACHE / "icons"
+THUMB_CACHE = CACHE / "thumbs"
+DRY = os.environ.get("HYPRSETTINGS_DRYRUN") == "1"
+ACTIONS = []  # recorded instead of executed under DRY (for tests)
+
+IMG_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
+MAX_TILES = 160
+COLS = 4  # initial; re-computed from window width on resize
+
+STATE_FILE = HOME / ".local/state/hypr-launcher/state.json"
+APPS_CACHE = CACHE / "apps.json"
+RESOLVE_CACHE_FILE = CACHE / "resolve.json"
+FAV_TITLE = "★ Favorites"
+REC_TITLE = "󰥔 Recent"
+
+
+def load_json(path, default):
+    try:
+        return json.loads(Path(path).read_text())
+    except Exception:
+        return default
+
+
+def save_json(path, data):
+    if DRY:
+        return
+    try:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(data))
+    except OSError:
+        pass
+
+
+def load_state():
+    st = load_json(STATE_FILE, {})
+    st.setdefault("favorites", [])
+    st.setdefault("recent", {})
+    return st
+
+
+def read_colors():
+    colors = {
+        "base": "#1e1e2e", "surface": "#45475a", "text": "#cdd6f4",
+        "subtext": "#a6adc8", "accent": "#89b4fa", "red": "#f38ba8",
+        "green": "#a6e3a1", "yellow": "#f9e2af", "cyan": "#94e2d5",
+    }
+    try:
+        for m in re.finditer(r"@define-color\s+(\w+)\s+(#[0-9a-fA-F]{6})", COLORS_CSS.read_text()):
+            colors[m.group(1)] = m.group(2)
+    except OSError:
+        pass
+    return colors
+
+
+C = read_colors()
+
+
+def run_detached(*cmd):
+    if DRY:
+        ACTIONS.append(cmd)
+        return
+    subprocess.Popen(cmd, start_new_session=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def hyprctl(*args):
+    if DRY:
+        ACTIONS.append(("hyprctl",) + args)
+        return ""
+    return subprocess.run(["hyprctl", *args], capture_output=True,
+                          text=True).stdout
+
+
+# ---------------- icons ----------------
+FLATPAK_BASES = [Path("/var/lib/flatpak/exports/share"),
+                 HOME / ".local/share/flatpak/exports/share"]
+
+
+def build_icon_index():
+    """icon-name -> {"svg": path, "png": path}; Flat-Remix SVG preferred."""
+    idx = {}
+    fr = Path("/usr/share/icons/Flat-Remix-Blue-Dark/apps/scalable")
+    if fr.is_dir():
+        for f in fr.iterdir():
+            if f.suffix == ".svg":
+                idx.setdefault(f.stem, {})["svg"] = str(f)
+    png_bases = [Path("/usr/share/icons/hicolor"),
+                 HOME / ".local/share/icons/hicolor"] + \
+                [b / "icons/hicolor" for b in FLATPAK_BASES]
+    for base in png_bases:
+        if not base.is_dir():
+            continue
+        for f in base.rglob("*"):
+            if f.suffix == ".png":
+                m = re.search(r"/(\d+)x\1/", str(f))
+                size = int(m.group(1)) if m else 32
+                d = idx.setdefault(f.stem, {})
+                if 24 <= size <= 256 and size >= d.get("png_size", 0):
+                    d["png"], d["png_size"] = str(f), size
+            elif f.suffix == ".svg":
+                idx.setdefault(f.stem, {}).setdefault("svg", str(f))
+    pm = Path("/usr/share/pixmaps")
+    if pm.is_dir():
+        for f in pm.glob("*.png"):
+            idx.setdefault(f.stem, {}).setdefault("png", str(f))
+    return idx
+
+
+ICON_IDX = None
+RESOLVE_CACHE = load_json(RESOLVE_CACHE_FILE, {})
+_resolve_dirty = False
+
+
+def rasterize_svg(svg_path):
+    """SVG -> cached 72px PNG via ImageMagick (one-time per icon)."""
+    if DRY:
+        return None
+    out = ICON_CACHE / (hashlib.md5(svg_path.encode()).hexdigest() + ".png")
+    if out.exists():
+        return str(out)
+    ICON_CACHE.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(["magick", "-background", "none", svg_path,
+                        "-resize", "72x72", str(out)],
+                       capture_output=True, timeout=15)
+    return str(out) if r.returncode == 0 and out.exists() else None
+
+
+def resolve_icon(icon_value):
+    """Icon= value from a .desktop file -> path to a PNG, or None.
+    Results are cached on disk so later launches never walk icon themes."""
+    global ICON_IDX, _resolve_dirty
+    if not icon_value:
+        return None
+    if icon_value in RESOLVE_CACHE:
+        hit = RESOLVE_CACHE[icon_value]
+        if hit is None or os.path.exists(hit):
+            return hit
+    result = _resolve_icon_uncached(icon_value)
+    RESOLVE_CACHE[icon_value] = result
+    _resolve_dirty = True
+    return result
+
+
+def _resolve_icon_uncached(icon_value):
+    global ICON_IDX
+    p = Path(icon_value)
+    if p.is_absolute() and p.exists():
+        return rasterize_svg(str(p)) if p.suffix == ".svg" else str(p)
+    if ICON_IDX is None:
+        ICON_IDX = build_icon_index()
+    cand = ICON_IDX.get(icon_value) or ICON_IDX.get(icon_value.lower())
+    if not cand:
+        return None
+    if "svg" in cand:
+        png = rasterize_svg(cand["svg"])
+        if png:
+            return png
+    return cand.get("png")
+
+
+_default_icon = "unset"
+
+
+def default_app_icon():
+    """Theme's generic app icon, for apps whose own icon can't be found."""
+    global _default_icon
+    if _default_icon == "unset":
+        _default_icon = None
+        for name in ("application-default-icon", "application-x-executable",
+                     "system-run"):
+            _default_icon = resolve_icon(name)
+            if _default_icon:
+                break
+    return _default_icon
+
+
+def flush_resolve_cache():
+    global _resolve_dirty
+    if _resolve_dirty:
+        save_json(RESOLVE_CACHE_FILE, RESOLVE_CACHE)
+        _resolve_dirty = False
+
+
+def make_thumb(img_path):
+    """Wallpaper image -> cached 320x180-ish thumbnail PNG."""
+    if DRY or not img_path:
+        return None
+    try:
+        st = os.stat(img_path)
+        key = hashlib.md5(f"{img_path}:{st.st_mtime_ns}".encode()).hexdigest()
+        out = THUMB_CACHE / (key + ".png")
+        if out.exists():
+            return str(out)
+        THUMB_CACHE.mkdir(parents=True, exist_ok=True)
+        from PIL import Image as PILImage
+        im = PILImage.open(img_path)
+        im.draft("RGB", (640, 360))
+        im.thumbnail((320, 180))
+        im.convert("RGB").save(out)
+        return str(out)
+    except Exception:
+        return None
+
+
+# ---------------- apps ----------------
+def app_dirs():
+    """All .desktop locations: system, XDG_DATA_DIRS, flatpak, user (last wins)."""
+    dirs = [Path("/usr/share/applications"),
+            Path("/usr/local/share/applications")]
+    for d in os.environ.get("XDG_DATA_DIRS", "").split(":"):
+        if d:
+            dirs.append(Path(d) / "applications")
+    dirs += [b / "applications" for b in FLATPAK_BASES]
+    dirs.append(HOME / ".local/share/applications")
+    seen, out = set(), []
+    for d in dirs:
+        if d not in seen:
+            seen.add(d)
+            out.append(d)
+    return out
+
+
+def desktop_entries():
+    dirs = app_dirs()
+    stamp = [[str(d), d.stat().st_mtime if d.is_dir() else 0] for d in dirs]
+    cached = load_json(APPS_CACHE, None)
+    if cached and cached.get("stamp") == stamp:
+        return cached["entries"]
+    entries = {}
+    for d in dirs:  # later dirs override earlier (user overrides system)
+        if not d.is_dir():
+            continue
+        for f in sorted(d.glob("*.desktop")):
+            try:
+                text = f.read_text(errors="ignore")
+            except OSError:
+                continue
+            in_main, e = False, {}
+            for line in text.splitlines():
+                line = line.strip()
+                if line.startswith("["):
+                    in_main = line == "[Desktop Entry]"
+                    continue
+                if in_main and "=" in line:
+                    k, v = line.split("=", 1)
+                    e.setdefault(k.strip(), v.strip())
+            if e.get("Type") != "Application":
+                continue
+            if "true" in (e.get("NoDisplay", "").lower(), e.get("Hidden", "").lower()):
+                continue
+            name, ex = e.get("Name"), e.get("Exec")
+            if not name or not ex:
+                continue
+            entries[f.stem] = {
+                "kind": "app",
+                "label": name,
+                "detail": f.stem,
+                "icon": e.get("Icon", ""),
+                "exec": ex,
+                "terminal": e.get("Terminal", "").lower() == "true",
+                "cats": e.get("Categories", ""),
+            }
+    return sorted(entries.values(), key=lambda x: x["label"].lower())
+
+
+# (match order matters: first hit wins)
+CATEGORY_GROUPS = [
+    ("Security",     "󰕥 Security",     ("Security", "X-Kali")),
+    ("Internet",     "󰖟 Internet",     ("Network", "WebBrowser", "Email", "Chat", "InstantMessaging")),
+    ("Development",  " Development",  ("Development", "IDE", "TextEditor")),
+    ("Media",        "󰝚 Media",        ("AudioVideo", "Audio", "Video", "Player", "Recorder")),
+    ("Graphics",     "󰋩 Graphics",     ("Graphics", "Photography")),
+    ("Games",        "󰊗 Games",        ("Game",)),
+    ("Office",       "󰈙 Office",       ("Office", "WordProcessor", "Spreadsheet", "Presentation")),
+    ("Science",      "󰭹 Science",      ("Science", "Education", "Math")),
+    ("System",       " System",       ("Settings", "System", "Monitor", "PackageManager")),
+    ("Utilities",    "󰘵 Utilities",    ("Utility", "Accessibility", "FileManager", "TerminalEmulator", "Archiving")),
+]
+
+
+def category_of(entry):
+    """(sort_index, section_title) for an app entry."""
+    cats = entry.get("cats", "")
+    for i, (_key, title, needles) in enumerate(CATEGORY_GROUPS):
+        if any(n in cats for n in needles):
+            return i, title
+    return len(CATEGORY_GROUPS), "󰘔 Other"
+
+
+def launch_app(entry):
+    argv = [a for a in shlex.split(entry["exec"]) if not a.startswith("%")]
+    if entry["terminal"]:
+        argv = ["kitty", "-e"] + argv
+    run_detached(*argv)
+
+
+# ---------------- windows ----------------
+def window_entries():
+    if DRY:
+        return [{"label": "kitty — ~", "detail": "ws 1", "icon": "",
+                 "addr": "0xfake1"},
+                {"label": "Brave — GitHub", "detail": "ws 2", "icon": "󰖟",
+                 "addr": "0xfake2"}]
+    try:
+        clients = json.loads(subprocess.run(["hyprctl", "clients", "-j"],
+                                            capture_output=True, text=True).stdout)
+    except Exception:
+        return []
+    out = []
+    for c in clients:
+        ws = c.get("workspace", {}).get("name", "?")
+        if ws == "special:hidden":  # hidden windows have their own restore flow
+            continue
+        title = c.get("title") or c.get("class") or "?"
+        out.append({"label": title[:60],
+                    "detail": f"{c.get('class', '?')} · ws {ws}",
+                    "icon": "󰖯",
+                    "addr": c.get("address", "")})
+    return sorted(out, key=lambda x: x["detail"])
+
+
+def focus_window(entry):
+    hyprctl("dispatch", "focuswindow", f"address:{entry['addr']}")
+
+
+# ---------------- wallpaper ----------------
+def current_wallpapers():
+    """[(monitor_or_empty, full_path), ...] from hyprpaper.conf"""
+    pairs, mon = [], None
+    try:
+        for line in HYPRPAPER.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("monitor"):
+                mon = line.split("=", 1)[1].strip()
+            elif line.startswith("path") and mon is not None:
+                pairs.append((mon, line.split("=", 1)[1].strip()))
+                mon = None
+    except OSError:
+        pass
+    return pairs
+
+
+def monitor_info():
+    """[{name, x, y, focused}, ...]"""
+    if DRY:
+        return [{"name": "DP-1", "x": 0, "y": 0, "focused": True},
+                {"name": "HDMI-A-2", "x": 1600, "y": 0, "focused": False},
+                {"name": "HDMI-A-1", "x": 0, "y": 900, "focused": False}]
+    try:
+        return [{"name": m["name"], "x": m["x"], "y": m["y"],
+                 "focused": m.get("focused", False)}
+                for m in json.loads(subprocess.run(
+                    ["hyprctl", "monitors", "-j"],
+                    capture_output=True, text=True).stdout)]
+    except Exception:
+        return []
+
+
+def wallpaper_root():
+    for cand in (HOME / "Pictures/wallpaper", HOME / "Pictures/Wallpapers",
+                 HOME / "Pictures", HOME):
+        if cand.is_dir():
+            return cand
+    return HOME
+
+
+def folder_contents(d):
+    """[.. , folders..., images...] as tile objects."""
+    objs = []
+    if d != Path("/") and d != d.parent:
+        objs.append({"kind": "up", "label": "..", "path": str(d.parent)})
+    try:
+        items = sorted(d.iterdir(), key=lambda p: p.name.lower())
+    except OSError:
+        items = []
+    for p in items:
+        if p.name.startswith("."):
+            continue
+        if p.is_dir():
+            objs.append({"kind": "dir", "label": p.name, "path": str(p)})
+    for p in items:
+        if not p.name.startswith(".") and p.suffix.lower() in IMG_EXTS:
+            objs.append({"kind": "img", "label": p.name, "path": str(p)})
+    return objs[:MAX_TILES]
+
+
+GLYPHS = {"app": "󰘔", "dir": "󰉋", "up": "󰁍", "img": "󰋩", "mon": "󰍹", "tool": "󰒓"}
+
+TOOLS_SH = str(HOME / ".local/bin/hypr-tools.sh")
+
+
+def _fw_on():
+    try:
+        return "ENABLED=yes" in Path("/etc/ufw/ufw.conf").read_text()
+    except OSError:
+        return False
+
+
+def _autohide_on():
+    if DRY:
+        return False
+    return subprocess.run(["pgrep", "-f", "waybar-autohide.sh"],
+                          capture_output=True).returncode == 0
+
+
+def tool_entries():
+    """Every desktop tool as a tile: label, hint (sub), glyph, command."""
+    fw = "ON" if (not DRY and _fw_on()) else "OFF"
+    ah = "ON" if _autohide_on() else "OFF"
+    t = [
+        ("󰀻", "App launcher",        "ALT+R",                [TOOLS_SH, "apps"]),
+        ("󰖯", "Window switcher",     "ALT+W",                [TOOLS_SH, "windows"]),
+        ("󰉋", "File manager",        "ALT+E",                ["thunar"]),
+        ("󰸉", "Pick wallpaper",      "ALT+SHIFT+W random",   [TOOLS_SH, "wallpaper"]),
+        ("󰒝", "Random wallpaper",    "recolors everything",  [str(HOME / ".local/bin/wallpaper.sh")]),
+        ("",  "Settings panel",      "ALT+X",                [TOOLS_SH, "settings"]),
+        ("⏻",  "Power",              "ALT+ESC",              [TOOLS_SH, "power"]),
+        ("󰅶", "New reminder",        "ALT+T",                [TOOLS_SH, "remind"]),
+        ("󰃰", "List reminders",      "view / cancel",        [TOOLS_SH, "reminders"]),
+        ("󰅐", "Clock & timezone",    "click the clock too",  [TOOLS_SH, "clock"]),
+        ("󰕥", "Firewall",            f"ufw is {fw}",         [TOOLS_SH, "firewall"]),
+        ("󰃤", "Antivirus scan",      "ClamAV",               [TOOLS_SH, "clamav"]),
+        ("󰌌", "Keybinds",            "ALT+K · view / edit",  [TOOLS_SH, "keys"]),
+        ("󰘸", "Stash workspace",     "ALT+A · hide all",     [TOOLS_SH, "stash"]),
+        ("󰖰", "Hide focused window", "ALT+SHIFT+A",          [TOOLS_SH, "hide-window"]),
+        ("󰗐", "Unhide window…",      "ALT+CTRL+A",           [TOOLS_SH, "unhide-window"]),
+        ("󰜬", "Reorder bar buttons", "pick & place",         [TOOLS_SH, "reorder"]),
+        ("󰊠", "Hide / show bar",     "ALT+B",                [str(HOME / ".local/bin/bar-toggle.sh")]),
+        ("󰗕", "Bar auto-hide",       f"now {ah} · toggles",  [TOOLS_SH, "autohide"]),
+        ("󰑓", "Restart bar",         "waybar + auto-hide",   [TOOLS_SH, "restart-bar"]),
+        ("",  "Edit Hyprland config", "opens nvim + reload", [TOOLS_SH, "edit-hypr"]),
+        ("",  "Edit bar config",      "opens nvim + restart", [TOOLS_SH, "edit-bar"]),
+        ("󰑓", "Reload Hyprland",     "apply config changes", [TOOLS_SH, "reload"]),
+    ]
+    return [{"kind": "tool", "glyph": g, "label": n, "detail": h, "sub": h,
+             "cmd": c} for g, n, h, c in t]
+
+
+# ---------------- widgets ----------------
+class Tile(Vertical):
+    """One grid cell: image (or big glyph) + name (+ optional sub-line).
+    Click = select, double-click = open."""
+
+    class Chosen(Message):
+        def __init__(self, tile):
+            self.tile = tile
+            super().__init__()
+
+    class Activated(Message):
+        def __init__(self, tile):
+            self.tile = tile
+            super().__init__()
+
+    def __init__(self, obj, idx, image_path=None):
+        super().__init__(id=f"tile-{idx}", classes="tile")
+        self.obj = obj
+        self.idx = idx
+        self._image_path = image_path
+
+    def compose(self) -> ComposeResult:
+        if self._image_path and Image is not None:
+            yield Image(self._image_path, classes="tile-img")
+        else:
+            yield Static(self.obj.get("glyph") or GLYPHS.get(self.obj["kind"], "󰘔"),
+                         classes="tile-glyph")
+        star = "★ " if self.obj.get("fav") else ""
+        yield Label(f"{star}{self.obj['label']}"[:36], classes="tile-name")
+        if self.obj.get("sub"):
+            yield Label(self.obj["sub"][:36], classes="tile-sub")
+
+    class Starred(Message):
+        def __init__(self, tile):
+            self.tile = tile
+            super().__init__()
+
+    def on_click(self, event):
+        event.stop()
+        if getattr(event, "button", 1) == 3:      # right-click = toggle favorite
+            self.post_message(self.Starred(self))
+        elif event.chain >= 2:
+            self.post_message(self.Activated(self))
+        else:
+            self.post_message(self.Chosen(self))
+
+
+class SectionHeader(Static):
+    """Clickable category row: '▸ Internet 12' — click to expand/collapse."""
+
+    class Toggled(Message):
+        def __init__(self, title):
+            self.title = title
+            super().__init__()
+
+    def __init__(self, title, count, expanded, idx):
+        arrow = "▾" if expanded else "▸"
+        super().__init__(
+            f"{arrow} {title}  [{C['subtext']}]{count} apps — click to "
+            f"{'hide' if expanded else 'show'}[/]",
+            classes="section", id=f"sec-{idx}")
+        self.title_key = title
+
+    def on_click(self, event):
+        event.stop()
+        self.post_message(self.Toggled(self.title_key))
+
+
+class FilterInput(Input):
+    """Left/right navigate the grid while the filter is empty; once there is
+    text they edit it as usual."""
+
+    async def _on_key(self, event):
+        if event.key in ("left", "right") and not self.value:
+            event.stop()
+            event.prevent_default()
+            self.app.action_move(1 if event.key == "right" else -1)
+            return
+        await super()._on_key(event)
+
+
+class Item(ListItem):
+    def __init__(self, obj):
+        detail = f"[{C['subtext']}]{obj['detail']}[/]" if obj.get("detail") else ""
+        super().__init__(Horizontal(
+            Label(f"{obj['icon']}  {obj['label']}", classes="item-label"),
+            Label(detail, classes="item-detail")))
+        self.obj = obj
+
+
+class HyprLauncher(App):
+    ENABLE_COMMAND_PALETTE = False
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("enter", "activate", "Open", show=False),
+        Binding("down", "move_row(1)", "Down", show=False),
+        Binding("up", "move_row(-1)", "Up", show=False),
+        Binding("left", "move(-1)", "Left", show=False),
+        Binding("right", "move(1)", "Right", show=False),
+    ]
+    CSS = f"""
+    Screen {{ background: ansi_default; color: {C['text']}; }}
+    #hdr {{ height: 1; padding: 0 2; background: transparent; margin-top: 1; }}
+    Input {{
+        margin: 1 2 0 2; background: transparent;
+        border: round {C['surface']}; color: {C['text']};
+    }}
+    Input:focus {{ border: round {C['accent']}; }}
+    Input .input--placeholder {{ color: {C['subtext']}; }}
+
+    #scroll {{ margin: 1 1 0 2; background: transparent;
+               scrollbar-size-vertical: 1;
+               scrollbar-color: {C['surface']}; scrollbar-background: transparent; }}
+    .tilegrid {{ layout: grid; grid-size: {COLS}; grid-gutter: 0 1;
+             height: auto; background: transparent; }}
+    #gridwrap {{ height: auto; background: transparent; }}
+    .section {{ height: 1; padding: 0 1; margin: 1 0 0 0;
+                color: {C['accent']}; text-style: bold; }}
+    .section:hover {{ background: {C['surface']} 40%; }}
+    Screen.mode-apps .tile-img {{ height: 3; }}
+    .tile {{ height: auto; background: transparent;
+             border: round transparent; align: center top; }}
+    .tile.selected {{ border: round {C['accent']}; background: {C['surface']} 35%; }}
+    .tile-img {{ height: 6; width: 100%; }}
+    .tile-glyph {{ height: 6; width: 100%; content-align: center middle;
+                   text-align: center; color: {C['accent']}; }}
+    .tile-name {{ height: 1; width: 100%; text-align: center;
+                  color: {C['text']}; }}
+    .tile-sub {{ height: 1; width: 100%; text-align: center;
+                 color: {C['subtext']}; }}
+    Screen.mode-menu .tile-glyph {{ height: 2; }}
+
+    ListView {{ margin: 1 2; background: transparent;
+                scrollbar-size-vertical: 1;
+                scrollbar-color: {C['surface']}; scrollbar-background: transparent; }}
+    ListItem {{ background: transparent; padding: 0 1;
+                border-left: thick transparent; height: 1; }}
+    ListItem Horizontal {{ height: 1; background: transparent; }}
+    ListItem Label {{ height: 1; }}
+    ListItem.-highlight {{ background: {C['surface']};
+                           border-left: thick {C['accent']}; }}
+    .item-label {{ width: 1fr; }}
+    .item-detail {{ width: auto; }}
+
+    .hint {{ color: {C['subtext']}; padding: 0 3; height: 1; }}
+    #wp-actions {{ height: 3; padding: 0 2; }}
+    Button {{ background: transparent; border: round {C['surface']};
+              color: {C['text']}; margin-right: 1; }}
+    Button:hover, Button:focus {{ border: round {C['accent']}; color: {C['accent']};
+                                  background: transparent; }}
+    Footer {{ background: transparent; }}
+    FooterKey {{ background: transparent; color: {C['subtext']}; }}
+    FooterKey > .footer-key--key {{ color: {C['accent']}; background: transparent; }}
+    FooterKey > .footer-key--description {{ color: {C['subtext']};
+                                            background: transparent; }}
+    """
+
+    def __init__(self, mode):
+        super().__init__(ansi_color=True)
+        self.mode = mode
+        self.entries = []
+        self.tiles = []
+        self.sel = -1
+        self.cols = COLS
+        self.state = load_state()
+        # favorites & recent start open; other categories start collapsed
+        self.expanded = {FAV_TITLE, REC_TITLE}
+        self._focus_section = None
+        self._filter_timer = None
+        # wallpaper state
+        self.wp_target = None
+        self.wp_orig = current_wallpapers()
+        self.wp_previewed = False
+        self.cwd = wallpaper_root()
+
+    # ---------- layout ----------
+    def compose(self) -> ComposeResult:
+        titles = {"apps": ("󰀻", "Apps — double-click or Enter to open"),
+                  "windows": ("󰖯", "Windows — click or type to filter"),
+                  "wallpaper": ("󰸉", "Wallpaper"),
+                  "menu": ("󰍜", "Tools — double-click or Enter to run")}
+        icon, title = titles[self.mode]
+        yield Static(f"[bold {C['accent']}]{icon}  {title}[/]", id="hdr")
+        if self.mode in ("apps", "menu"):
+            yield FilterInput(placeholder="filter…  (Enter open · right-click a box = ★ favorite · Esc close)",
+                              id="filter")
+            with VerticalScroll(id="scroll") as vs:
+                vs.can_focus = False  # keep focus on the filter; arrows drive the grid
+                yield Vertical(id="gridwrap")
+        elif self.mode == "windows":
+            yield FilterInput(placeholder="filter…  (↑↓ move · Enter focus · Esc close)",
+                              id="filter")
+            yield ListView(id="results")
+        else:
+            yield Static("", id="wp-where", classes="hint")
+            with VerticalScroll(id="scroll") as vs:
+                vs.can_focus = False
+                yield Vertical(id="gridwrap")
+            with Horizontal(id="wp-actions"):
+                yield Button("󰸉 Set selected", id="wp_set")
+                yield Button("󰒝 Slideshow from this folder", id="wp_folder")
+                yield Button("󰕌 Restore & close", id="wp_cancel")
+        yield Footer()
+
+    def on_mount(self):
+        self.screen.add_class(f"mode-{self.mode}")
+        if self.mode in ("apps", "menu"):
+            self.entries = desktop_entries() if self.mode == "apps" else tool_entries()
+            self.call_later(self.refilter, "")
+            self.query_one("#filter", Input).focus()
+        elif self.mode == "windows":
+            self.entries = window_entries()
+            self.call_later(self.refilter_list, "")
+            self.query_one("#filter", Input).focus()
+        else:
+            self.run_worker(self.show_monitors(), exclusive=True)
+
+    def on_resize(self, _event=None):
+        """Re-flow the grid when the window is resized (ALT + right-drag)."""
+        # Boxes per row: apps 8 (compact), tools 6 (two text lines),
+        # wallpaper 4 (thumbs need width). HYPR_LAUNCHER_COLS overrides.
+        desired = {"apps": 10, "menu": 6}.get(self.mode, 4)
+        override = os.environ.get("HYPR_LAUNCHER_COLS")
+        if override and override.isdigit():
+            desired = max(2, min(12, int(override)))
+        cols = max(2, min(desired, self.size.width // 14))
+        if cols != self.cols:
+            self.cols = cols
+        for grid in self.query(".tilegrid"):
+            grid.styles.grid_size_columns = cols
+
+    # ---------- grid ----------
+    async def fill_grid(self, objs=None, groups=None):
+        wrap = self.query_one("#gridwrap", Vertical)
+        await wrap.remove_children()
+        if groups is None:
+            groups = [(None, objs)]
+        # cap total tiles across all groups
+        budget = MAX_TILES
+        capped = []
+        for title, gobjs in groups:
+            take = gobjs[:budget]
+            budget -= len(take)
+            if take:
+                capped.append((title, take))
+        flat = [o for t, gobjs in capped for o in gobjs
+                if t is None or t in self.expanded]
+
+        def img_for(o):
+            if o["kind"] == "app":
+                return resolve_icon(o["icon"]) or default_app_icon()
+            if o["kind"] in ("img", "mon"):
+                return make_thumb(o.get("path"))
+            return None
+
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            paths = dict(zip(map(id, flat), ex.map(img_for, flat)))
+        self.tiles = []
+        widgets = []
+        for si, (title, gobjs) in enumerate(capped):
+            expanded = title is None or title in self.expanded
+            if title:
+                widgets.append(SectionHeader(title, len(gobjs), expanded, si))
+            if not expanded:
+                continue
+            grid = Grid(classes="tilegrid")
+            grid.styles.grid_size_columns = self.cols
+            tiles = [Tile(o, len(self.tiles) + i, paths.get(id(o)))
+                     for i, o in enumerate(gobjs)]
+            self.tiles.extend(tiles)
+            grid._pending_tiles = tiles
+            widgets.append(grid)
+        if widgets:
+            await wrap.mount_all(widgets)
+            for w in widgets:
+                if isinstance(w, Grid):
+                    await w.mount_all(w._pending_tiles)
+        self.on_resize()
+        flush_resolve_cache()
+        self.sel = -1
+        if self.tiles:
+            self.select(0)
+
+    def select(self, i, preview=True):
+        if not self.tiles:
+            return
+        i = max(0, min(len(self.tiles) - 1, i))
+        if 0 <= self.sel < len(self.tiles):
+            self.tiles[self.sel].remove_class("selected")
+        self.sel = i
+        tile = self.tiles[i]
+        tile.add_class("selected")
+        tile.scroll_visible()
+        if preview and self.mode == "wallpaper" and tile.obj["kind"] == "img":
+            self.preview(tile.obj["path"])
+
+    def activate(self, i):
+        if not (0 <= i < len(self.tiles)):
+            return
+        obj = self.tiles[i].obj
+        if self.mode == "apps":
+            rec = self.state["recent"]
+            rec[obj["detail"]] = time.time()
+            if len(rec) > 20:   # keep the 20 most recent
+                for k, _ in sorted(rec.items(), key=lambda kv: kv[1])[:len(rec) - 20]:
+                    del rec[k]
+            save_json(STATE_FILE, self.state)
+            launch_app(obj)
+            self.exit()
+        elif obj["kind"] == "tool":
+            run_detached(*obj["cmd"])
+            self.exit()
+        elif obj["kind"] == "mon":
+            self.wp_target = obj["target"]
+            self.run_worker(self.show_folder(), exclusive=True)
+        elif obj["kind"] in ("dir", "up"):
+            self.cwd = Path(obj["path"])
+            self.run_worker(self.show_folder(), exclusive=True)
+        elif obj["kind"] == "img":
+            args = [WALLPAPER_SH, obj["path"]]
+            if self.wp_target:
+                args.append(self.wp_target)
+            run_detached(*args)
+            self.exit()
+
+    # ---------- apps filtering ----------
+    async def refilter(self, query):
+        q = query.lower().strip()
+
+        def rank(name):
+            nl = name.lower()
+            if not q:
+                return 3
+            if nl.startswith(q):
+                return 0
+            if any(w.startswith(q) for w in nl.split()):
+                return 1
+            if q in nl:
+                return 2
+            return None
+
+        ranked = []
+        for i, e in enumerate(self.entries):
+            r = rank(e["label"])
+            if r is None and q and q in e["detail"].lower():
+                r = 2
+            if r is not None:
+                # apps: alphabetical; menu: keep the curated grouping order
+                key2 = e["label"].lower() if self.mode == "apps" else i
+                ranked.append((r, key2, e))
+        ranked.sort(key=lambda t: (t[0], t[1]))
+        matches = [e for _, _, e in ranked]
+        if self.mode == "apps" and not q:
+            fav_set = set(self.state["favorites"])
+            recent = self.state["recent"]
+            for e in matches:
+                e["fav"] = e["detail"] in fav_set
+            group_list = []
+            favs = [dict(e, _grp=FAV_TITLE) for e in matches if e["fav"]]
+            if favs:
+                group_list.append((FAV_TITLE, favs))
+            recs = [e for e in matches if e["detail"] in recent and not e["fav"]]
+            recs.sort(key=lambda e: -recent.get(e["detail"], 0))
+            recs = [dict(e, _grp=REC_TITLE) for e in recs[:8]]
+            if recs:
+                group_list.append((REC_TITLE, recs))
+            groups = {}
+            for e in matches:
+                idx2, title = category_of(e)
+                e["_grp"] = title
+                groups.setdefault((idx2, title), []).append(e)
+            group_list += [(t, es) for (_, t), es in sorted(groups.items())]
+            await self.fill_grid(groups=group_list)
+            want = self._focus_section
+            self._focus_section = None
+            if want:
+                for i, t in enumerate(self.tiles):
+                    if t.obj.get("_grp") == want:
+                        self.select(i, preview=False)
+                        break
+        else:
+            await self.fill_grid(matches)
+
+    # ---------- windows filtering (list) ----------
+    async def refilter_list(self, query):
+        q = query.lower().strip()
+        matches = [e for e in self.entries
+                   if not q or q in e["label"].lower() or q in e["detail"].lower()]
+        lv = self.query_one("#results", ListView)
+        await lv.clear()
+        await lv.extend(Item(e) for e in matches[:MAX_TILES])
+        lv.index = 0
+
+    def on_input_changed(self, event: Input.Changed):
+        value = event.value
+        if self._filter_timer is not None:
+            self._filter_timer.stop()
+
+        def apply():
+            self._filter_timer = None
+            coro = (self.refilter(value) if self.mode in ("apps", "menu")
+                    else self.refilter_list(value))
+            self.run_worker(coro, exclusive=True)
+
+        self._filter_timer = self.set_timer(0.15, apply)
+
+    def on_input_submitted(self, _event):
+        self.action_activate()
+
+    # ---------- navigation ----------
+    def action_move(self, step: int):
+        if self.mode != "windows" and self.tiles:
+            self.select(self.sel + step)
+
+    def action_move_row(self, step: int):
+        if self.mode == "windows":
+            try:
+                lv = self.query_one("#results", ListView)
+            except Exception:
+                return
+            if lv.children:
+                lv.index = max(0, min(len(lv.children) - 1, (lv.index or 0) + step))
+        elif self.tiles:
+            self.select(self.sel + step * self.cols)
+
+    def action_activate(self):
+        if self.mode == "windows":
+            lv = self.query_one("#results", ListView)
+            item = lv.highlighted_child or (lv.children[0] if lv.children else None)
+            if isinstance(item, Item):
+                focus_window(item.obj)
+                self.exit()
+        else:
+            self.activate(self.sel)
+
+    def on_list_view_selected(self, event: ListView.Selected):
+        if self.mode == "windows" and isinstance(event.item, Item):
+            focus_window(event.item.obj)
+            self.exit()
+
+    def on_section_header_toggled(self, msg: SectionHeader.Toggled):
+        if msg.title in self.expanded:
+            self.expanded.discard(msg.title)
+        else:
+            self.expanded.add(msg.title)
+            self._focus_section = msg.title
+        query = self.query_one("#filter", Input).value
+        self.run_worker(self.refilter(query), exclusive=True)
+
+    def on_tile_starred(self, msg: Tile.Starred):
+        if self.mode != "apps":
+            return
+        d = msg.tile.obj["detail"]
+        if d in self.state["favorites"]:
+            self.state["favorites"].remove(d)
+            note = "removed from ★ Favorites"
+        else:
+            self.state["favorites"].append(d)
+            note = "added to ★ Favorites"
+        save_json(STATE_FILE, self.state)
+        self.notify(f"{msg.tile.obj['label']} {note}")
+        q = self.query_one("#filter", Input).value
+        self.run_worker(self.refilter(q), exclusive=True)
+
+    def on_tile_chosen(self, msg: Tile.Chosen):
+        self.select(msg.tile.idx)
+
+    def on_tile_activated(self, msg: Tile.Activated):
+        self.select(msg.tile.idx, preview=False)
+        self.activate(msg.tile.idx)
+
+    # ---------- wallpaper ----------
+    async def show_monitors(self):
+        """Step 1: pick a monitor — each tile shows that monitor's CURRENT
+        wallpaper plus where it sits (left/right/top/bottom)."""
+        self.query_one("#wp-actions").display = False
+        self.query_one("#wp-where", Static).update(
+            "Which monitor? Each box shows what that monitor wears right now.")
+        cur = dict(self.wp_orig)
+        mons = monitor_info()
+        xs = sorted({m["x"] for m in mons})
+        ys = sorted({m["y"] for m in mons})
+        objs = [{"kind": "mon", "label": "All monitors", "target": "",
+                 "sub": "same image everywhere",
+                 "path": cur.get("", next(iter(cur.values()), ""))}]
+        for m in mons:
+            pos = []
+            if len(ys) > 1:
+                pos.append("top" if m["y"] == ys[0] else "bottom")
+            if len(xs) > 1:
+                pos.append("left" if m["x"] == xs[0]
+                           else ("right" if m["x"] == xs[-1] else "middle"))
+            sub = " ".join(pos) or "only monitor"
+            if m.get("focused"):
+                sub += " · ★ you are here"
+            objs.append({"kind": "mon", "label": m["name"], "target": m["name"],
+                         "sub": sub, "path": cur.get(m["name"], cur.get("", ""))})
+        await self.fill_grid(objs)
+
+    async def show_folder(self):
+        self.query_one("#wp-actions").display = True
+        where = self.wp_target or "all monitors"
+        pretty = str(self.cwd).replace(str(HOME), "~")
+        self.query_one("#wp-where", Static).update(
+            f"[{C['accent']}]{where}[/] · {pretty} — select previews live · "
+            f"Enter keeps it · Esc restores")
+        await self.fill_grid(folder_contents(self.cwd))
+
+    def preview(self, path):
+        self.wp_previewed = True
+        targets = [self.wp_target] if self.wp_target else \
+                  [m for m, _ in self.wp_orig] or [""]
+        for m in targets:
+            hyprctl("hyprpaper", "wallpaper", f"{m},{path}")
+
+    def restore_original(self):
+        if not self.wp_previewed:
+            return
+        for m, p in self.wp_orig:
+            if p:
+                hyprctl("hyprpaper", "wallpaper", f"{m},{p}")
+
+    def on_button_pressed(self, event: Button.Pressed):
+        if event.button.id == "wp_cancel":
+            self.action_cancel()
+        elif event.button.id == "wp_set":
+            self.activate(self.sel)
+        elif event.button.id == "wp_folder":
+            args = [WALLPAPER_SH, str(self.cwd)]
+            if self.wp_target:
+                args.append(self.wp_target)
+            run_detached(*args)
+            self.exit()
+
+    def action_cancel(self):
+        if self.mode == "wallpaper":
+            self.restore_original()
+        self.exit()
+
+
+if __name__ == "__main__":
+    mode = sys.argv[1] if len(sys.argv) > 1 else "apps"
+    if mode not in ("apps", "windows", "wallpaper", "menu"):
+        mode = "apps"
+    HyprLauncher(mode).run()

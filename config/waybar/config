@@ -1,0 +1,152 @@
+{
+    "layer": "top",
+    "position": "top",
+    "height": 30,
+    "spacing": 6,
+    "modules-left": [
+        "hyprland/workspaces",
+        "custom/menu",
+        "hyprland/window"
+    ],
+    "modules-center": [
+        "clock"
+    ],
+    "modules-right": [
+        "pulseaudio",
+        "network",
+        "cpu",
+        "temperature",
+        "memory",
+        "disk",
+        "tray",
+        "custom/firewall",
+        "custom/clamav",
+        "custom/notification",
+        "custom/power"
+    ],
+    "hyprland/workspaces": {
+        "format": "{id}",
+        "on-click": "activate"
+    },
+    "hyprland/window": {
+        "max-length": 50
+    },
+    "clock": {
+        "format": "{:%a %d %b  %H:%M}",
+        "tooltip-format": "<big>{:%Y %B}</big>\n<tt><small>{calendar}</small></tt>",
+        "on-click": "~/.local/bin/hypr-tools.sh clock"
+    },
+    "cpu": {
+        "format": " {usage}%",
+        "interval": 5,
+        "on-click": "kitty --class floatterm --title 'System monitor' sh -c 'LANG=en_US.UTF-8 btop'"
+    },
+    "temperature": {
+        "thermal-zone": 2,
+        "critical-threshold": 85,
+        "format": "\udb81\udd0f {temperatureC}\u00b0C",
+        "format-critical": "\udb85\uddd7 {temperatureC}\u00b0C",
+        "on-click": "kitty --class floatterm --title 'System monitor' sh -c 'LANG=en_US.UTF-8 btop'",
+        "interval": 10
+    },
+    "memory": {
+        "format": " {percentage}%",
+        "interval": 5,
+        "tooltip-format": "RAM: {used:0.1f} / {total:0.1f} GiB\nSwap: {swapUsed:0.1f} / {swapTotal:0.1f} GiB",
+        "on-click": "kitty --class floatterm --title 'System monitor' sh -c 'LANG=en_US.UTF-8 btop'"
+    },
+    "disk": {
+        "format": "\udb80\udeca {percentage_used}%",
+        "path": "/",
+        "interval": 60,
+        "tooltip-format": "Disk /: {used} used of {total} ({percentage_used}%)\nFree: {free}",
+        "on-click": "kitty --class floatterm --title 'System monitor' sh -c 'LANG=en_US.UTF-8 btop'"
+    },
+    "network": {
+        "format-wifi": " {essid}",
+        "format-ethernet": " wired",
+        "format-disconnected": "\u26a0 offline",
+        "interval": 5,
+        "tooltip-format": "{ifname}: {ipaddr}\n\udb80\uddda {bandwidthDownBytes}  \udb81\udd52 {bandwidthUpBytes}"
+    },
+    "pulseaudio": {
+        "format": "{icon} {volume}%",
+        "format-muted": " muted",
+        "format-icons": {
+            "default": [
+                "",
+                "",
+                ""
+            ]
+        },
+        "on-click": "pavucontrol"
+    },
+    "tray": {
+        "spacing": 8
+    },
+    "custom/menu": {
+        "format": "\udb80\udf5c Tools",
+        "tooltip-format": "All desktop tools live here (ALT+D)",
+        "on-click": "~/.local/bin/hypr-tools.sh"
+    },
+    "custom/files": {
+        "format": "\udb80\ude4b",
+        "tooltip-format": "File manager (ALT+E)",
+        "on-click": "thunar"
+    },
+    "custom/windows": {
+        "format": "\udb81\uddaf",
+        "tooltip-format": "Window switcher (ALT+W)",
+        "on-click": "rofi -show window"
+    },
+    "custom/wallpaper": {
+        "format": "\udb83\ude09",
+        "tooltip-format": "Left: pick wallpaper \u2014 Right: random",
+        "on-click": "~/.local/bin/hypr-tools.sh wallpaper",
+        "on-click-right": "~/.local/bin/hypr-tools.sh random"
+    },
+    "custom/keybinds": {
+        "format": "\udb80\udf0c",
+        "tooltip-format": "Keybindings \u2014 view & edit",
+        "on-click": "~/.local/bin/hypr-tools.sh keys"
+    },
+    "custom/notification": {
+        "tooltip": false,
+        "format": "{icon}",
+        "format-icons": {
+            "notification": "\udb84\udd6b",
+            "none": "\udb80\udc9a",
+            "dnd-notification": "\udb80\udc9b",
+            "dnd-none": "\udb80\udc9b",
+            "inhibited-notification": "\udb84\udd6b",
+            "inhibited-none": "\udb80\udc9a",
+            "dnd-inhibited-notification": "\udb80\udc9b",
+            "dnd-inhibited-none": "\udb80\udc9b"
+        },
+        "return-type": "json",
+        "exec": "swaync-client -swb",
+        "on-click": "swaync-client -t -sw",
+        "on-click-right": "swaync-client -d -sw",
+        "escape": true
+    },
+    "custom/power": {
+        "format": "\u23fb",
+        "tooltip": true,
+        "on-click": "~/.local/bin/hypr-tools.sh power",
+        "tooltip-format": "Power \u2014 lock / logout / reboot / shutdown (ALT+ESC)"
+    },
+    "custom/firewall": {
+        "return-type": "json",
+        "exec": "~/.local/bin/fw-status.sh",
+        "interval": 10,
+        "on-click": "~/.local/bin/hypr-tools.sh settings security",
+        "on-click-right": "~/.local/bin/hypr-tools.sh firewall"
+    },
+    "custom/clamav": {
+        "return-type": "json",
+        "exec": "~/.local/bin/av-status.sh",
+        "interval": 30,
+        "on-click": "~/.local/bin/hypr-tools.sh settings security",
+        "on-click-right": "~/.local/bin/hypr-tools.sh clamav"
+    }
+}

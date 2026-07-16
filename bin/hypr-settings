@@ -1,0 +1,666 @@
+#!/usr/bin/env python3
+"""Hypr Settings — a click-and-pick control panel for Hyprland.
+
+Runs in a floating kitty window. Navigate with mouse clicks or
+arrow keys / Tab / Enter — no search bar anywhere.
+
+Design: sidebar navigation + titled cards, colored with the live wallust
+palette. The app background stays the terminal's default color (ansi_color
+mode), so kitty's slight transparency shows through — glass, like the rest
+of the desktop.
+
+Appearance changes apply LIVE via `hyprctl keyword`; the Save button
+writes them into ~/.config/hypr/hyprland.conf so they survive reboot.
+"""
+
+import json
+import os
+import sys
+import re
+import shutil
+import subprocess
+from pathlib import Path
+
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.screen import ModalScreen
+from textual.widgets import (Button, ContentSwitcher, Footer, Label, ListItem,
+                             ListView, Static, Switch)
+
+HOME = Path.home()
+CONF = HOME / ".config/hypr/hyprland.conf"
+HYPRPAPER = HOME / ".config/hypr/hyprpaper.conf"
+COLORS_CSS = HOME / ".config/waybar/colors.css"
+TOOLS = str(HOME / ".local/bin/hypr-tools.sh")
+# A second `hypr-settings <page>` invocation writes the page here and focuses
+# the existing window; the running app polls the file and navigates to it.
+PAGE_FILE = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "hypr-settings.page"
+DRY = os.environ.get("HYPRSETTINGS_DRYRUN") == "1"
+
+# key -> (hyprctl option, config path, min, max, label)
+INTS = {
+    "gaps_in":     ("general:gaps_in",     ("general", "gaps_in"),        0, 40, "Inner gaps (between windows)"),
+    "gaps_out":    ("general:gaps_out",    ("general", "gaps_out"),       0, 60, "Outer gaps (screen edges)"),
+    "border_size": ("general:border_size", ("general", "border_size"),    0, 10, "Border thickness"),
+    "rounding":    ("decoration:rounding", ("decoration", "rounding"),    0, 20, "Corner rounding"),
+}
+# key -> (hyprctl option, config path, label)
+BOOLS = {
+    "blur":       ("decoration:blur:enabled",   ("decoration", "blur", "enabled"),   "Background blur (glass effect)"),
+    "shadow":     ("decoration:shadow:enabled", ("decoration", "shadow", "enabled"), "Window shadows"),
+    "animations": ("animations:enabled",        ("animations", "enabled"),           "Animations"),
+}
+
+NAV = [
+    ("appearance", "󰉼", "Appearance"),
+    ("bar",        "󰜬", "Bar"),
+    ("wallpaper",  "󰸉", "Wallpaper"),
+    ("security",   "󰕥", "Security"),
+    ("power",      "⏻", "Power"),
+]
+
+GAUGE_SLOTS = 12
+
+
+def read_colors():
+    colors = {
+        "base": "#1e1e2e", "surface": "#45475a", "text": "#cdd6f4",
+        "subtext": "#a6adc8", "accent": "#89b4fa", "red": "#f38ba8",
+        "green": "#a6e3a1", "yellow": "#f9e2af", "cyan": "#94e2d5",
+    }
+    try:
+        for m in re.finditer(r"@define-color\s+(\w+)\s+(#[0-9a-fA-F]{6})", COLORS_CSS.read_text()):
+            colors[m.group(1)] = m.group(2)
+    except OSError:
+        pass
+    return colors
+
+
+def hyprctl_get(option, default):
+    """Read a live option value; returns int (bools are 0/1)."""
+    if DRY or not shutil.which("hyprctl"):
+        return default
+    try:
+        out = subprocess.run(["hyprctl", "-j", "getoption", option],
+                             capture_output=True, text=True, timeout=1).stdout
+        d = json.loads(out)
+        if "int" in d:
+            return int(d["int"])
+        if "custom" in d:  # gaps report as "N N N N"
+            return int(str(d["custom"]).split()[0])
+    except Exception:
+        pass
+    return default
+
+
+def hyprctl_custom(option):
+    """Raw 'custom' string for options like gaps ('5 10 5 10'), or None."""
+    if DRY or not shutil.which("hyprctl"):
+        return None
+    try:
+        out = subprocess.run(["hyprctl", "-j", "getoption", option],
+                             capture_output=True, text=True, timeout=1).stdout
+        d = json.loads(out)
+        return str(d["custom"]).strip() if "custom" in d else None
+    except Exception:
+        return None
+
+
+def hyprctl_set(option, value):
+    if DRY:
+        return
+    subprocess.run(["hyprctl", "keyword", option, str(value)],
+                   capture_output=True, text=True)
+
+
+def launch(*cmd):
+    """Start a detached external program (rofi pickers, GUIs, pkexec…)."""
+    if DRY:
+        return
+    subprocess.Popen(cmd, start_new_session=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def save_to_config(values):
+    """Rewrite `key = value` lines in hyprland.conf, matched by block path.
+
+    values: {("general","gaps_in"): "5", ("decoration","blur","enabled"): "true", ...}
+    """
+    lines = CONF.read_text().splitlines(keepends=True)
+    stack, out, written = [], [], set()
+    for line in lines:
+        stripped = line.strip()
+        if re.match(r"^[\w.-]+\s*\{", stripped):
+            stack.append(stripped.split("{")[0].strip())
+        elif stripped.startswith("}"):
+            if stack:
+                stack.pop()
+        else:
+            m = re.match(r"^(\s*)([\w.]+)\s*=\s*(.*?)(\s*#.*)?$", line.rstrip("\n"))
+            if m and tuple(stack) + (m.group(2),) in values:
+                path = tuple(stack) + (m.group(2),)
+                comment = m.group(4) or ""
+                line = f"{m.group(1)}{m.group(2)} = {values[path]}{comment}\n"
+                written.add(path)
+        out.append(line)
+    CONF.write_text("".join(out))
+    return written
+
+
+def firewall_on():
+    try:
+        return "ENABLED=yes" in Path("/etc/ufw/ufw.conf").read_text()
+    except OSError:
+        return False
+
+
+def service_active(name):
+    if DRY:
+        return False
+    return subprocess.run(["systemctl", "-q", "is-active", name],
+                          capture_output=True).returncode == 0
+
+
+def autohide_on():
+    if DRY:
+        return False
+    return subprocess.run(["pgrep", "-f", "waybar-autohide.sh"],
+                          capture_output=True).returncode == 0
+
+
+def current_wallpapers():
+    pairs, mon = [], None
+    try:
+        for line in HYPRPAPER.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("monitor"):
+                mon = line.split("=", 1)[1].strip() or "(all)"
+            elif line.startswith("path") and mon is not None:
+                pairs.append((mon, Path(line.split("=", 1)[1].strip()).name))
+                mon = None
+    except OSError:
+        pass
+    return pairs
+
+
+C = read_colors()
+
+# Destructive actions must READ as red. Wallust maps palette slots by
+# wallpaper, so C["red"] can come out blue/brown — fall back to a real red.
+_r, _g, _b = (int(C["red"][i:i + 2], 16) for i in (1, 3, 5))
+DANGER = C["red"] if _r > _g and _r > _b else "#d9536f"
+
+
+def stepper(label, bid):
+    """A +/- button that registers every click, even rapid ones.
+
+    Button ignores clicks during its 0.2 s press-flash animation, which
+    swallows every second click when the user hammers +. Disable the flash.
+    """
+    b = Button(label, id=bid, classes="small")
+    b.active_effect_duration = 0
+    return b
+
+
+def gauge_markup(key, val, hi=None):
+    _, _, lo, default_hi, _ = INTS[key]
+    hi = hi or default_hi
+    filled = max(0, min(GAUGE_SLOTS, round((val - lo) / (hi - lo) * GAUGE_SLOTS)))
+    return (f"[{C['accent']}]{'█' * filled}[/]"
+            f"[{C['surface']}]{'░' * (GAUGE_SLOTS - filled)}[/]")
+
+
+def dot(ok, text_on, text_off):
+    return (f"[{C['green']}]●[/] {text_on}" if ok
+            else f"[{DANGER}]●[/] {text_off}")
+
+
+class Card(Vertical):
+    """A titled, rounded-border group of related controls."""
+
+    def __init__(self, title, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.border_title = f" {title} "
+
+
+class Confirm(ModalScreen[bool]):
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False),
+                Binding("q", "cancel", "Cancel", show=False)]
+    CSS = f"""
+    Confirm {{ align: center middle; background: {C['base']} 60%; }}
+    #dlg {{ width: 56; height: auto; padding: 1 2; background: {C['base']};
+           border: round {DANGER}; }}
+    #question {{ padding: 1; text-align: center; width: 100%; }}
+    #btns {{ height: 3; align-horizontal: center; }}
+    #btns Button {{ margin: 0 2; }}
+    """
+
+    def __init__(self, question):
+        super().__init__()
+        self.question = question
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dlg"):
+            yield Label(self.question, id="question")
+            with Horizontal(id="btns"):
+                yield Button("No — stay", id="no", variant="primary")
+                yield Button("Yes", id="yes", variant="error")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "yes")
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+
+class HyprSettings(App):
+    TITLE = "Hypr Settings"
+    ENABLE_COMMAND_PALETTE = False
+    BINDINGS = [Binding("q", "quit", "Quit")] + [
+        Binding(str(i + 1), f"nav({i})", NAV[i][2], show=False) for i in range(len(NAV))
+    ]
+    CSS = f"""
+    Screen {{ background: ansi_default; color: {C['text']}; }}
+    #hdr {{ height: 1; padding: 0 2; background: transparent; }}
+    #body {{ background: transparent; }}
+
+    #sidebar {{ width: 22; background: transparent; margin: 1 0 0 1; }}
+    #sidebar ListItem {{
+        background: transparent; padding: 0 1; margin-bottom: 1;
+        border-left: thick transparent;
+    }}
+    #sidebar ListItem Label {{ width: 100%; color: {C['subtext']}; }}
+    #sidebar ListItem.-highlight {{
+        background: {C['surface']}; border-left: thick {C['accent']};
+    }}
+    #sidebar ListItem.-highlight Label {{ color: {C['text']}; text-style: bold; }}
+
+    #content {{ background: transparent; padding: 1 2 0 1; }}
+    #content VerticalScroll {{
+        scrollbar-size-vertical: 1;
+        scrollbar-color: {C['surface']}; scrollbar-color-hover: {C['accent']};
+        scrollbar-color-active: {C['accent']}; scrollbar-background: transparent;
+        scrollbar-background-hover: transparent; scrollbar-background-active: transparent;
+    }}
+    #content > * {{ background: transparent; }}
+    Card {{
+        border: round {C['surface']};
+        border-title-color: {C['accent']}; border-title-style: bold;
+        padding: 1 2; margin-bottom: 1; height: auto; background: transparent;
+    }}
+    Card.danger {{ border: round {DANGER}; border-title-color: {DANGER}; }}
+
+    .row {{ height: 3; background: transparent; }}
+    .row Label {{ width: 30; padding: 1 0; }}
+    .gauge {{ width: {GAUGE_SLOTS + 2}; padding: 1 1 1 0; }}
+    .multival {{ width: 36; padding: 1 0; }}
+    .val {{ width: 4; text-align: right; padding: 1 1 1 0;
+            color: {C['accent']}; text-style: bold; }}
+    .hint {{ color: {C['subtext']}; }}
+    .status {{ padding: 0 0 1 0; }}
+
+    Button {{ background: transparent; border: round {C['surface']};
+              color: {C['text']}; margin-right: 1; }}
+    Button:hover {{ border: round {C['accent']}; color: {C['accent']};
+                    background: transparent; }}
+    Button:focus {{ border: round {C['accent']}; text-style: bold; }}
+    Button.small {{ min-width: 5; }}
+    Button.-primary {{ background: {C['accent']}; color: {C['base']};
+                             border: round {C['accent']}; text-style: bold; }}
+    Button.-primary:hover {{ background: {C['text']};
+                                   border: round {C['text']}; color: {C['base']}; }}
+    Button.-error {{ color: {DANGER}; border: round {DANGER};
+                           background: transparent; }}
+    Button.-error:hover {{ background: {DANGER}; color: {C['base']}; }}
+    Button.-warning {{ color: {C['yellow']}; border: round {C['yellow']};
+                             background: transparent; }}
+    Button.-warning:hover {{ background: {C['yellow']}; color: {C['base']}; }}
+
+    Switch {{ background: transparent; border: round {C['surface']}; }}
+    Switch:focus {{ border: round {C['accent']}; background: transparent; }}
+    Switch:hover {{ border: round {C['accent']}; background: transparent; }}
+    Switch > .switch--slider {{ color: {C['surface']}; background: transparent; }}
+    Switch.-on > .switch--slider {{ color: {C['green']}; }}
+
+    #pane-power Button {{ width: 36; margin-bottom: 1; }}
+
+    Footer {{ background: transparent; }}
+    FooterKey {{ background: transparent; color: {C['subtext']}; }}
+    FooterKey > .footer-key--key {{ color: {C['accent']}; background: transparent; }}
+    FooterKey > .footer-key--description {{ color: {C['subtext']};
+                                            background: transparent; }}
+    """
+
+    def __init__(self, initial_page=None):
+        super().__init__(ansi_color=True)
+        self._initial_page = initial_page
+        self.ints = {k: hyprctl_get(v[0], {"gaps_in": 5, "gaps_out": 10,
+                                           "border_size": 3, "rounding": 8}[k])
+                     for k, v in INTS.items()}
+        self.bools = {k: bool(hyprctl_get(v[0], 1)) for k, v in BOOLS.items()}
+        # fix 2: if the live value exceeds the panel's range, stretch the range
+        self.limits = {k: max(INTS[k][3], self.ints[k]) for k in INTS}
+        # fix 3: per-side gaps ("5 10 5 10") are shown read-only, never saved
+        self.multi = {}
+        for k in ("gaps_in", "gaps_out"):
+            raw = hyprctl_custom(INTS[k][0])
+            if raw and len(set(raw.split())) > 1:
+                self.multi[k] = raw
+        # fix 10: Save only writes settings actually touched in this session
+        self.dirty = set()
+        self._refreshing = False
+
+    # ---------- layout ----------
+    def compose(self) -> ComposeResult:
+        yield Static(
+            f"[bold {C['accent']}]󰒓  Hypr Settings[/]"
+            f"[{C['subtext']}]   click, or ↑↓ Tab Enter — no typing needed[/]",
+            id="hdr")
+        with Horizontal(id="body"):
+            yield ListView(
+                *[ListItem(Label(f"{icon}  {name}"), id=f"nav-{pane}")
+                  for pane, icon, name in NAV],
+                id="sidebar")
+            with ContentSwitcher(initial="pane-appearance", id="content"):
+                with VerticalScroll(id="pane-appearance"):
+                    with Card("Layout · applies live as you click"):
+                        for key, (_, _, _, _, label) in INTS.items():
+                            with Horizontal(classes="row"):
+                                yield Label(label)
+                                if key in self.multi:
+                                    yield Static(
+                                        f"[{C['subtext']}]{self.multi[key]} · "
+                                        f"per-side — edit in config[/]",
+                                        classes="multival")
+                                else:
+                                    yield stepper("-", f"dec_{key}")
+                                    yield Static(gauge_markup(key, self.ints[key],
+                                                              self.limits[key]),
+                                                 id=f"gauge_{key}", classes="gauge")
+                                    yield Static(str(self.ints[key]),
+                                                 id=f"val_{key}", classes="val")
+                                    yield stepper("+", f"inc_{key}")
+                    with Card("Effects"):
+                        for key, (_, _, label) in BOOLS.items():
+                            with Horizontal(classes="row"):
+                                yield Label(label)
+                                yield Switch(value=self.bools[key], id=f"sw_{key}")
+                    with Card("Keep your changes"):
+                        with Horizontal(classes="row"):
+                            yield Button("󰆓 Save (survives reboot)", id="save",
+                                         variant="primary")
+                            yield Button("󰑓 Revert to saved", id="revert")
+                        yield Static("Live tweaks are lost at logout unless saved.",
+                                     classes="hint")
+                with VerticalScroll(id="pane-bar"):
+                    with Card("Top bar (waybar)"):
+                        with Horizontal(classes="row"):
+                            yield Label("Auto-hide (reveal at top edge)")
+                            yield Switch(value=autohide_on(), id="sw_autohide")
+                        with Horizontal(classes="row"):
+                            yield Button("󰊠 Hide / show now", id="bar_toggle")
+                            yield Button("󰑓 Restart bar", id="bar_restart")
+                    with Card("Layout"):
+                        with Horizontal(classes="row"):
+                            yield Button("󰜬 Reorder bar buttons…", id="bar_reorder")
+                        yield Static("Opens the pick-and-place chooser.", classes="hint")
+                with VerticalScroll(id="pane-wallpaper"):
+                    with Card("Current wallpapers"):
+                        yield Static("", id="wp_list", classes="status")
+                    with Card("Change"):
+                        with Horizontal(classes="row"):
+                            yield Button("󰒝 Random wallpaper", id="wp_random")
+                            yield Button("󰋩 Pick image / folder…", id="wp_pick")
+                        yield Static("Every change recolors the whole desktop.\n"
+                                     "This panel wears the new colors next time it opens.",
+                                     classes="hint")
+                with VerticalScroll(id="pane-security"):
+                    with Card("Firewall · ufw"):
+                        yield Static("", id="fw_status", classes="status")
+                        with Horizontal(classes="row"):
+                            yield Button("󰕥 Enable / disable", id="fw_toggle")
+                            yield Button("󰈙 View rules", id="fw_rules")
+                    with Card("Antivirus · ClamAV"):
+                        yield Static("", id="av_status", classes="status")
+                        with Horizontal(classes="row"):
+                            yield Button("󰃤 Scan Downloads", id="av_scan")
+                            yield Button("󰖟 Open ClamTk", id="av_gui")
+                            yield Button("󰚰 Update definitions", id="av_update")
+                with VerticalScroll(id="pane-power"):
+                    with Card("Session"):
+                        yield Button("󰌾 Lock screen", id="p_lock")
+                        yield Button("󰤄 Suspend (sleep)", id="p_suspend")
+                    with Card("Danger zone · asks before acting", classes="danger"):
+                        yield Button("󰍃 Logout", id="p_logout", variant="warning")
+                        yield Button("󰜉 Reboot", id="p_reboot", variant="warning")
+                        yield Button("⏻ Shutdown", id="p_shutdown", variant="error")
+        yield Footer()
+
+    def on_mount(self):
+        # fix 4: a leftover page-note from a previous run must not hijack us
+        if not self._initial_page:
+            PAGE_FILE.unlink(missing_ok=True)
+        self.refresh_security()
+        self.refresh_wallpapers()
+        if self._initial_page:
+            self.goto_page(self._initial_page)
+        self._poll_tick = 0
+        self.set_interval(0.5, self._poll_page_file)
+
+    def goto_page(self, page):
+        names = [pane for pane, _, _ in NAV]
+        if page in names:
+            self.query_one("#sidebar", ListView).index = names.index(page)
+
+    def _poll_page_file(self):
+        try:
+            if PAGE_FILE.exists():
+                page = PAGE_FILE.read_text().strip()
+                PAGE_FILE.unlink()
+                self.goto_page(page)
+        except OSError:
+            pass
+        # fix 6: re-check auto-hide state every 2s while the Bar page shows
+        self._poll_tick += 1
+        if self._poll_tick % 4 == 0 and                 self.query_one("#content", ContentSwitcher).current == "pane-bar":
+            self._refreshing = True
+            try:
+                self.query_one("#sw_autohide", Switch).value = autohide_on()
+            finally:
+                self._refreshing = False
+
+    # ---------- navigation ----------
+    def action_nav(self, idx: int):
+        self.query_one("#sidebar", ListView).index = idx
+
+    def on_list_view_highlighted(self, event: ListView.Highlighted):
+        if event.item is None:
+            return
+        pane = "pane-" + (event.item.id or "").removeprefix("nav-")
+        self.query_one("#content", ContentSwitcher).current = pane
+        self.refresh_security()
+        self.refresh_wallpapers()
+        self._refreshing = True
+        try:
+            self.query_one("#sw_autohide", Switch).value = autohide_on()
+        finally:
+            self._refreshing = False
+
+    # ---------- dynamic labels ----------
+    def refresh_security(self):
+        fw = firewall_on()
+        self.query_one("#fw_status", Static).update(dot(
+            fw,
+            "Firewall is ON — incoming connections blocked",
+            "Firewall is OFF — click Enable to protect this machine"))
+        self.query_one("#fw_toggle", Button).label = \
+            "󰕥 Disable firewall" if fw else "󰕥 Enable firewall"
+        av = service_active("clamav-daemon")
+        self.query_one("#av_status", Static).update(dot(
+            av,
+            "Scanner daemon running — scans are fast",
+            "Scanner daemon not running — scans still work, just slower"))
+
+    def refresh_wallpapers(self):
+        pairs = current_wallpapers()
+        text = "\n".join(f"[{C['accent']}]{m}[/]  →  {p}" for m, p in pairs) \
+               or "(none set)"
+        self.query_one("#wp_list", Static).update(text)
+
+    # ---------- events ----------
+    def on_switch_changed(self, event: Switch.Changed):
+        if self._refreshing:
+            return
+        sid = event.switch.id or ""
+        if sid == "sw_autohide":
+            if event.value and not autohide_on():
+                launch(str(HOME / ".local/bin/waybar-autohide.sh"))
+            elif not event.value and autohide_on():
+                subprocess.run(["pkill", "-f", "waybar-autohide.sh"], capture_output=True)
+            self.notify("Auto-hide " + ("ON — move mouse to top edge to reveal"
+                                        if event.value else "OFF — bar always visible"))
+            return
+        key = sid.removeprefix("sw_")
+        if key in BOOLS:
+            self.bools[key] = event.value
+            self.dirty.add(key)
+            hyprctl_set(BOOLS[key][0], 1 if event.value else 0)
+
+    def on_button_pressed(self, event: Button.Pressed):
+        bid = event.button.id or ""
+        if bid.startswith(("inc_", "dec_")):
+            key = bid[4:]
+            opt, _, lo, _, _ = INTS[key]
+            hi = self.limits[key]
+            step = 1 if bid.startswith("inc_") else -1
+            self.ints[key] = max(lo, min(hi, self.ints[key] + step))
+            self.dirty.add(key)
+            self.query_one(f"#val_{key}", Static).update(str(self.ints[key]))
+            self.query_one(f"#gauge_{key}", Static).update(
+                gauge_markup(key, self.ints[key], hi))
+            hyprctl_set(opt, self.ints[key])
+            return
+        actions = {
+            "save": self.do_save, "revert": self.do_revert,
+            "bar_toggle": lambda: launch(str(HOME / ".local/bin/bar-toggle.sh")),
+            "bar_restart": lambda: launch(TOOLS, "restart-bar"),
+            "bar_reorder": lambda: launch(TOOLS, "reorder"),
+            "wp_random": lambda: launch(str(HOME / ".local/bin/wallpaper.sh")),
+            "wp_pick": lambda: launch(TOOLS, "wallpaper"),
+            "fw_toggle": self.do_fw_toggle,
+            "fw_rules": lambda: launch("kitty", "--class", "floatterm", "--title",
+                                       "Firewall rules", "bash", "-c",
+                                       "pkexec ufw status verbose; echo; read -rp 'Enter to close…'"),
+            "av_scan": lambda: launch(TOOLS, "clamav"),
+            "av_gui": self.do_open_clamtk,
+            "av_update": lambda: launch("kitty", "--class", "floatterm", "--title",
+                                        "Update virus definitions", "bash", "-c",
+                                        "pkexec bash -c 'systemctl stop clamav-freshclam; freshclam; systemctl start clamav-freshclam'; echo; read -rp 'Enter to close…'"),
+            "p_lock": lambda: launch("hyprlock"),
+            "p_suspend": lambda: launch("systemctl", "suspend"),
+        }
+        if bid in actions:
+            actions[bid]()
+            if bid in ("wp_random", "wp_pick"):
+                self.set_timer(4, self.refresh_wallpapers)
+            return
+        power = {"p_logout": ("log out", ["hyprctl", "dispatch", "exit"]),
+                 "p_reboot": ("reboot", ["systemctl", "reboot"]),
+                 "p_shutdown": ("shut down", ["systemctl", "poweroff"])}
+        if bid in power:
+            name, cmd = power[bid]
+            self.push_screen(Confirm(f"Really {name}?"),
+                             lambda ok, c=cmd: launch(*c) if ok else None)
+
+    # ---------- actions ----------
+    def do_save(self):
+        values, names = {}, {}
+        for key in self.dirty:
+            if key in INTS and key not in self.multi:
+                _, path, _, _, label = INTS[key]
+                values[path] = str(self.ints[key])
+                names[path] = label
+            elif key in BOOLS:
+                opt, path, label = BOOLS[key]
+                values[path] = "true" if self.bools[key] else "false"
+                names[path] = label
+        self.last_save_report = None
+        if not values:
+            self.notify("Nothing changed since opening — nothing to save")
+            return
+        try:
+            written = save_to_config(values)
+        except Exception as e:
+            self.notify(f"Save failed: {e}", severity="error")
+            return
+        missing = set(values) - written
+        self.last_save_report = {"written": written, "missing": missing}
+        if missing:
+            miss = ", ".join(names[p] for p in missing)
+            self.notify(f"⚠ NOT saved: {miss} — its line is missing from "
+                        f"hyprland.conf", severity="warning", timeout=10)
+        if written:
+            self.dirty = {k for k in self.dirty
+                          if (INTS[k][1] if k in INTS else BOOLS[k][1])
+                          not in written}
+            self.notify(f"Saved {len(written)} setting(s) — they survive reboot")
+
+    def do_revert(self):
+        if not DRY:
+            subprocess.run(["hyprctl", "reload"], capture_output=True)
+        self.dirty.clear()
+        for key, spec in INTS.items():
+            if key in self.multi:
+                continue
+            self.ints[key] = hyprctl_get(spec[0], self.ints[key])
+            self.limits[key] = max(INTS[key][3], self.ints[key])
+            self.query_one(f"#val_{key}", Static).update(str(self.ints[key]))
+            self.query_one(f"#gauge_{key}", Static).update(
+                gauge_markup(key, self.ints[key], self.limits[key]))
+        self._refreshing = True
+        try:
+            for key, spec in BOOLS.items():
+                self.bools[key] = bool(hyprctl_get(spec[0], self.bools[key]))
+                self.query_one(f"#sw_{key}", Switch).value = self.bools[key]
+        finally:
+            self._refreshing = False
+        self.notify("Reverted to the saved config")
+
+    def do_open_clamtk(self):
+        if shutil.which("clamtk"):
+            launch("clamtk")
+        else:
+            self.notify("ClamTk is not installed — use the Tools menu to "
+                        "install it, or: sudo apt install clamtk",
+                        severity="error")
+
+    def do_fw_toggle(self):
+        if not shutil.which("ufw"):
+            self.notify("ufw is not installed — run: sudo apt install ufw",
+                        severity="error")
+            return
+        verb = "disable" if firewall_on() else "enable"
+        if DRY:
+            launch("pkexec", "ufw", verb)
+            return
+
+        def work():
+            r = subprocess.run(["pkexec", "ufw", verb],
+                               capture_output=True, text=True)
+            if r.returncode in (126, 127):   # password prompt dismissed
+                self.call_from_thread(self.notify,
+                                      "Cancelled — no password given",
+                                      severity="warning")
+            elif r.returncode != 0:
+                err = (r.stderr or r.stdout).strip()[:120] or "unknown error"
+                self.call_from_thread(self.notify, f"ufw {verb} failed: {err}",
+                                      severity="error")
+            self.call_from_thread(self.refresh_security)
+
+        self.run_worker(work, thread=True)
+        self.set_timer(10, self.refresh_security)
+
+
+if __name__ == "__main__":
+    HyprSettings(sys.argv[1] if len(sys.argv) > 1 else None).run()

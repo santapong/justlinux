@@ -1,0 +1,22 @@
+# wallust — generate color palettes from the current wallpaper
+# Run manually:  wallust run <image>   (the wallpaper script does this for you)
+
+backend = "resized"
+color_space = "lab"
+palette = "dark16"
+
+[templates]
+hypr.template = "colors-hyprland.conf"
+hypr.target = "~/.config/hypr/colors.conf"
+
+waybar.template = "colors-waybar.css"
+waybar.target = "~/.config/waybar/colors.css"
+
+rofi.template = "colors-rofi.rasi"
+rofi.target = "~/.config/rofi/colors.rasi"
+
+swaync.template = "colors-swaync.css"
+swaync.target = "~/.config/swaync/colors.css"
+
+wlogout.template = "colors-wlogout.css"
+wlogout.target = "~/.config/wlogout/colors.css"
