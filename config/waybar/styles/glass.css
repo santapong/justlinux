@@ -1,0 +1,80 @@
+/* waybar-style: glass */
+@import "colors.css";
+
+/* Full-width glass: barely-there translucent sheet, active workspace gets
+   an accent underline instead of a filled pill. Quietest of the styles. */
+
+* {
+    font-family: "JetBrainsMono Nerd Font", "Font Awesome 6 Free";
+    font-size: 13px;
+    min-height: 0;
+}
+
+window#waybar {
+    background: alpha(@base, 0.55);
+    color: @text;
+    border-bottom: 1px solid alpha(@text, 0.12);
+}
+
+#workspaces button {
+    padding: 0 9px;
+    color: @subtext;
+    background: transparent;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+}
+#workspaces button.active {
+    color: @accent;
+    border-bottom: 2px solid @accent;
+}
+#workspaces button:hover {
+    color: @text;
+    border-bottom: 2px solid alpha(@accent, 0.5);
+}
+
+#clock, #cpu, #temperature, #memory, #disk, #network, #pulseaudio, #tray, #window {
+    padding: 0 11px;
+}
+
+/* one calm foreground; only states get color */
+#cpu, #temperature, #memory, #disk, #network, #pulseaudio { color: @subtext; }
+#temperature.critical { color: @red; }
+#clock { color: @text; font-weight: bold; }
+
+#custom-menu {
+    color: @accent;
+    background: transparent;
+    padding: 0 12px;
+    font-weight: bold;
+}
+#custom-menu:hover { color: @text; }
+
+#custom-files, #custom-windows { padding: 0 8px; color: @subtext; }
+
+#custom-wallpaper, #custom-keybinds {
+    color: @subtext;
+    padding: 0 10px;
+    font-size: 15px;
+}
+#custom-wallpaper:hover, #custom-keybinds:hover { color: @accent; }
+
+#custom-firewall, #custom-clamav {
+    padding: 0 8px;
+    font-size: 15px;
+}
+#custom-firewall.on,  #custom-clamav.on  { color: @green; }
+#custom-firewall.off, #custom-clamav.off { color: @red; }
+
+#custom-notification {
+    color: @subtext;
+    padding: 0 10px;
+    font-size: 15px;
+}
+#custom-notification:hover { color: @accent; }
+
+#custom-power {
+    color: @red;
+    padding: 0 12px;
+    font-size: 15px;
+}
+#custom-power:hover { color: @text; }

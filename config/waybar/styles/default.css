@@ -1,9 +1,6 @@
 /* waybar-style: default */
 @import "colors.css";
 
-/* The ACTIVE style. Pick another look in Hypr Settings → Bar → Bar style
-   (variants live in styles/ — this file gets replaced by the picker). */
-
 * {
     font-family: "JetBrainsMono Nerd Font", "Font Awesome 6 Free";
     font-size: 13px;

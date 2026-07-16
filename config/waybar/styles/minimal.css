@@ -1,0 +1,63 @@
+/* waybar-style: minimal */
+@import "colors.css";
+
+/* Flat & solid: opaque bar, no radii, no per-module rainbow — text and
+   one accent. For focus days. */
+
+* {
+    font-family: "JetBrainsMono Nerd Font", "Font Awesome 6 Free";
+    font-size: 12px;
+    min-height: 0;
+}
+
+window#waybar {
+    background: @base;
+    color: @text;
+}
+
+#workspaces button {
+    padding: 0 8px;
+    color: @subtext;
+    background: transparent;
+    border-radius: 0;
+}
+#workspaces button.active {
+    color: @base;
+    background: @text;
+}
+#workspaces button:hover {
+    background: alpha(@text, 0.2);
+}
+
+#clock, #cpu, #temperature, #memory, #disk, #network, #pulseaudio, #tray, #window {
+    padding: 0 9px;
+    color: @text;
+}
+#temperature.critical { color: @red; }
+#clock { font-weight: bold; }
+
+#custom-menu {
+    color: @accent;
+    background: transparent;
+    padding: 0 10px;
+    font-weight: bold;
+}
+#custom-menu:hover { color: @text; }
+
+#custom-files, #custom-windows { padding: 0 7px; color: @text; }
+
+#custom-wallpaper, #custom-keybinds {
+    color: @text;
+    padding: 0 9px;
+}
+#custom-wallpaper:hover, #custom-keybinds:hover { color: @accent; }
+
+#custom-firewall, #custom-clamav { padding: 0 7px; }
+#custom-firewall.on,  #custom-clamav.on  { color: @text; }
+#custom-firewall.off, #custom-clamav.off { color: @red; }
+
+#custom-notification { color: @text; padding: 0 9px; }
+#custom-notification:hover { color: @accent; }
+
+#custom-power { color: @text; padding: 0 10px; }
+#custom-power:hover { color: @red; }
