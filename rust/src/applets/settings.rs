@@ -17,8 +17,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
-use std::collections::{BTreeSet, HashMap};
-use std::path::PathBuf;
+use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -59,16 +59,146 @@ pub const BOOLS: [(&str, &str, &[&str], &str); 3] = [
     ("animations", "animations:enabled", &["animations", "enabled"], "Animations"),
 ];
 
-pub const NAV: [(&str, &str, &str); 5] = [
+pub const NAV: [(&str, &str, &str); 7] = [
     ("appearance", "󰉼", "Appearance"),
+    ("theme", "󰏘", "Theme"),
     ("bar", "󰜬", "Bar"),
     ("wallpaper", "󰸉", "Wallpaper"),
     ("security", "󰕥", "Security"),
+    ("system", "󰍛", "System"),
     ("power", "⏻", "Power"),
 ];
 
+// page indices (NAV order)
+const PG_APPEARANCE: usize = 0;
+const PG_THEME: usize = 1;
+const PG_BAR: usize = 2;
+const PG_WALLPAPER: usize = 3;
+const PG_SECURITY: usize = 4;
+const PG_SYSTEM: usize = 5;
+const PG_POWER: usize = 6;
+
+/// Animation profiles shipped in ~/.config/hypr/animations/ (any extra
+/// user .conf files are appended at runtime).
+pub const ANIM_PROFILES: [&str; 4] = ["default", "snappy", "smooth", "off"];
+
+/// Preferred order for waybar styles in ~/.config/waybar/styles/.
+pub const BAR_STYLES: [&str; 4] = ["default", "islands", "glass", "minimal"];
+
+pub const PRESET_SLOTS: usize = 3;
+
 fn page_file() -> PathBuf {
     util::xdg_runtime().join("hypr-settings.page")
+}
+
+fn waybar_dir() -> PathBuf {
+    util::home().join(".config/waybar")
+}
+
+fn animations_dir() -> PathBuf {
+    util::home().join(".config/hypr/animations")
+}
+
+fn presets_dir() -> PathBuf {
+    util::home().join(".config/hypr/presets")
+}
+
+/// "/* waybar-style: glass */" / "# animation profile: snappy" → "glass"/"snappy".
+pub fn parse_marker(first_line: &str, key: &str) -> Option<String> {
+    let pos = first_line.find(key)?;
+    let rest = &first_line[pos + key.len()..];
+    let name: String = rest
+        .trim_start_matches(':')
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+fn marker_of(path: &Path, key: &str) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    parse_marker(text.lines().next()?, key)
+}
+
+/// Styles present in styles/, preferred order first, extras appended.
+fn list_variants(dir: &Path, preferred: &[&str]) -> Vec<String> {
+    let mut found: Vec<String> = std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten()
+                .filter_map(|e| {
+                    let p = e.path();
+                    if p.extension().and_then(|x| x.to_str()) == Some("css")
+                        || p.extension().and_then(|x| x.to_str()) == Some("conf")
+                    {
+                        p.file_stem().and_then(|s| s.to_str()).map(String::from)
+                    } else {
+                        None
+                    }
+                })
+                .filter(|n| n != "current")
+                .collect()
+        })
+        .unwrap_or_default();
+    found.sort();
+    let mut out: Vec<String> = Vec::new();
+    for p in preferred {
+        if found.iter().any(|f| f == p) {
+            out.push(p.to_string());
+        }
+    }
+    for f in found {
+        if !out.contains(&f) {
+            out.push(f);
+        }
+    }
+    out
+}
+
+fn cap_first(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => String::new(),
+    }
+}
+
+// ---------- system metrics (System page) ----------
+
+/// (total, idle) jiffies from a /proc/stat "cpu ..." first line.
+pub fn parse_proc_stat(line: &str) -> Option<(u64, u64)> {
+    let mut it = line.split_whitespace();
+    if it.next()? != "cpu" {
+        return None;
+    }
+    let vals: Vec<u64> = it.filter_map(|t| t.parse().ok()).collect();
+    if vals.len() < 5 {
+        return None;
+    }
+    let total: u64 = vals.iter().sum();
+    let idle = vals[3] + vals.get(4).copied().unwrap_or(0); // idle + iowait
+    Some((total, idle))
+}
+
+/// (total_kb, available_kb) from /proc/meminfo text.
+pub fn parse_meminfo(text: &str) -> Option<(u64, u64)> {
+    let mut total = None;
+    let mut avail = None;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("MemTotal:") {
+            total = rest.split_whitespace().next()?.parse().ok();
+        } else if let Some(rest) = line.strip_prefix("MemAvailable:") {
+            avail = rest.split_whitespace().next()?.parse().ok();
+        }
+        if total.is_some() && avail.is_some() {
+            break;
+        }
+    }
+    Some((total?, avail?))
 }
 
 // ---------- pure logic (unit-tested) ----------
@@ -162,6 +292,10 @@ pub enum Wid {
     AutohideSwitch,
     Save,
     Revert,
+    AnimProfile(usize),
+    PresetApply(usize),
+    PresetSave(usize),
+    BarStyle(usize),
     BarToggle,
     BarRestart,
     BarReorder,
@@ -213,6 +347,18 @@ pub struct App {
     poll_tick: u32,
     pub should_quit: bool,
     pub last_save_missing: Vec<String>,
+    // theme page
+    pub anim_profiles: Vec<String>,
+    pub anim_current: Option<String>,
+    pub preset_summaries: Vec<Option<String>>,
+    // bar page
+    pub bar_styles: Vec<String>,
+    pub bar_style_current: Option<String>,
+    // system page
+    cpu_hist: VecDeque<u64>,
+    ram_hist: VecDeque<u64>,
+    last_cpu_raw: Option<(u64, u64)>,
+    ram_text: String,
 }
 
 fn autohide_on() -> bool {
@@ -296,6 +442,15 @@ impl App {
             poll_tick: 0,
             should_quit: false,
             last_save_missing: Vec::new(),
+            anim_profiles: Vec::new(),
+            anim_current: None,
+            preset_summaries: vec![None; PRESET_SLOTS],
+            bar_styles: Vec::new(),
+            bar_style_current: None,
+            cpu_hist: VecDeque::with_capacity(120),
+            ram_hist: VecDeque::with_capacity(120),
+            last_cpu_raw: None,
+            ram_text: String::new(),
         };
         // a leftover page-note from a previous run must not hijack us
         match initial_page {
@@ -306,7 +461,170 @@ impl App {
         }
         app.refresh_security();
         app.refresh_wallpapers();
+        app.refresh_theme();
+        app.refresh_bar_styles();
+        app.sample_system();
         app
+    }
+
+    pub fn refresh_theme(&mut self) {
+        self.anim_profiles = list_variants(&animations_dir(), &ANIM_PROFILES);
+        self.anim_current = marker_of(&animations_dir().join("current.conf"), "animation profile");
+        for i in 0..PRESET_SLOTS {
+            self.preset_summaries[i] = self.preset_summary(i);
+        }
+    }
+
+    pub fn refresh_bar_styles(&mut self) {
+        self.bar_styles = list_variants(&waybar_dir().join("styles"), &BAR_STYLES);
+        self.bar_style_current = marker_of(&waybar_dir().join("style.css"), "waybar-style");
+    }
+
+    fn preset_path(i: usize) -> PathBuf {
+        presets_dir().join(format!("slot{}.json", i + 1))
+    }
+
+    fn preset_summary(&self, i: usize) -> Option<String> {
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(Self::preset_path(i)).ok()?).ok()?;
+        let g = |k: &str| v.pointer(&format!("/ints/{k}")).and_then(serde_json::Value::as_i64);
+        let b = |k: &str| {
+            v.pointer(&format!("/bools/{k}"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        };
+        let fx = |on: bool| if on { "✓" } else { "✗" };
+        Some(format!(
+            "gaps {}/{} · border {} · round {} · blur{} shadow{} anim{}",
+            g("gaps_in")?,
+            g("gaps_out")?,
+            g("border_size")?,
+            g("rounding")?,
+            fx(b("blur")),
+            fx(b("shadow")),
+            fx(b("animations")),
+        ))
+    }
+
+    pub fn save_preset(&mut self, i: usize) {
+        let ints: serde_json::Map<String, serde_json::Value> = INTS
+            .iter()
+            .map(|(k, ..)| (k.to_string(), serde_json::json!(self.ints[k])))
+            .collect();
+        let bools: serde_json::Map<String, serde_json::Value> = BOOLS
+            .iter()
+            .map(|(k, ..)| (k.to_string(), serde_json::json!(self.bools[k])))
+            .collect();
+        let _ = std::fs::create_dir_all(presets_dir());
+        let data = serde_json::json!({ "ints": ints, "bools": bools });
+        if std::fs::write(Self::preset_path(i), serde_json::to_string_pretty(&data).unwrap_or_default())
+            .is_ok()
+        {
+            self.preset_summaries[i] = self.preset_summary(i);
+            self.notify(&format!("Saved current appearance to preset {}", i + 1));
+        } else {
+            self.notify_error(&format!("Could not write preset {}", i + 1));
+        }
+    }
+
+    pub fn apply_preset(&mut self, i: usize) {
+        let Ok(text) = std::fs::read_to_string(Self::preset_path(i)) else {
+            self.notify(&format!("Preset {} is empty — Save stores the current look", i + 1));
+            return;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+            self.notify_error(&format!("Preset {} is unreadable", i + 1));
+            return;
+        };
+        for (key, opt, _, lo, hi, _) in INTS {
+            if self.multi.contains_key(key) {
+                continue;
+            }
+            if let Some(val) = v.pointer(&format!("/ints/{key}")).and_then(serde_json::Value::as_i64)
+            {
+                let val = val.max(lo);
+                self.limits.insert(key, hi.max(val));
+                self.ints.insert(key, val);
+                self.dirty.insert(key);
+                hypr::keyword(opt, &val.to_string());
+            }
+        }
+        for (key, opt, _, _) in BOOLS {
+            if let Some(val) =
+                v.pointer(&format!("/bools/{key}")).and_then(serde_json::Value::as_bool)
+            {
+                self.bools.insert(key, val);
+                self.dirty.insert(key);
+                hypr::keyword(opt, if val { "1" } else { "0" });
+            }
+        }
+        self.notify(&format!("Preset {} applied live — Save keeps it after reboot", i + 1));
+    }
+
+    pub fn apply_anim_profile(&mut self, idx: usize) {
+        let Some(name) = self.anim_profiles.get(idx).cloned() else { return };
+        let src = animations_dir().join(format!("{name}.conf"));
+        let dst = animations_dir().join("current.conf");
+        match std::fs::copy(&src, &dst) {
+            Ok(_) => {
+                self.anim_current = Some(name.clone());
+                hypr::reload();
+                self.notify(&format!("Animation profile: {}", cap_first(&name)));
+            }
+            Err(e) => self.notify_error(&format!("Could not apply profile {name}: {e}")),
+        }
+    }
+
+    pub fn apply_bar_style(&mut self, idx: usize) {
+        let Some(name) = self.bar_styles.get(idx).cloned() else { return };
+        let src = waybar_dir().join("styles").join(format!("{name}.css"));
+        let dst = waybar_dir().join("style.css");
+        match std::fs::copy(&src, &dst) {
+            Ok(_) => {
+                self.bar_style_current = Some(name.clone());
+                util::spawn_detached(&[
+                    &util::local_bin("hypr-tools.sh").to_string_lossy(),
+                    "restart-bar",
+                ]);
+                self.notify(&format!("Bar style: {} — restarting waybar", cap_first(&name)));
+            }
+            Err(e) => self.notify_error(&format!("Could not apply bar style {name}: {e}")),
+        }
+    }
+
+    /// Sample CPU/RAM for the System page sparklines (500 ms cadence).
+    fn sample_system(&mut self) {
+        if let Ok(stat) = std::fs::read_to_string("/proc/stat") {
+            if let Some(raw) = stat.lines().next().and_then(parse_proc_stat) {
+                if let Some((pt, pi)) = self.last_cpu_raw {
+                    let dt = raw.0.saturating_sub(pt);
+                    let di = raw.1.saturating_sub(pi);
+                    if dt > 0 {
+                        let pct = (100 * (dt - di.min(dt))) / dt;
+                        self.cpu_hist.push_back(pct);
+                        if self.cpu_hist.len() > 120 {
+                            self.cpu_hist.pop_front();
+                        }
+                    }
+                }
+                self.last_cpu_raw = Some(raw);
+            }
+        }
+        if let Ok(mi) = std::fs::read_to_string("/proc/meminfo") {
+            if let Some((total, avail)) = parse_meminfo(&mi) {
+                let used = total.saturating_sub(avail);
+                let pct = if total > 0 { used * 100 / total } else { 0 };
+                self.ram_hist.push_back(pct);
+                if self.ram_hist.len() > 120 {
+                    self.ram_hist.pop_front();
+                }
+                self.ram_text = format!(
+                    "{:.1} / {:.1} GB ({pct}%)",
+                    used as f64 / 1048576.0,
+                    total as f64 / 1048576.0
+                );
+            }
+        }
     }
 
     pub fn goto_page(&mut self, page: &str) {
@@ -320,6 +638,8 @@ impl App {
     fn on_page_change(&mut self) {
         self.refresh_security();
         self.refresh_wallpapers();
+        self.refresh_theme();
+        self.refresh_bar_styles();
         self.autohide = autohide_on();
     }
 
@@ -354,7 +674,7 @@ impl App {
     pub fn focusables(&self) -> Vec<Wid> {
         let mut v = Vec::new();
         match self.page {
-            0 => {
+            PG_APPEARANCE => {
                 for (i, (key, ..)) in INTS.iter().enumerate() {
                     if !self.multi.contains_key(key) {
                         v.push(Wid::Dec(i));
@@ -367,23 +687,36 @@ impl App {
                 v.push(Wid::Save);
                 v.push(Wid::Revert);
             }
-            1 => {
+            PG_THEME => {
+                for i in 0..self.anim_profiles.len() {
+                    v.push(Wid::AnimProfile(i));
+                }
+                for i in 0..PRESET_SLOTS {
+                    v.push(Wid::PresetApply(i));
+                    v.push(Wid::PresetSave(i));
+                }
+            }
+            PG_BAR => {
                 v.push(Wid::AutohideSwitch);
                 v.push(Wid::BarToggle);
                 v.push(Wid::BarRestart);
+                for i in 0..self.bar_styles.len() {
+                    v.push(Wid::BarStyle(i));
+                }
                 v.push(Wid::BarReorder);
             }
-            2 => {
+            PG_WALLPAPER => {
                 v.push(Wid::WpRandom);
                 v.push(Wid::WpPick);
             }
-            3 => {
+            PG_SECURITY => {
                 v.push(Wid::FwToggle);
                 v.push(Wid::FwRules);
                 v.push(Wid::AvScan);
                 v.push(Wid::AvGui);
                 v.push(Wid::AvUpdate);
             }
+            PG_SYSTEM => {} // read-only page
             _ => {
                 v.push(Wid::PLock);
                 v.push(Wid::PSuspend);
@@ -575,6 +908,10 @@ impl App {
             Wid::AutohideSwitch => self.toggle_autohide_switch(),
             Wid::Save => self.do_save(),
             Wid::Revert => self.do_revert(),
+            Wid::AnimProfile(i) => self.apply_anim_profile(i),
+            Wid::PresetApply(i) => self.apply_preset(i),
+            Wid::PresetSave(i) => self.save_preset(i),
+            Wid::BarStyle(i) => self.apply_bar_style(i),
             Wid::BarToggle => {
                 util::spawn_detached(&[&util::local_bin("bar-toggle.sh").to_string_lossy()])
             }
@@ -648,7 +985,7 @@ impl App {
         }
         match ev.code {
             KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Char(c @ '1'..='5') => {
+            KeyCode::Char(c @ '1'..='7') => {
                 let i = (c as u8 - b'1') as usize;
                 self.activate(Wid::Nav(i));
             }
@@ -712,8 +1049,10 @@ impl App {
             self.goto_page(page.trim());
         }
         self.poll_tick += 1;
+        // CPU/RAM history for the System page (cheap: two /proc reads)
+        self.sample_system();
         // re-check auto-hide state every 2s while the Bar page shows
-        if self.poll_tick.is_multiple_of(4) && self.page == 1 {
+        if self.poll_tick.is_multiple_of(4) && self.page == PG_BAR {
             self.autohide = autohide_on();
         }
         // timers
@@ -785,11 +1124,14 @@ impl App {
             .split(rows[1]);
         self.draw_sidebar(f, body[0]);
         match self.page {
-            0 => self.draw_appearance(f, body[1]),
-            1 => self.draw_bar(f, body[1]),
-            2 => self.draw_wallpaper(f, body[1]),
-            3 => self.draw_security(f, body[1]),
-            _ => self.draw_power(f, body[1]),
+            PG_APPEARANCE => self.draw_appearance(f, body[1]),
+            PG_THEME => self.draw_theme(f, body[1]),
+            PG_BAR => self.draw_bar(f, body[1]),
+            PG_WALLPAPER => self.draw_wallpaper(f, body[1]),
+            PG_SECURITY => self.draw_security(f, body[1]),
+            PG_SYSTEM => self.draw_system(f, body[1]),
+            PG_POWER => self.draw_power(f, body[1]),
+            _ => {}
         }
 
         // footer
@@ -864,7 +1206,9 @@ impl App {
 
     fn card<'a>(&self, title: &'a str, danger: bool) -> Block<'a> {
         let pal = &self.pal;
-        let bcol = if danger { color(&pal.danger) } else { color(&pal.surface) };
+        // border_hi: raised-card tone from the tonal ladder, not raw surface
+        let tones = pal.tones();
+        let bcol = if danger { color(&pal.danger) } else { color(&tones.border_hi) };
         let tcol = if danger { color(&pal.danger) } else { color(&pal.accent) };
         Block::default()
             .borders(Borders::ALL)
@@ -874,6 +1218,186 @@ impl App {
                 format!(" {title} "),
                 Style::default().fg(tcol).add_modifier(Modifier::BOLD),
             ))
+    }
+
+    /// Row of variant buttons where the active one is marked ●.
+    #[allow(clippy::too_many_arguments)]
+    fn variant_row(
+        &mut self,
+        f: &mut Frame,
+        x0: u16,
+        y: u16,
+        names: &[String],
+        current: Option<&str>,
+        wid_of: fn(usize) -> Wid,
+        focus_wid: Option<Wid>,
+        max_right: u16,
+    ) {
+        let mut x = x0;
+        for (i, name) in names.iter().enumerate() {
+            let active = current == Some(name.as_str());
+            let label = if active {
+                format!("● {}", cap_first(name))
+            } else {
+                cap_first(name)
+            };
+            let variant = if active { "primary" } else { "" };
+            let w = self.button(f, x, y, &label, wid_of(i), focus_wid == Some(wid_of(i)), variant, max_right);
+            if w == 0 {
+                break;
+            }
+            x += w;
+        }
+    }
+
+    fn draw_theme(&mut self, f: &mut Frame, area: Rect) {
+        let pal = self.pal.clone();
+        let content = area.inner(Margin::new(1, 0));
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(6),
+                Constraint::Length(PRESET_SLOTS as u16 * 3 + 3),
+                Constraint::Min(0),
+            ])
+            .split(content);
+        let focus_wid = self.focusables().get(self.focus).copied();
+
+        // Animation profile card
+        let card = self.card("Animations · swaps the whole profile live", false);
+        let inner = card.inner(chunks[0]);
+        f.render_widget(card, chunks[0]);
+        let names = self.anim_profiles.clone();
+        let current = self.anim_current.clone();
+        self.variant_row(
+            f, inner.x + 1, inner.y, &names, current.as_deref(),
+            Wid::AnimProfile, focus_wid, inner.right(),
+        );
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "default = original feel · snappy = short, no overshoot · smooth = floaty",
+                Style::default().fg(color(&pal.subtext)),
+            )),
+            Rect { x: inner.x + 1, y: inner.y + 3, width: inner.width.saturating_sub(2), height: 1 },
+        );
+
+        // Presets card
+        let card = self.card("Presets · bundles of gaps / borders / effects", false);
+        let inner = card.inner(chunks[1]);
+        f.render_widget(card, chunks[1]);
+        for i in 0..PRESET_SLOTS {
+            let y = inner.y + (i as u16) * 3;
+            let summary = self
+                .preset_summaries
+                .get(i)
+                .cloned()
+                .flatten()
+                .unwrap_or_else(|| "(empty — Save stores the current look)".into());
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(
+                        format!("Slot {} ", i + 1),
+                        Style::default().fg(color(&pal.accent)).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(summary, Style::default().fg(color(&pal.subtext))),
+                ])),
+                Rect { x: inner.x + 1, y: y + 1, width: inner.width.saturating_sub(24), height: 1 },
+            );
+            let bx = inner.right().saturating_sub(22);
+            let mut x = bx;
+            x += self.button(
+                f, x, y, "Apply", Wid::PresetApply(i),
+                focus_wid == Some(Wid::PresetApply(i)), "", inner.right(),
+            );
+            self.button(
+                f, x, y, "Save", Wid::PresetSave(i),
+                focus_wid == Some(Wid::PresetSave(i)), "", inner.right(),
+            );
+        }
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "Apply changes the live session; use Appearance → Save to persist.",
+                Style::default().fg(color(&pal.subtext)),
+            )),
+            Rect {
+                x: inner.x + 1,
+                y: inner.y + PRESET_SLOTS as u16 * 3,
+                width: inner.width.saturating_sub(2),
+                height: 1,
+            },
+        );
+    }
+
+    fn draw_system(&mut self, f: &mut Frame, area: Rect) {
+        let pal = self.pal.clone();
+        let content = area.inner(Margin::new(1, 0));
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(7), Constraint::Length(7), Constraint::Min(0)])
+            .split(content);
+
+        let cpu_now = self.cpu_hist.back().copied().unwrap_or(0);
+        let card = self.card("CPU", false);
+        let inner = card.inner(chunks[0]);
+        f.render_widget(card, chunks[0]);
+        let cpu_data: Vec<u64> = self
+            .cpu_hist
+            .iter()
+            .rev()
+            .take(inner.width.saturating_sub(8) as usize)
+            .rev()
+            .copied()
+            .collect();
+        f.render_widget(
+            ratatui::widgets::Sparkline::default()
+                .data(&cpu_data)
+                .max(100)
+                .style(Style::default().fg(color(&pal.accent))),
+            Rect {
+                x: inner.x + 1,
+                y: inner.y,
+                width: inner.width.saturating_sub(8),
+                height: inner.height.min(4),
+            },
+        );
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                format!("{cpu_now:>3}%"),
+                Style::default().fg(color(&pal.accent)).add_modifier(Modifier::BOLD),
+            )),
+            Rect { x: inner.right().saturating_sub(5), y: inner.y + 1, width: 5, height: 1 },
+        );
+
+        let card = self.card("Memory", false);
+        let inner = card.inner(chunks[1]);
+        f.render_widget(card, chunks[1]);
+        let ram_data: Vec<u64> = self
+            .ram_hist
+            .iter()
+            .rev()
+            .take(inner.width.saturating_sub(2) as usize)
+            .rev()
+            .copied()
+            .collect();
+        f.render_widget(
+            ratatui::widgets::Sparkline::default()
+                .data(&ram_data)
+                .max(100)
+                .style(Style::default().fg(color(&pal.green))),
+            Rect {
+                x: inner.x + 1,
+                y: inner.y,
+                width: inner.width.saturating_sub(2),
+                height: inner.height.min(3),
+            },
+        );
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                self.ram_text.clone(),
+                Style::default().fg(color(&pal.text)),
+            )),
+            Rect { x: inner.x + 1, y: inner.y + 3, width: inner.width.saturating_sub(2), height: 1 },
+        );
     }
 
     /// A bordered mini-button; records its hit rect. Returns width used.
@@ -998,7 +1522,10 @@ impl App {
             f.render_widget(
                 Paragraph::new(Span::styled(
                     format!("{val:>3}"),
-                    Style::default().fg(color(&pal.accent)).add_modifier(Modifier::BOLD),
+                    // accent_hi: lifted accent, readable at small sizes
+                    Style::default()
+                        .fg(color(&pal.tones().accent_hi))
+                        .add_modifier(Modifier::BOLD),
                 )),
                 Rect { x, y: y + 1, width: 4, height: 1 },
             );
@@ -1053,7 +1580,12 @@ impl App {
         let content = area.inner(Margin::new(1, 0));
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(8), Constraint::Length(6), Constraint::Min(0)])
+            .constraints([
+                Constraint::Length(8),
+                Constraint::Length(6),
+                Constraint::Length(6),
+                Constraint::Min(0),
+            ])
             .split(content);
         let focus_wid = self.focusables().get(self.focus).copied();
 
@@ -1081,9 +1613,27 @@ impl App {
             focus_wid == Some(Wid::BarRestart), "", inner.right(),
         );
 
-        let card = self.card("Layout", false);
+        // Bar style card (ML4W/JaKooLit-style runtime switcher)
+        let card = self.card("Bar style · applies & restarts the bar", false);
         let inner = card.inner(chunks[1]);
         f.render_widget(card, chunks[1]);
+        let names = self.bar_styles.clone();
+        let current = self.bar_style_current.clone();
+        self.variant_row(
+            f, inner.x + 1, inner.y, &names, current.as_deref(),
+            Wid::BarStyle, focus_wid, inner.right(),
+        );
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "All styles wear the wallust palette — they recolor with the wallpaper.",
+                Style::default().fg(color(&pal.subtext)),
+            )),
+            Rect { x: inner.x + 1, y: inner.y + 3, width: inner.width.saturating_sub(2), height: 1 },
+        );
+
+        let card = self.card("Layout", false);
+        let inner = card.inner(chunks[2]);
+        f.render_widget(card, chunks[2]);
         self.button(
             f, inner.x + 1, inner.y, "󰜬 Reorder bar buttons…", Wid::BarReorder,
             focus_wid == Some(Wid::BarReorder), "", inner.right(),
@@ -1485,14 +2035,34 @@ input {
         assert_eq!(app.ints["gaps_in"], app.limits["gaps_in"]);
     }
 
+    /// Tests that repoint $HOME must not overlap (env is process-global).
+    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_temp_home<R>(tag: &str, f: impl FnOnce(&Path) -> R) -> R {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join(format!("hs-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".config/hypr")).unwrap();
+        let old_home = std::env::var("HOME").unwrap();
+        std::env::set_var("HOME", &dir);
+        let r = f(&dir);
+        std::env::set_var("HOME", old_home);
+        let _ = std::fs::remove_dir_all(&dir);
+        r
+    }
+
     #[test]
     fn app_nav_and_focus() {
         std::env::set_var("HYPRSETTINGS_DRYRUN", "1");
         let mut app = App::new(Some("power"));
-        assert_eq!(app.page, 4);
+        assert_eq!(app.page, PG_POWER);
         assert_eq!(app.focusables().len(), 5);
         app.goto_page("bar");
-        assert_eq!(app.page, 1);
+        assert_eq!(app.page, PG_BAR);
+        app.goto_page("system");
+        assert_eq!(app.page, PG_SYSTEM);
+        assert!(app.focusables().is_empty()); // read-only page
+        app.goto_page("appearance");
         // focus wraps
         app.focus = 0;
         app.on_key(KeyEvent::from(KeyCode::Up));
@@ -1502,31 +2072,116 @@ input {
     #[test]
     fn app_save_reports_missing_in_dryrun() {
         std::env::set_var("HYPRSETTINGS_DRYRUN", "1");
-        // point HOME at a temp dir with a minimal conf missing `rounding`
-        let dir = std::env::temp_dir().join(format!("hs-test-{}", std::process::id()));
-        std::fs::create_dir_all(dir.join(".config/hypr")).unwrap();
-        std::fs::write(
-            dir.join(".config/hypr/hyprland.conf"),
-            "general {\n    gaps_in = 5\n}\n",
-        )
-        .unwrap();
-        let old_home = std::env::var("HOME").unwrap();
-        std::env::set_var("HOME", &dir);
-        let mut app = App::new(None);
-        app.ints.insert("gaps_in", 9);
-        app.dirty.insert("gaps_in");
-        app.ints.insert("rounding", 12);
-        app.dirty.insert("rounding");
-        app.do_save();
-        std::env::set_var("HOME", old_home);
-        let saved =
-            std::fs::read_to_string(dir.join(".config/hypr/hyprland.conf")).unwrap();
-        assert!(saved.contains("gaps_in = 9"));
-        assert_eq!(app.last_save_missing, vec!["Corner rounding".to_string()]);
-        // gaps_in written → no longer dirty; rounding still dirty
-        assert!(!app.dirty.contains("gaps_in"));
-        assert!(app.dirty.contains("rounding"));
-        let _ = std::fs::remove_dir_all(dir);
+        with_temp_home("save", |dir| {
+            // minimal conf missing `rounding`
+            std::fs::write(
+                dir.join(".config/hypr/hyprland.conf"),
+                "general {\n    gaps_in = 5\n}\n",
+            )
+            .unwrap();
+            let mut app = App::new(None);
+            app.ints.insert("gaps_in", 9);
+            app.dirty.insert("gaps_in");
+            app.ints.insert("rounding", 12);
+            app.dirty.insert("rounding");
+            app.do_save();
+            let saved =
+                std::fs::read_to_string(dir.join(".config/hypr/hyprland.conf")).unwrap();
+            assert!(saved.contains("gaps_in = 9"));
+            assert_eq!(app.last_save_missing, vec!["Corner rounding".to_string()]);
+            // gaps_in written → no longer dirty; rounding still dirty
+            assert!(!app.dirty.contains("gaps_in"));
+            assert!(app.dirty.contains("rounding"));
+        });
+    }
+
+    #[test]
+    fn marker_parsing_both_kinds() {
+        assert_eq!(
+            parse_marker("/* waybar-style: glass */", "waybar-style"),
+            Some("glass".into())
+        );
+        assert_eq!(
+            parse_marker("# animation profile: snappy", "animation profile"),
+            Some("snappy".into())
+        );
+        assert_eq!(parse_marker("@import \"colors.css\";", "waybar-style"), None);
+        assert_eq!(parse_marker("/* waybar-style:   */", "waybar-style"), None);
+    }
+
+    #[test]
+    fn proc_stat_and_meminfo_parsers() {
+        let (total, idle) =
+            parse_proc_stat("cpu  100 0 50 800 50 0 0 0 0 0").unwrap();
+        assert_eq!(total, 1000);
+        assert_eq!(idle, 850); // idle + iowait
+        assert!(parse_proc_stat("cpu0 1 2 3 4 5").is_none());
+        let (t, a) = parse_meminfo("MemTotal: 16000000 kB\nMemFree: 1 kB\nMemAvailable: 4000000 kB\n").unwrap();
+        assert_eq!(t, 16000000);
+        assert_eq!(a, 4000000);
+    }
+
+    #[test]
+    fn preset_save_apply_roundtrip() {
+        std::env::set_var("HYPRSETTINGS_DRYRUN", "1");
+        with_temp_home("preset", |_dir| {
+            let mut app = App::new(None);
+            app.ints.insert("gaps_in", 12);
+            app.ints.insert("gaps_out", 24);
+            app.bools.insert("blur", false);
+            app.save_preset(0);
+            assert!(app.preset_summaries[0].as_deref().unwrap().contains("gaps 12/24"));
+            // change live values, then apply the preset back
+            app.ints.insert("gaps_in", 0);
+            app.bools.insert("blur", true);
+            app.dirty.clear();
+            app.apply_preset(0);
+            assert_eq!(app.ints["gaps_in"], 12);
+            assert!(!app.bools["blur"]);
+            assert!(app.dirty.contains("gaps_in"));
+            // applying an empty slot is a friendly no-op
+            let before = app.ints.clone();
+            app.apply_preset(2);
+            assert_eq!(app.ints, before);
+        });
+    }
+
+    #[test]
+    fn bar_style_and_anim_profile_switch() {
+        std::env::set_var("HYPRSETTINGS_DRYRUN", "1");
+        with_temp_home("variants", |dir| {
+            // waybar styles
+            let wb = dir.join(".config/waybar");
+            std::fs::create_dir_all(wb.join("styles")).unwrap();
+            std::fs::write(wb.join("style.css"), "/* waybar-style: default */\nbody{}\n").unwrap();
+            std::fs::write(wb.join("styles/default.css"), "/* waybar-style: default */\nbody{}\n").unwrap();
+            std::fs::write(wb.join("styles/glass.css"), "/* waybar-style: glass */\nwin{}\n").unwrap();
+            // animation profiles
+            let an = dir.join(".config/hypr/animations");
+            std::fs::create_dir_all(&an).unwrap();
+            std::fs::write(an.join("current.conf"), "# animation profile: default\nanimations{}\n").unwrap();
+            std::fs::write(an.join("default.conf"), "# animation profile: default\nanimations{}\n").unwrap();
+            std::fs::write(an.join("snappy.conf"), "# animation profile: snappy\nanimations{}\n").unwrap();
+
+            let mut app = App::new(None);
+            app.refresh_bar_styles();
+            app.refresh_theme();
+            assert_eq!(app.bar_styles, vec!["default".to_string(), "glass".to_string()]);
+            assert_eq!(app.bar_style_current.as_deref(), Some("default"));
+            assert_eq!(app.anim_profiles, vec!["default".to_string(), "snappy".to_string()]);
+
+            let gi = app.bar_styles.iter().position(|s| s == "glass").unwrap();
+            app.apply_bar_style(gi);
+            assert_eq!(app.bar_style_current.as_deref(), Some("glass"));
+            let css = std::fs::read_to_string(wb.join("style.css")).unwrap();
+            assert!(css.starts_with("/* waybar-style: glass */"));
+
+            let si = app.anim_profiles.iter().position(|s| s == "snappy").unwrap();
+            app.apply_anim_profile(si);
+            assert_eq!(app.anim_current.as_deref(), Some("snappy"));
+            let cur = std::fs::read_to_string(an.join("current.conf")).unwrap();
+            assert!(cur.starts_with("# animation profile: snappy"));
+        });
     }
 
     #[test]

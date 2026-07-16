@@ -47,10 +47,22 @@
 
 .notification {
   background: @surface;
-  border-radius: 10px;
+  border-radius: 14px;
   margin: 4px;
-  padding: 4px;
+  padding: 6px;
   border: 1px solid alpha(@accent, 0.2);
+  /* noctalia-style urgency cue: thin accent bar on the left */
+  border-left: 3px solid alpha(@accent, 0.8);
+}
+
+/* volume/brightness-style notifications show a themed progress bar */
+.notification progressbar,
+.notification progress {
+  border-radius: 999px;
+  background: alpha(@accent, 0.25);
+}
+.notification progress {
+  background: @accent;
 }
 
 .notification-content {
@@ -78,9 +90,22 @@
 
 .notification.critical {
   border: 1px solid @red;
+  border-left: 3px solid @red;
+}
+.notification.low {
+  border-left: 3px solid alpha(@subtext, 0.6);
 }
 
 .floating-notifications .notification {
   background: alpha(@base, 0.95);
   border: 1px solid alpha(@accent, 0.5);
+  border-left: 3px solid alpha(@accent, 0.8);
+}
+.floating-notifications .notification.critical {
+  border-left: 3px solid @red;
+}
+
+.control-center .notification-row:focus .notification,
+.control-center .notification-row:hover .notification {
+  background: alpha(@accent, 0.14);
 }

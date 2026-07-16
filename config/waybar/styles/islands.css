@@ -1,8 +1,8 @@
-/* waybar-style: default */
+/* waybar-style: islands */
 @import "colors.css";
 
-/* The ACTIVE style. Pick another look in Hypr Settings → Bar → Bar style
-   (variants live in styles/ — this file gets replaced by the picker). */
+/* Floating pill clusters: transparent bar, each side is a rounded island.
+   Colors all come from the wallust palette — recolors with the wallpaper. */
 
 * {
     font-family: "JetBrainsMono Nerd Font", "Font Awesome 6 Free";
@@ -11,49 +11,60 @@
 }
 
 window#waybar {
-    background: alpha(@base, 0.85);
+    background: transparent;
     color: @text;
-    border-bottom: 2px solid alpha(@accent, 0.6);
+}
+
+.modules-left,
+.modules-center,
+.modules-right {
+    background: alpha(@base, 0.82);
+    border: 1px solid alpha(@accent, 0.35);
+    border-radius: 14px;
+    margin: 4px 8px 2px 8px;
+    padding: 0 6px;
 }
 
 #workspaces button {
     padding: 0 8px;
+    margin: 3px 1px;
     color: @subtext;
     background: transparent;
+    border-radius: 10px;
 }
 #workspaces button.active {
     color: @base;
     background: @accent;
-    border-radius: 6px;
 }
 #workspaces button:hover {
     background: alpha(@accent, 0.3);
-    border-radius: 6px;
 }
 
 #clock, #cpu, #temperature, #memory, #disk, #network, #pulseaudio, #tray, #window {
     padding: 0 10px;
 }
 
-#cpu      { color: @yellow; }
+#cpu         { color: @yellow; }
 #temperature { color: @magenta; }
 #temperature.critical { color: @red; }
-#memory   { color: @green; }
-#disk     { color: @cyan; }
-#network  { color: @cyan; }
-#pulseaudio { color: @magenta; }
-#clock    { color: @text; font-weight: bold; }
+#memory      { color: @green; }
+#disk        { color: @cyan; }
+#network     { color: @cyan; }
+#pulseaudio  { color: @magenta; }
+#clock       { color: @text; font-weight: bold; }
 
 #custom-menu {
     color: @base;
     background: @accent;
     padding: 0 12px;
-    margin: 3px 4px;
-    border-radius: 6px;
+    margin: 3px 2px 3px 2px;
+    border-radius: 10px;
     font-weight: bold;
 }
-#custom-menu:hover {
-    background: @text;
+#custom-menu:hover { background: @text; }
+
+#custom-files, #custom-windows {
+    padding: 0 8px;
 }
 
 #custom-wallpaper, #custom-keybinds {
@@ -63,7 +74,7 @@ window#waybar {
 }
 #custom-wallpaper:hover, #custom-keybinds:hover {
     background: alpha(@cyan, 0.25);
-    border-radius: 6px;
+    border-radius: 10px;
 }
 
 #custom-firewall, #custom-clamav {
@@ -74,7 +85,7 @@ window#waybar {
 #custom-firewall.off, #custom-clamav.off { color: @red; }
 #custom-firewall:hover, #custom-clamav:hover {
     background: alpha(@accent, 0.25);
-    border-radius: 6px;
+    border-radius: 10px;
 }
 
 #custom-notification {
@@ -84,7 +95,7 @@ window#waybar {
 }
 #custom-notification:hover {
     background: alpha(@accent, 0.25);
-    border-radius: 6px;
+    border-radius: 10px;
 }
 
 #custom-power {
@@ -94,5 +105,5 @@ window#waybar {
 }
 #custom-power:hover {
     background: alpha(@red, 0.25);
-    border-radius: 6px;
+    border-radius: 10px;
 }

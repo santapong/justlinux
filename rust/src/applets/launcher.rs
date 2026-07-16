@@ -815,7 +815,14 @@ fn tool_entries() -> Vec<Entry> {
 
 // ---------------- filtering ----------------
 
-/// python rank(): 0 prefix · 1 word-prefix · 2 substring (or detail hit)
+/// q's chars appear in order in s ("tv" matches "television").
+pub fn is_subsequence(q: &str, s: &str) -> bool {
+    let mut it = s.chars();
+    q.chars().all(|c| it.any(|sc| sc == c))
+}
+
+/// python rank(): 0 prefix · 1 word-prefix · 2 substring (or detail hit),
+/// plus a new tier 3: fuzzy subsequence (so "ffx" still finds Firefox).
 pub fn rank(label: &str, detail: &str, q: &str) -> Option<u8> {
     if q.is_empty() {
         return Some(3);
@@ -832,6 +839,9 @@ pub fn rank(label: &str, detail: &str, q: &str) -> Option<u8> {
     }
     if detail.to_lowercase().contains(q) {
         return Some(2);
+    }
+    if q.len() >= 2 && is_subsequence(q, &nl) {
+        return Some(3);
     }
     None
 }
@@ -863,6 +873,7 @@ enum HitKind {
 
 pub struct Launcher {
     pal: colors::Palette,
+    tones: colors::Tones,
     mode: Mode,
     entries: Vec<Entry>,
     state: AppState,
@@ -871,6 +882,8 @@ pub struct Launcher {
     groups: Vec<Group>,
     tiles: Vec<Entry>,           // flat, visible (expanded) tiles
     tile_imgs: Vec<Option<String>>,
+    tile_group: Vec<usize>,      // flat tile -> group index (accent hue)
+    hover: Option<usize>,
     sel: usize,
     cols: u16,
     scroll: u16,
@@ -901,8 +914,11 @@ fn color(hex: &str) -> Color {
 
 impl Launcher {
     pub fn new(mode: Mode) -> Self {
+        let pal = colors::read_palette();
+        let tones = pal.tones();
         let mut l = Launcher {
-            pal: colors::read_palette(),
+            pal,
+            tones,
             mode,
             entries: Vec::new(),
             state: load_state(),
@@ -911,6 +927,8 @@ impl Launcher {
             groups: Vec::new(),
             tiles: Vec::new(),
             tile_imgs: Vec::new(),
+            tile_group: Vec::new(),
+            hover: None,
             sel: 0,
             cols: 4,
             scroll: 0,
@@ -968,15 +986,22 @@ impl Launcher {
                 capped.push(Group { title, entries: take, expanded });
             }
         }
-        self.tiles = capped
-            .iter()
-            .filter(|g| g.expanded)
-            .flat_map(|g| g.entries.iter().cloned())
-            .collect();
+        self.tiles = Vec::new();
+        self.tile_group = Vec::new();
+        for (gi, g) in capped.iter().enumerate() {
+            if g.expanded {
+                for e in &g.entries {
+                    self.tiles.push(e.clone());
+                    // untitled (flat) groups use the default accent
+                    self.tile_group.push(if g.title.is_some() { gi } else { usize::MAX });
+                }
+            }
+        }
         self.groups = capped;
         // resolve images (8 worker threads, like the python ThreadPoolExecutor)
         self.tile_imgs = self.resolve_images();
         self.resolver.flush();
+        self.hover = None;
         self.sel = 0;
         self.scroll = 0;
         if let Some(want) = self.focus_section.take() {
@@ -1434,6 +1459,13 @@ impl Launcher {
 
     pub fn on_mouse(&mut self, ev: MouseEvent) {
         match ev.kind {
+            MouseEventKind::Moved => {
+                let pos = Position { x: ev.column, y: ev.row };
+                self.hover = self.hits.iter().find_map(|(r, h)| match h {
+                    HitKind::Tile(i) if r.contains(pos) => Some(*i),
+                    _ => None,
+                });
+            }
             MouseEventKind::ScrollDown => {
                 self.scroll = self.scroll.saturating_add(3);
             }
@@ -1552,6 +1584,12 @@ impl Launcher {
                 );
             }
         }
+
+        // one placement sync per frame (tiles + preview pane together)
+        if self.images_on {
+            let placements = std::mem::take(&mut self.img_placements);
+            self.canvas.sync(&placements);
+        }
     }
 
     fn draw_filter(&mut self, f: &mut Frame, area: Rect, y: u16, placeholder: &str) -> u16 {
@@ -1646,14 +1684,28 @@ impl Launcher {
         if grid_bottom <= grid_top {
             return;
         }
-        let grid_area = Rect {
+        let full = Rect {
             x: area.x + 2,
             y: grid_top,
             width: area.width.saturating_sub(3),
             height: grid_bottom - grid_top,
         };
+        // wallpaper folder view: grid on the left, live preview pane right
+        let show_pane = wallpaper && !self.picking_monitor && full.width >= 64;
+        let (grid_area, pane_area) = if show_pane {
+            let pane_w = (full.width * 2 / 5).clamp(24, 46);
+            (
+                Rect { width: full.width - pane_w - 1, ..full },
+                Some(Rect { x: full.right() - pane_w, width: pane_w, ..full }),
+            )
+        } else {
+            (full, None)
+        };
         self.cols = self.desired_cols(grid_area.width);
         self.draw_tiles(f, grid_area);
+        if let Some(pane) = pane_area {
+            self.draw_preview_pane(f, pane);
+        }
 
         if actions_h > 0 {
             let by = grid_bottom;
@@ -1684,6 +1736,76 @@ impl Launcher {
                 self.hits.push((rect, kind));
                 x += w + 1;
             }
+        }
+    }
+
+    /// Right-side live preview of the selected wallpaper (bigger thumb +
+    /// file facts). The real desktop previews simultaneously via hyprpaper.
+    fn draw_preview_pane(&mut self, f: &mut Frame, area: Rect) {
+        let pal = self.pal.clone();
+        let tones = self.tones.clone();
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(color(&tones.border_hi)))
+            .title(Span::styled(
+                " Preview ",
+                Style::default().fg(color(&pal.accent)).add_modifier(Modifier::BOLD),
+            ));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        let Some(obj) = self.tiles.get(self.sel).cloned() else { return };
+        let img_h = inner.height.saturating_sub(3).max(1);
+        let img = self.tile_imgs.get(self.sel).cloned().flatten();
+        if obj.kind == "img" {
+            if let (Some(path), true) = (img, self.images_on) {
+                self.img_placements.push((
+                    path,
+                    inner.x + 1,
+                    inner.y,
+                    inner.width.saturating_sub(2),
+                    img_h,
+                ));
+            } else {
+                f.render_widget(
+                    Paragraph::new(Span::styled("󰋩", Style::default().fg(color(&pal.accent))))
+                        .alignment(ratatui::layout::Alignment::Center),
+                    Rect { x: inner.x, y: inner.y + img_h / 2, width: inner.width, height: 1 },
+                );
+            }
+            let size_kb = std::fs::metadata(&obj.path).map(|m| m.len() / 1024).unwrap_or(0);
+            let name: String = obj.label.chars().take(inner.width as usize - 2).collect();
+            f.render_widget(
+                Paragraph::new(vec![
+                    Line::styled(name, Style::default().fg(color(&pal.text))),
+                    Line::styled(
+                        format!("{size_kb} KB · Enter keeps it · Esc restores"),
+                        Style::default().fg(color(&pal.subtext)),
+                    ),
+                ]),
+                Rect {
+                    x: inner.x + 1,
+                    y: inner.bottom().saturating_sub(2),
+                    width: inner.width.saturating_sub(2),
+                    height: 2,
+                },
+            );
+        } else {
+            let hint = match obj.kind {
+                "dir" => "a folder — Enter opens it",
+                "up" => "go up one folder",
+                _ => "",
+            };
+            f.render_widget(
+                Paragraph::new(vec![
+                    Line::styled(
+                        format!("{}  {}", glyph_for(obj.kind), obj.label),
+                        Style::default().fg(color(&pal.text)),
+                    ),
+                    Line::styled(hint, Style::default().fg(color(&pal.subtext))),
+                ]),
+                Rect { x: inner.x + 1, y: inner.y + 1, width: inner.width.saturating_sub(2), height: 2 },
+            );
         }
     }
 
@@ -1753,6 +1875,8 @@ impl Launcher {
                         let title = g.title.clone().unwrap_or_default();
                         let arrow = if g.expanded { "▾" } else { "▸" };
                         let action = if g.expanded { "hide" } else { "show" };
+                        // each category wears its own hue from the palette ring
+                        let hue = pal.category_accent(*gi);
                         let rect = Rect {
                             x: area.x + 1,
                             y: (screen_y + 1) as u16,
@@ -1764,12 +1888,13 @@ impl Launcher {
                                 Span::styled(
                                     format!("{arrow} {title}  "),
                                     Style::default()
-                                        .fg(color(&pal.accent))
+                                        .fg(color(&hue))
                                         .add_modifier(Modifier::BOLD),
                                 ),
                                 Span::styled(
                                     format!("{} apps — click to {action}", g.entries.len()),
-                                    Style::default().fg(color(&pal.subtext)),
+                                    // accent_soft: muted accent for secondary emphasis
+                                    Style::default().fg(color(&self.tones.accent_soft)),
                                 ),
                             ])),
                             rect,
@@ -1799,32 +1924,40 @@ impl Launcher {
             vy += h as i32;
         }
 
-        // sync kitty image placements
-        if self.images_on {
-            let placements = std::mem::take(&mut self.img_placements);
-            self.canvas.sync(&placements);
-        }
     }
 
     fn draw_tile(&mut self, f: &mut Frame, rect: Rect, i: usize, fully_visible: bool) {
         let pal = self.pal.clone();
+        let tones = self.tones.clone();
         let Some(obj) = self.tiles.get(i) else { return };
         let obj = obj.clone();
         let selected = i == self.sel;
+        let hovered = self.hover == Some(i) && !selected;
+        // tile hue: its category's accent (flat groups → default accent)
+        let group_hue = match self.tile_group.get(i) {
+            Some(&gi) if gi != usize::MAX => pal.category_accent(gi),
+            _ => pal.accent.clone(),
+        };
         let border_style = if selected {
             Style::default().fg(color(&pal.accent))
+        } else if hovered {
+            Style::default().fg(color(&tones.border_hi))
         } else {
             Style::default().fg(Color::Reset).add_modifier(Modifier::DIM)
         };
-        let block = Block::default()
+        let mut block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(border_style);
-        let inner = block.inner(rect);
+        // tonal fill: stronger for selected, whisper for hovered
         if selected {
+            block = block.style(Style::default().bg(color(&tones.select_bg)));
+        } else if hovered {
+            block = block.style(Style::default().bg(color(&tones.hover_bg)));
+        }
+        let inner = block.inner(rect);
+        if selected || hovered {
             f.render_widget(block, rect);
-        } else {
-            // transparent border: just reserve the space
         }
         self.hits.push((rect, HitKind::Tile(i)));
 
@@ -1846,7 +1979,7 @@ impl Launcher {
             f.render_widget(
                 Paragraph::new(Span::styled(
                     glyph,
-                    Style::default().fg(color(&pal.accent)),
+                    Style::default().fg(color(&group_hue)),
                 ))
                 .alignment(ratatui::layout::Alignment::Center),
                 Rect { x: inner.x, y: gy.min(inner.bottom().saturating_sub(1)), width: inner.width, height: 1 },
@@ -1944,6 +2077,83 @@ mod tests {
         assert_eq!(rank("Weather", "weather", "xyz"), None);
         assert_eq!(rank("VLC media player", "vlc", "med"), Some(1));
         assert_eq!(rank("VLC media player", "vlc", "dia"), Some(2)); // substring, not word start
+    }
+
+    #[test]
+    fn fuzzy_tier_catches_subsequences_only_as_last_resort() {
+        // "ffx" is not a prefix/word/substring of firefox — fuzzy tier 3
+        assert_eq!(rank("Firefox", "firefox", "ffx"), Some(3));
+        // exact tiers still win over fuzzy
+        assert_eq!(rank("Firefox", "firefox", "fox"), Some(2));
+        // single char never fuzzy-matches (too noisy)
+        assert_eq!(rank("Weather", "weather", "z"), None);
+        // chars out of order don't match
+        assert_eq!(rank("Firefox", "firefox", "xf"), None);
+        assert!(is_subsequence("tv", "television"));
+        assert!(!is_subsequence("vt", "television"));
+    }
+
+    #[test]
+    fn tile_groups_track_category_headers() {
+        std::env::set_var("HYPRSETTINGS_DRYRUN", "1");
+        let mut l = Launcher::new(Mode::Apps);
+        l.entries = vec![
+            Entry {
+                kind: "app",
+                label: "Browser".into(),
+                detail: "browser".into(),
+                cats: "Network;".into(),
+                exec: "true".into(),
+                ..Default::default()
+            },
+            Entry {
+                kind: "app",
+                label: "Game".into(),
+                detail: "game".into(),
+                cats: "Game;".into(),
+                exec: "true".into(),
+                ..Default::default()
+            },
+        ];
+        l.expanded.insert("󰖟 Internet".into());
+        l.expanded.insert("󰊗 Games".into());
+        l.filter.clear();
+        l.refilter();
+        assert_eq!(l.tiles.len(), 2);
+        assert_eq!(l.tile_group.len(), 2);
+        // two different groups → two different accent hues
+        let h0 = l.pal.category_accent(l.tile_group[0]);
+        let h1 = l.pal.category_accent(l.tile_group[1]);
+        assert_ne!(l.tile_group[0], l.tile_group[1]);
+        assert_ne!(h0, h1);
+        // filtered mode collapses to one flat (default-accent) group
+        l.filter = "browser".into();
+        l.refilter();
+        assert_eq!(l.tile_group, vec![usize::MAX]);
+    }
+
+    #[test]
+    fn draw_smoke_wallpaper_preview_pane() {
+        std::env::set_var("HYPRSETTINGS_DRYRUN", "1");
+        let mut l = Launcher::new(Mode::Wallpaper);
+        // move into folder view with a fake selection
+        l.picking_monitor = false;
+        l.tiles = vec![Entry {
+            kind: "img",
+            label: "sunset.png".into(),
+            path: "/nonexistent/sunset.png".into(),
+            ..Default::default()
+        }];
+        l.tile_group = vec![usize::MAX];
+        l.tile_imgs = vec![None];
+        l.sel = 0;
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| l.draw(f)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("Preview"), "preview pane rendered");
+        assert!(text.contains("sunset.png"));
     }
 
     #[test]
