@@ -15,6 +15,7 @@ so you can tell them apart; selecting an image previews it on the actual
 desktop instantly; Enter keeps it (recolors the desktop), Esc restores.
 """
 
+import asyncio
 import hashlib
 import json
 import time
@@ -33,8 +34,42 @@ from textual.message import Message
 from textual.widgets import (Button, Footer, Input, Label, ListItem,
                              ListView, Static)
 
+def _import_image_widget():
+    """textual-image probes the terminal at import (blocking queries with a
+    0.1s timeout). Under boot load the reply arrives late and leaks into the
+    filter box as garbage like '_Gi=1234;OK', and the failed probe drops icon
+    rendering to block-art. We already know the terminal — kitty — so import
+    with stdout looking like a non-tty (no probe is ever sent) and pick the
+    renderer ourselves."""
+    real = sys.__stdout__
+
+    class _Blind:
+        def __getattr__(self, attr):
+            return getattr(real, attr)
+
+        def isatty(self):
+            return False
+
+    sys.__stdout__ = _Blind()
+    try:
+        from textual_image import _terminal
+        from textual_image.widget import TGPImage, UnicodeImage
+    finally:
+        sys.__stdout__ = real
+    # the import cached a dummy 10x20 cell size; redo it via ioctl (no probe)
+    try:
+        delattr(_terminal.get_cell_size, "_result")
+    except AttributeError:
+        pass
+    if real is not None and real.isatty():
+        _terminal.get_cell_size()
+    on_tty = real is not None and real.isatty()
+    in_kitty = os.environ.get("KITTY_WINDOW_ID") or "kitty" in os.environ.get("TERM", "")
+    return TGPImage if (on_tty and in_kitty) else UnicodeImage
+
+
 try:
-    from textual_image.widget import Image
+    Image = _import_image_widget()
 except Exception:
     Image = None
 
@@ -737,8 +772,13 @@ class HyprLauncher(App):
                 return make_thumb(o.get("path"))
             return None
 
-        with ThreadPoolExecutor(max_workers=8) as ex:
-            paths = dict(zip(map(id, flat), ex.map(img_for, flat)))
+        def resolve_images():
+            with ThreadPoolExecutor(max_workers=8) as ex:
+                return dict(zip(map(id, flat), ex.map(img_for, flat)))
+
+        # off the event loop: at cold boot this can take a while, and the UI
+        # must keep answering keys (Esc/Enter) instead of freezing
+        paths = await asyncio.to_thread(resolve_images)
         self.tiles = []
         widgets = []
         for si, (title, gobjs) in enumerate(capped):
@@ -877,6 +917,12 @@ class HyprLauncher(App):
 
     def on_input_changed(self, event: Input.Changed):
         value = event.value
+        # a late terminal reply can get typed into the box as garbage
+        # (looks like '_Gi=1234;OK\'); scrub it instead of filtering by it
+        clean = re.sub(r"_?Gi=\d+;\w+\\?", "", value)
+        if clean != value:
+            event.input.value = clean
+            return
         if self._filter_timer is not None:
             self._filter_timer.stop()
 

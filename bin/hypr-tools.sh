@@ -489,6 +489,20 @@ main_menu() {
     esac
 }
 
+# If the same window was spawned a moment ago and hasn't mapped yet (slow at
+# boot), a repeated keypress must not spawn a duplicate. $1: lock tag, $2: pid to store.
+spawn_guard_busy() {
+    local lock="${XDG_RUNTIME_DIR:-/tmp}/hypr-spawn-$1.pid" pid
+    pid=$(cat "$lock" 2>/dev/null)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        return 0    # previous spawn still alive but window not mapped yet
+    fi
+    return 1
+}
+spawn_guard_set() {
+    printf '%s' "$2" > "${XDG_RUNTIME_DIR:-/tmp}/hypr-spawn-$1.pid"
+}
+
 settings_panel() {
     # Hypr Settings — click-and-pick TUI control panel (textual) in a glass float
     # $1 (optional): page to open — appearance|bar|wallpaper|security|power
@@ -502,8 +516,9 @@ for c in json.load(sys.stdin):
     if [ -n "$addr" ]; then
         [ -n "$page" ] && printf '%s' "$page" > "${XDG_RUNTIME_DIR:-/tmp}/hypr-settings.page"
         hyprctl dispatch focuswindow "address:$addr" >/dev/null
-    else
+    elif ! spawn_guard_busy settings; then
         kitty --class floatterm -o background_opacity=0.93 --title "Hypr Settings" python3 "$HOME/.local/bin/hypr-settings" $page &
+        spawn_guard_set settings $!
         disown
     fi
 }
@@ -527,8 +542,9 @@ for c in json.load(sys.stdin):
         print(c['address']); break" 2>/dev/null)
     if [ -n "$addr" ]; then
         hyprctl dispatch focuswindow "address:$addr" >/dev/null
-    else
+    elif ! spawn_guard_busy "launcher-$mode"; then
         kitty --class hyprlauncher -o background_opacity=0.93 --title "$title" python3 "$HOME/.local/bin/hypr-launcher" "$mode" &
+        spawn_guard_set "launcher-$mode" $!
         disown
     fi
 }
