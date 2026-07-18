@@ -40,8 +40,11 @@ class LayerWindow(Gtk.Window):
            (env HYPRPET_LAYER-style overrides are the caller's business)
     """
 
+    KEYBOARD = {"none": 0, "exclusive": 1, "on_demand": 2}
+
     def __init__(self, name, default_pos="bottom_middle", default_x=0,
-                 default_y=12, layer="bottom", namespace=None):
+                 default_y=12, layer="bottom", namespace=None,
+                 keyboard="none", fullscreen=False):
         super().__init__()
         visual = self.get_screen().get_rgba_visual()
         if visual:
@@ -52,14 +55,27 @@ class LayerWindow(Gtk.Window):
         LLS.gtk_layer_set_layer(p, LAYER.get(layer, 1))
         LLS.gtk_layer_set_namespace(
             p, (namespace or f"hypr-{name}").encode())
-        pos = c.get(f"{name}_pos", default_pos)
-        x = int(c.get(f"{name}_x", default_x))
-        y = int(c.get(f"{name}_y", default_y))
-        for edge in POS_ANCHORS.get(pos, ("bottom",)):
-            LLS.gtk_layer_set_anchor(p, EDGE[edge], True)
-            LLS.gtk_layer_set_margin(
-                p, EDGE[edge], x if edge in ("left", "right") else y)
-        LLS.gtk_layer_set_exclusive_zone(p, 0)
+        LLS.gtk_layer_set_keyboard_mode(p, self.KEYBOARD.get(keyboard, 0))
+        if fullscreen:
+            for edge in EDGE.values():
+                LLS.gtk_layer_set_anchor(p, edge, True)
+            # ignore exclusive zones (waybar) — cover the WHOLE monitor
+            LLS.gtk_layer_set_exclusive_zone(p, -1)
+        else:
+            pos = c.get(f"{name}_pos", default_pos)
+            x = int(c.get(f"{name}_x", default_x))
+            y = int(c.get(f"{name}_y", default_y))
+            for edge in POS_ANCHORS.get(pos, ("bottom",)):
+                LLS.gtk_layer_set_anchor(p, EDGE[edge], True)
+                LLS.gtk_layer_set_margin(
+                    p, EDGE[edge], x if edge in ("left", "right") else y)
+        if not fullscreen:
+            LLS.gtk_layer_set_exclusive_zone(p, 0)
+
+    def set_target_monitor(self, gdk_monitor):
+        """Pin the surface to a specific monitor (before show_all)."""
+        if gdk_monitor is not None:
+            LLS.gtk_layer_set_monitor(gptr(self), gptr(gdk_monitor))
 
     def anchor_all(self, edges=("left", "bottom")):
         p = gptr(self)

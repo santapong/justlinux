@@ -1,0 +1,296 @@
+#!/usr/bin/env python3
+"""hypr-arrange — drag widgets around the desktop, WYSIWYG.
+
+A fullscreen OVERLAY layer surface (renders above everything, even
+fullscreen windows) that shows a ghost frame for every desktop widget at
+its real position:
+
+  · drag a frame        → move the widget (12px grid snap)
+  · drag its corner     → resize (scales the widget's font / icon size)
+  · Enter / Save        → write widgets.conf + restart the fleet
+  · Esc / right-click   → cancel, change nothing
+
+Launched from Hypr Settings → Widgets → "Arrange on screen…".
+"""
+import json
+import re
+import signal
+import subprocess
+import sys
+from pathlib import Path
+
+import cairo
+import gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, Gdk, GLib
+
+sys.path.insert(0, str(Path.home() / ".local/lib"))
+from hyprdesk import colors, conf
+from hyprdesk.layer import LayerWindow
+
+WIDGETS_CONF = Path.home() / ".config/conky/widgets.conf"
+GRID = 12
+HANDLE = 18
+PET_STRIP_H = 56
+
+
+def conf_set(key, val):
+    try:
+        lines = WIDGETS_CONF.read_text().splitlines()
+    except OSError:
+        lines = []
+    out, done = [], False
+    for line in lines:
+        if re.match(rf"^{re.escape(key)}\s*=", line):
+            out.append(f"{key}={val}")
+            done = True
+        else:
+            out.append(line)
+    if not done:
+        out.append(f"{key}={val}")
+    WIDGETS_CONF.write_text("\n".join(out) + "\n")
+
+
+def surfaces():
+    """([items], (mx,my,mw,mh), monitor_name) of widget layer surfaces
+    in local coordinates on the monitor that holds them."""
+    out = subprocess.run(["hyprctl", "-j", "layers"], capture_output=True,
+                         text=True, timeout=3).stdout
+    mons = subprocess.run(["hyprctl", "-j", "monitors"], capture_output=True,
+                          text=True, timeout=3).stdout
+    geo = {m["name"]: (m["x"], m["y"], m["width"], m["height"])
+           for m in json.loads(mons)}
+    best, items = None, []
+    for mon_name, mon in json.loads(out).items():
+        found = []
+        for lvl in mon.get("levels", {}).values():
+            for layer in lvl:
+                ns = layer.get("namespace", "")
+                if ns not in ("conky_namespace", "hypr-appdock"):
+                    continue
+                name = "apps" if ns == "hypr-appdock" else \
+                    widget_of_pid(layer.get("pid", 0))
+                if not name:
+                    continue
+                found.append({"name": name, "x": layer["x"], "y": layer["y"],
+                              "w": layer["w"], "h": layer["h"]})
+        if len(found) > len(items):
+            items, best = found, mon_name
+    if not best:
+        return [], (0, 0, 1600, 900), None
+    mx, my, mw, mh = geo.get(best, (0, 0, 1600, 900))
+    for it in items:
+        it["x"] -= mx
+        it["y"] -= my
+    return items, (mx, my, mw, mh), best
+
+
+def widget_of_pid(pid):
+    try:
+        args = Path(f"/proc/{pid}/cmdline").read_bytes().decode().split("\0")
+        for a in args:
+            m = re.search(r"widgets/(\w+)\.conf", a)
+            if m:
+                return m.group(1)
+    except OSError:
+        pass
+    return None
+
+
+def base_font_size(name):
+    try:
+        t = (Path.home() / f".config/conky/widgets/{name}.conf").read_text()
+        m = re.search(r":size=(\d+)'", t)
+        return int(m.group(1)) if m else 11
+    except OSError:
+        return 11
+
+
+class Arranger(LayerWindow):
+    def __init__(self):
+        super().__init__("arrange", layer="overlay", namespace="hypr-arrange",
+                         keyboard="on_demand", fullscreen=True)
+        # failsafe: an editor that can't be closed must close itself
+        GLib.timeout_add_seconds(300, Gtk.main_quit)
+        self.set_app_paintable(True)
+        self.pal = colors()
+        self.items, (mx, my, self.mon_w, self.mon_h), _mon_name = surfaces()
+        # open ON the monitor that holds the widgets, not the focused one
+        display = Gdk.Display.get_default()
+        for i in range(display.get_n_monitors()):
+            g = display.get_monitor(i).get_geometry()
+            if (g.x, g.y) == (mx, my):
+                self.set_target_monitor(display.get_monitor(i))
+                break
+        self.grab = None            # [item, mode, dx, dy, orig_w]
+        self.dirty = set()
+
+        self.area = Gtk.DrawingArea()
+        self.area.set_size_request(self.mon_w, self.mon_h)
+        self.area.add_events(Gdk.EventMask.BUTTON_PRESS_MASK
+                             | Gdk.EventMask.BUTTON_RELEASE_MASK
+                             | Gdk.EventMask.POINTER_MOTION_MASK)
+        self.area.connect("draw", self.on_draw)
+        self.area.connect("button-press-event", self.on_press)
+        self.area.connect("button-release-event", self.on_release)
+        self.area.connect("motion-notify-event", self.on_motion)
+        self.add(self.area)
+        self.connect("key-press-event", self.on_key)
+        self.show_all()
+
+    # ----- geometry → widgets.conf -----
+    def save(self):
+        for it in (i for i in self.items if i["name"] in self.dirty):
+            name, x, y, w, h = it["name"], it["x"], it["y"], it["w"], it["h"]
+            cx = x + w / 2
+            # middle anchors zero the offset — use them ONLY when the
+            # frame is truly centered (±24px), else keep exact corners
+            if abs(cx - self.mon_w / 2) < 24:
+                col = "middle"
+            elif cx < self.mon_w / 2:
+                col = "left"
+            else:
+                col = "right"
+            cy = y + h / 2
+            if abs(cy - self.mon_h / 2) < 24 and col != "middle":
+                row = "middle"
+            elif cy < self.mon_h / 2:
+                row = "top"
+            else:
+                row = "bottom"
+            if col == "middle" and row == "middle":
+                row = "top"     # no middle_middle anchor exists
+            pos = f"{row}_{col}"
+            gx = {"left": x, "right": self.mon_w - (x + w), "middle": 0}[col]
+            gy = {"top": y, "bottom": self.mon_h - (y + h),
+                  "middle": 0}[row]
+            conf_set(f"{name}_pos", pos)
+            conf_set(f"{name}_x", max(0, int(gx)))
+            conf_set(f"{name}_y", max(0, int(gy)))
+            if "scale" in it:
+                c = conf()
+                if name == "apps":
+                    cur = int(c.get("apps_size", 44) or 44)
+                    conf_set("apps_size",
+                             max(24, min(96, int(cur * it["scale"]))))
+                else:
+                    cur = int(c.get(f"{name}_size", 0) or
+                              base_font_size(name))
+                    conf_set(f"{name}_size",
+                             max(6, min(40, int(cur * it["scale"]))))
+        subprocess.Popen([str(Path.home() / ".local/bin/desktop-widgets.sh"),
+                          "restart"], start_new_session=True)
+        Gtk.main_quit()
+
+    # ----- input -----
+    def item_at(self, x, y):
+        for it in reversed(self.items):
+            if it["x"] <= x <= it["x"] + it["w"] and \
+               it["y"] <= y <= it["y"] + it["h"]:
+                corner = (x > it["x"] + it["w"] - HANDLE and
+                          y > it["y"] + it["h"] - HANDLE)
+                return it, ("resize" if corner else "move")
+        return None, None
+
+    def on_press(self, _w, ev):
+        if ev.button == 3:
+            Gtk.main_quit()
+            return True
+        it, mode = self.item_at(ev.x, ev.y)
+        if it:
+            it.setdefault("orig_w", it["w"])
+            it.setdefault("orig_h", it["h"])
+            self.grab = [it, mode, ev.x - it["x"], ev.y - it["y"], it["w"]]
+        return True
+
+    def on_motion(self, _w, ev):
+        if not self.grab:
+            return True
+        it, mode, dx, dy, ow = self.grab
+        if mode == "move":
+            it["x"] = round((ev.x - dx) / GRID) * GRID
+            it["y"] = round((ev.y - dy) / GRID) * GRID
+            it["x"] = max(0, min(self.mon_w - it["w"], it["x"]))
+            it["y"] = max(0, min(self.mon_h - it["h"], it["y"]))
+        else:
+            factor = max(0.5, min(2.5, (ev.x - it["x"]) / it["orig_w"]))
+            it["scale"] = factor            # always relative to ORIGINAL size
+            it["w"] = int(it["orig_w"] * factor)
+            it["h"] = int(it["orig_h"] * factor)
+        self.dirty.add(it["name"])
+        self.area.queue_draw()
+        return True
+
+    def on_release(self, *_):
+        self.grab = None
+        return True
+
+    def on_key(self, _w, ev):
+        if ev.keyval == Gdk.KEY_Escape:
+            Gtk.main_quit()
+        elif ev.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+            self.save()
+        return True
+
+    # ----- drawing -----
+    def on_draw(self, _w, cr):
+        bg = [int(self.pal["bg"][i:i + 2], 16) / 255 for i in (1, 3, 5)]
+        acc = [int(self.pal["accent2"][i:i + 2], 16) / 255 for i in (1, 3, 5)]
+        fg = [int(self.pal["fg"][i:i + 2], 16) / 255 for i in (1, 3, 5)]
+        cr.set_source_rgba(*bg, 0.45)               # dim the desktop
+        cr.paint()
+        # pet strip marker (not arrangeable)
+        cr.set_source_rgba(*fg, 0.08)
+        cr.rectangle(0, self.mon_h - PET_STRIP_H, self.mon_w, PET_STRIP_H)
+        cr.fill()
+        cr.select_font_face("JetBrainsMono Nerd Font")
+        for it in self.items:
+            x, y, w, h = it["x"], it["y"], it["w"], it["h"]
+            r = 12
+            cr.new_path()
+            cr.arc(x + r, y + r, r, 3.14, 4.71)
+            cr.arc(x + w - r, y + r, r, 4.71, 6.28)
+            cr.arc(x + w - r, y + h - r, r, 0, 1.57)
+            cr.arc(x + r, y + h - r, r, 1.57, 3.14)
+            cr.close_path()
+            cr.set_source_rgba(*bg, 0.85)
+            cr.fill_preserve()
+            hot = it["name"] in self.dirty
+            cr.set_source_rgba(*(acc if hot else fg),
+                               0.9 if hot else 0.45)
+            cr.set_line_width(2)
+            cr.stroke()
+            cr.set_font_size(13)
+            cr.set_source_rgba(*fg, 0.95)
+            cr.move_to(x + 12, y + 22)
+            cr.show_text(it["name"])
+            if "scale" in it:
+                cr.set_source_rgba(*acc, 0.9)
+                cr.move_to(x + 12, y + 38)
+                cr.show_text(f"×{it['scale']:.2f}")
+            # resize handle
+            cr.set_source_rgba(*acc, 0.8)
+            cr.rectangle(x + w - HANDLE, y + h - HANDLE, HANDLE, HANDLE)
+            cr.fill()
+        # help bar
+        msg = "drag = move · corner = resize · Enter = save · Esc = cancel"
+        cr.set_font_size(15)
+        ext = cr.text_extents(msg)
+        bx = (self.mon_w - ext.width) / 2
+        cr.set_source_rgba(*bg, 0.9)
+        cr.rectangle(bx - 16, 18, ext.width + 32, 34)
+        cr.fill()
+        cr.set_source_rgba(*fg, 1)
+        cr.move_to(bx, 41)
+        cr.show_text(msg)
+
+
+def main():
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    signal.signal(signal.SIGTERM, lambda *_: Gtk.main_quit())
+    Arranger()
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

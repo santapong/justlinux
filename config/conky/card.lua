@@ -8,7 +8,7 @@ local function conf()
     local f = io.open(os.getenv("HOME") .. "/.config/conky/widgets.conf")
     if f then
         for line in f:lines() do
-            local k, v = line:match("^(%w+)%s*=%s*(%S+)")
+            local k, v = line:match("^([%w_]+)%s*=%s*(%S+)")
             if k then t[k] = v end
         end
         f:close()
@@ -63,6 +63,12 @@ function M.place(cfg, name, def_pos, def_x, def_y)
     cfg.alignment = c[name .. "_pos"] or def_pos
     cfg.gap_x = tonumber(c[name .. "_x"]) or def_x
     cfg.gap_y = tonumber(c[name .. "_y"]) or def_y
+    -- Arrange-mode resize: <name>_size overrides the base font point size
+    local size = tonumber(c[name .. "_size"])
+    if size then
+        size = math.max(6, math.min(40, math.floor(size)))
+        cfg.font = cfg.font:gsub(":size=%d+", ":size=" .. size)
+    end
     return cfg
 end
 

@@ -2,17 +2,24 @@
 """hypr-pet — tiny pixel creatures that wander along the bottom of the desktop.
 
 Creatures: a wallust-colored cat, and Clawd, a little Claude-orange
-starburst mascot (toggle via claude_pet in ~/.config/conky/widgets.conf).
+starburst mascot (toggle via claude_pet in widgets.conf).
 
-Runs as a gtk-layer-shell surface on the BOTTOM layer (above wallpaper,
-below windows) with an empty input region, so it can never block clicks,
-steal focus, or show up in window lists. gtk-layer-shell is driven through
-ctypes because the GIR typelib for it isn't packaged on this box.
+INTERACTIVE: the input region follows the sprites exactly — the rest of
+the strip stays click-through (hyprland-ui-ux rules).
+  · click a pet      → pet it: hearts + happy wiggle
+  · double-click     → sleep / wake
+  · drag             → pick it up, drop it anywhere on the strip
+  · sometimes a pet wanders toward your mouse on its own
+
+Runs as a gtk-layer-shell surface on the BOTTOM layer via hyprdesk.
 """
+import json
 import os
 import random
 import signal
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import cairo
@@ -27,9 +34,9 @@ from hyprdesk.layer import LayerWindow
 SCALE = 4          # one pixel-art cell = SCALE screen pixels
 FPS_MS = 140       # animation tick
 STRIP_H = 14 * SCALE
+DRAG_PX = 6        # click-vs-drag threshold (ui-ux heuristics)
 
 WALLUST = colors()
-
 
 # ---------------- sprites (all drawn FACING LEFT — head on the left) -------
 
@@ -76,7 +83,6 @@ CAT_SLEEP = [
     "..BBBBB..",
 ]
 
-# Clawd — the Claude starburst: orange rays around a round face
 CLAWD_WALK_A = [
     "....O..O....",
     ".O..OOOO..O.",
@@ -99,8 +105,6 @@ CLAWD_WALK_B = [
     "....OOOO....",
     "....O..O....",
 ]
-CLAWD_SIT_A = CLAWD_WALK_A
-CLAWD_SIT_B = CLAWD_WALK_B
 CLAWD_SLEEP = [
     "............",
     "....OOOO....",
@@ -113,22 +117,27 @@ CLAWD_SLEEP = [
 CAT_COLORS = {"B": rgb(WALLUST["fg"]), "D": rgb(WALLUST["muted"]),
               "E": rgb(WALLUST["accent2"]), "N": rgb(WALLUST["accent"]),
               "T": rgb(WALLUST["fg"])}
-# Claude brand orange, independent of wallpaper
 CLAWD_COLORS = {"O": rgb("#D97757"), "D": rgb("#8f4830"),
                 "E": rgb("#1d1d1b")}
 
 CAT = {"walk": (CAT_WALK_A, CAT_WALK_B), "sit": (CAT_SIT_A, CAT_SIT_B),
-       "sleep": (CAT_SLEEP, CAT_SLEEP), "colors": CAT_COLORS}
+       "sleep": (CAT_SLEEP, CAT_SLEEP), "love": (CAT_SIT_A, CAT_SIT_B),
+       "follow": (CAT_WALK_A, CAT_WALK_B), "carried": (CAT_SIT_A, CAT_SIT_A),
+       "colors": CAT_COLORS}
 CLAWD = {"walk": (CLAWD_WALK_A, CLAWD_WALK_B),
-         "sit": (CLAWD_SIT_A, CLAWD_SIT_B),
-         "sleep": (CLAWD_SLEEP, CLAWD_SLEEP), "colors": CLAWD_COLORS}
+         "sit": (CLAWD_WALK_A, CLAWD_WALK_A),
+         "sleep": (CLAWD_SLEEP, CLAWD_SLEEP),
+         "love": (CLAWD_WALK_A, CLAWD_WALK_B),
+         "follow": (CLAWD_WALK_A, CLAWD_WALK_B),
+         "carried": (CLAWD_WALK_A, CLAWD_WALK_A),
+         "colors": CLAWD_COLORS}
 
 
-def draw_frame(cr, frame, colors, x, y, facing_right):
+def draw_frame(cr, frame, colors_, x, y, facing_right):
     w = max(len(r) for r in frame)
     for ry, row in enumerate(frame):
         for rx, ch in enumerate(row):
-            col = colors.get(ch)
+            col = colors_.get(ch)
             if not col:
                 continue
             # art faces LEFT — mirror it when the creature moves right
@@ -147,18 +156,53 @@ class Pet:
         self.sprites = sprites
         self.width = width
         self.speed = speed
+        self.span = max(len(r) for r in sprites["walk"][0]) * SCALE
         self.x = random.randint(50, max(51, width - 150))
         self.dir = random.choice((-1, 1))
         self.state = "walk"
         self.frame_no = 0
         self.ticks_left = random.randint(30, 90)
         self.zzz = 0
+        self.follow_x = None
         self._tick_n = 0
 
+    # --- interactions ---
+    def bbox(self):
+        return (self.x - 8, 0, self.span + 16, STRIP_H)
+
+    def hit(self, px):
+        return self.x - 8 <= px <= self.x + self.span + 8
+
+    def love(self):
+        self.state = "love"
+        self.zzz = 0
+        self.ticks_left = 14
+
+    def toggle_sleep(self):
+        if self.state == "sleep":
+            self.state = "walk"
+            self.ticks_left = random.randint(30, 120)
+        else:
+            self.state = "sleep"
+            self.zzz = 0
+            self.ticks_left = random.randint(60, 150)
+
+    def carry(self, px):
+        self.state = "carried"
+        self.x = max(0, min(self.width - self.span, int(px) - self.span // 2))
+
+    def drop(self):
+        self.state = "walk"
+        self.dir = random.choice((-1, 1))
+        self.ticks_left = random.randint(30, 120)
+
+    # --- simulation ---
     def tick(self):
         self._tick_n += 1
+        if self.state == "carried":
+            return False                    # position driven by the pointer
+        # (a stray non-left button can orphan a grab — window watchdog drops)
         if self.state == "sleep":
-            # sleepers move slowly: animate every 4th tick only
             if self._tick_n % 4:
                 return False
             self.zzz = (self.zzz + 1) % 3
@@ -168,20 +212,36 @@ class Pet:
             self.x += self.dir * SCALE * self.speed
             if self.x < 10:
                 self.x, self.dir = 10, 1
-            elif self.x > self.width - self.SPAN - 10:
-                self.x, self.dir = self.width - self.SPAN - 10, -1
+            elif self.x > self.width - self.span - 10:
+                self.x, self.dir = self.width - self.span - 10, -1
+        elif self.state == "follow" and self.follow_x is not None:
+            self.follow_x = max(self.span // 2,
+                                min(self.width - self.span // 2, self.follow_x))
+            dx = self.follow_x - (self.x + self.span // 2)
+            if abs(dx) < 24:
+                self.state = "sit"
+                self.ticks_left = random.randint(20, 60)
+            else:
+                self.dir = 1 if dx > 0 else -1
+                self.x = max(0, min(self.width - self.span,
+                                    self.x + self.dir * SCALE * 2))
+        elif self.state == "love":
+            self.zzz = (self.zzz + 1) % 3
         if self.ticks_left <= 0:
             self.choose_state()
         return True
 
     def choose_state(self):
-        self.state = random.choices(("walk", "sit", "sleep"),
-                                    weights=(55, 30, 15))[0]
+        self.state = random.choices(("walk", "sit", "sleep", "follow"),
+                                    weights=(50, 25, 12, 13))[0]
         if self.state == "walk":
             self.dir = random.choice((-1, 1))
             self.ticks_left = random.randint(30, 120)
         elif self.state == "sit":
             self.ticks_left = random.randint(20, 60)
+        elif self.state == "follow":
+            self.follow_x = None
+            self.ticks_left = random.randint(40, 90)
         else:
             self.ticks_left = random.randint(60, 150)
 
@@ -199,22 +259,25 @@ class Pet:
                 cr.set_font_size(8 + i * 3)
                 cr.move_to(self.x + 9 * SCALE + i * 10, y - 2 - i * 8)
                 cr.show_text("z")
+        elif self.state == "love":
+            cr.set_source_rgb(*rgb("#E06C75"))
+            cr.select_font_face("JetBrainsMono Nerd Font")
+            for i in range(self.zzz + 1):
+                cr.set_font_size(9 + i * 2)
+                cr.move_to(self.x + 3 * SCALE + i * 12, y - 4 - i * 7)
+                cr.show_text("♥")
 
 
 # ---------------- layer-shell window ----------------
 
 class PetWindow(LayerWindow):
     def __init__(self):
-        # bottom = under windows (default); HYPRPET_LAYER=top floats above
-        # windows, overlay above even fullscreen (debug)
         lname = os.environ.get("HYPRPET_LAYER") or conf_get("pet_layer", "bottom")
         super().__init__("pet", default_pos="bottom_left",
                          default_x=0, default_y=0, layer=lname,
                          namespace="hypr-pet")
         self.set_app_paintable(True)
 
-        # size explicitly to the monitor — anchors stretch the wayland
-        # surface but GTK's allocation doesn't follow
         display = Gdk.Display.get_default()
         mon = display.get_monitor(0)
         self.mon_w = mon.get_geometry().width if mon else 1600
@@ -223,23 +286,50 @@ class PetWindow(LayerWindow):
         # render in a DrawingArea instead
         self.area = Gtk.DrawingArea()
         self.area.set_size_request(self.mon_w, STRIP_H)
+        self.area.add_events(Gdk.EventMask.BUTTON_PRESS_MASK
+                             | Gdk.EventMask.BUTTON_RELEASE_MASK
+                             | Gdk.EventMask.POINTER_MOTION_MASK)
         self.area.connect("draw", self.on_draw)
+        self.area.connect("button-press-event", self.on_press)
+        self.area.connect("button-release-event", self.on_release)
+        self.area.connect("motion-notify-event", self.on_motion)
         self.add(self.area)
 
         self.connect("map-event", self.on_map)
         self.pets = []
+        self.grab = None            # [pet, press_x, press_t, dragging]
+        self._mon_off_x = None      # global x of this strip (for cursorpos)
         self.show_all()
 
+    # ----- lifecycle -----
     def on_map(self, *_):
-        # clicks pass straight through an empty input region
-        self.get_window().input_shape_combine_region(cairo.Region(), 0, 0)
         if not self.pets:
             self.pets.append(Pet(CAT, self.mon_w))
             if conf_get("claude_pet", "on") == "on":
                 self.pets.append(Pet(CLAWD, self.mon_w))
+            self.update_input_region()
             GLib.timeout_add(FPS_MS, self.on_tick)
+            GLib.timeout_add_seconds(1, self.on_follow_poll)
+
+    def update_input_region(self, everything=False):
+        """Clicks land only ON the pets; the rest of the strip passes
+        through. While dragging, widen to the whole strip so motion
+        events can't outrun the region between ticks."""
+        win = self.get_window()
+        if win is None:
+            return
+        region = cairo.Region()
+        if everything:
+            region.union(cairo.RectangleInt(0, 0, self.mon_w, STRIP_H))
+        else:
+            for pet in self.pets:
+                x, y, w, h = pet.bbox()
+                cx = max(0, int(x))
+                region.union(cairo.RectangleInt(cx, y, w - (cx - int(x)), h))
+        win.input_shape_combine_region(region, 0, 0)
 
     def on_tick(self):
+        moved = False
         for pet in self.pets:
             pet.width = self.mon_w
             old_x = pet.x
@@ -247,8 +337,113 @@ class PetWindow(LayerWindow):
                 x0 = min(old_x, pet.x) - SCALE * 2
                 self.area.queue_draw_area(
                     x0, 0, Pet.SPAN + abs(pet.x - old_x) + SCALE * 6, STRIP_H)
+                moved = True
+        if moved and not (self.grab and self.grab[3]):
+            self.update_input_region()
         return True
 
+    # ----- follow-the-mouse -----
+    def on_follow_poll(self):
+        if not any(p.state == "follow" for p in self.pets):
+            return True
+        if self._mon_off_x is None:
+            self._mon_off_x = self.find_offset()
+        try:
+            out = subprocess.run(["hyprctl", "cursorpos"], capture_output=True,
+                                 text=True, timeout=1).stdout
+            gx = int(out.split(",")[0])
+        except Exception:
+            return True
+        local = gx - (self._mon_off_x or 0)
+        for p in self.pets:
+            if p.state == "follow":
+                p.follow_x = local if 0 <= local <= self.mon_w else None
+        return True
+
+    def find_offset(self):
+        try:
+            out = subprocess.run(["hyprctl", "-j", "layers"],
+                                 capture_output=True, text=True,
+                                 timeout=2).stdout
+            for mon in json.loads(out).values():
+                for lvl in mon.get("levels", {}).values():
+                    for layer in lvl:
+                        if layer.get("namespace") == "hypr-pet":
+                            return layer.get("x", 0)
+        except Exception:
+            pass
+        return 0
+
+    # ----- pointer interactions -----
+    def pet_at(self, x):
+        for pet in reversed(self.pets):     # topmost-drawn pet wins
+            if pet.hit(x):
+                return pet
+        return None
+
+    def on_press(self, _w, ev):
+        if ev.button != 1:
+            return bool(self.grab)          # never clobber an active grab
+        pet = self.pet_at(ev.x)
+        if pet is None:
+            return False
+        if ev.type == Gdk.EventType._2BUTTON_PRESS:
+            self._cancel_love()             # the tap that started this dbl-
+            pet.toggle_sleep()              # click must not also fire love
+            self.grab = None
+            self.area.queue_draw()
+            return True
+        self.grab = [pet, ev.x, time.monotonic(), False]
+        return True
+
+    def _cancel_love(self):
+        if getattr(self, "_love_src", None):
+            GLib.source_remove(self._love_src)
+            self._love_src = None
+
+    def on_motion(self, _w, ev):
+        if not self.grab:
+            return False
+        if not (ev.state & Gdk.ModifierType.BUTTON1_MASK):
+            # button released without us seeing it — recover, don't freeze
+            pet = self.grab[0]
+            if self.grab[3]:
+                pet.drop()
+            self.grab = None
+            self.update_input_region()
+            return False
+        pet = self.grab[0]
+        if not self.grab[3] and abs(ev.x - self.grab[1]) > DRAG_PX:
+            self.grab[3] = True
+            self.update_input_region(everything=True)
+        if self.grab[3]:
+            pet.carry(ev.x)
+            self.area.queue_draw()
+        return True
+
+    def on_release(self, _w, ev):
+        if ev.button != 1:
+            return bool(self.grab)
+        if not self.grab:
+            return False
+        pet, _px, t, dragging = self.grab
+        self.grab = None
+        if dragging:
+            pet.drop()
+        elif time.monotonic() - t < 0.4:
+            # defer: if a double-click follows, it cancels this
+            self._cancel_love()
+            def _do_love():
+                self._love_src = None
+                pet.love()
+                self.area.queue_draw()
+                return False
+            self._love_src = GLib.timeout_add(280, _do_love)
+        self.update_input_region()
+        self.area.queue_draw()
+        return True
+
+    # ----- drawing -----
     def on_draw(self, _w, cr):
         cr.set_operator(cairo.OPERATOR_CLEAR)
         cr.paint()

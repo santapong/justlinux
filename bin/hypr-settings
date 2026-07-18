@@ -554,6 +554,8 @@ class HyprSettings(App):
                                      "under your windows.", classes="hint")
                     with Card("Maintenance"):
                         with Horizontal(classes="row"):
+                            yield Button("󰆾 Arrange on screen…", id="wg_arrange",
+                                         variant="primary")
                             yield Button("󰑓 Restart widgets", id="wg_restart")
                         yield Static("Widgets recolor with every wallpaper change.\n"
                                      "Files live in ~/.config/conky/widgets/.",
@@ -754,6 +756,8 @@ class HyprSettings(App):
                 str(HOME / ".local/bin/desktop-widgets.sh"), "restart"),
             "dock_pick": lambda: launch(
                 str(HOME / ".local/bin/hypr-appdock"), "--picker"),
+            "wg_arrange": lambda: launch(
+                str(HOME / ".local/bin/hypr-arrange")),
         }
         if bid in actions:
             actions[bid]()

@@ -38,7 +38,7 @@ LAUNCHER_STATE = HOME / ".local/state/hypr-launcher/state.json"
 PINS = HOME / ".local/state/hypr-appdock/pins.json"
 RESOLVE = HOME / ".cache/hypr-launcher/resolve.json"
 WIDGETS_CONF = HOME / ".config/conky/widgets.conf"
-ICON = 44
+ICON = 44                 # overridden by apps_size at startup
 APP_DIRS = [
     HOME / ".local/share/applications",
     Path("/usr/share/applications"),
@@ -233,6 +233,11 @@ class Dock(LayerWindow):
     def __init__(self):
         super().__init__("apps", default_pos="bottom_middle",
                          default_x=0, default_y=12, namespace="hypr-appdock")
+        global ICON
+        try:                       # arrange-mode resize
+            ICON = max(24, min(96, int(conf().get("apps_size", ICON))))
+        except (TypeError, ValueError):
+            pass
         pal = colors()
         css = Gtk.CssProvider()
         css.load_from_data(f"""
