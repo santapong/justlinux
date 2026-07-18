@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+"""Serial hotplug toast: notify when a board is plugged in / unplugged,
+with its human name AND the /dev/ttyXXX node it received. Also busts the
+robotics widget cache so the row appears within a couple of seconds."""
+import os
+import signal
+import subprocess
+import time
+from pathlib import Path
+
+BYID = Path("/dev/serial/by-id")
+CACHE = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "widget-robotics.cache"
+
+
+def snapshot():
+    if not BYID.is_dir():
+        return {}
+    out = {}
+    for p in BYID.iterdir():
+        out[p.name] = Path(os.path.realpath(p)).name
+    return out
+
+
+def pretty(name):
+    return name.replace("usb-", "").split("-if")[0].replace("_", " ")[:48]
+
+
+def toast(title, body):
+    subprocess.run(["notify-send", "-t", "5000", title, body],
+                   capture_output=True)
+
+
+def main():
+    signal.signal(signal.SIGTERM, lambda *_: os._exit(0))
+    prev = snapshot()
+    while True:
+        time.sleep(2)
+        cur = snapshot()
+        if cur == prev:
+            continue
+        for name, dev in cur.items():
+            if name not in prev:
+                toast("󱐋 Board connected",
+                      f"{pretty(name)}\n→ /dev/{dev}")
+        for name, dev in prev.items():
+            if name not in cur:
+                toast("󰌘 Board disconnected", f"{pretty(name)} (/dev/{dev})")
+        CACHE.unlink(missing_ok=True)       # widget refreshes next tick
+        prev = cur
+
+
+if __name__ == "__main__":
+    main()

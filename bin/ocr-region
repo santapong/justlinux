@@ -1,0 +1,14 @@
+#!/bin/sh
+# Select a screen region — its TEXT lands in the clipboard (grim+tesseract).
+if ! command -v tesseract >/dev/null; then
+    notify-send "󰊪 OCR" "tesseract missing — run: sudo apt install tesseract-ocr"
+    exit 1
+fi
+geo=$(slurp 2>/dev/null) || exit 0
+text=$(grim -g "$geo" -t png - | tesseract stdin stdout -l eng 2>/dev/null)
+if [ -n "$text" ]; then
+    printf '%s' "$text" | wl-copy
+    notify-send -t 4000 "󰊪 OCR copied" "$(printf '%s' "$text" | head -c 120)"
+else
+    notify-send "󰊪 OCR" "No text recognized in that region"
+fi

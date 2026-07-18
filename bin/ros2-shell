@@ -1,0 +1,29 @@
+#!/bin/sh
+# ROS2 Jazzy in docker (Kali can't run ROS2 natively — Ubuntu-only debs).
+#   ros2-shell            interactive shell in the ROS2 container
+#   ros2-shell <cmd...>   run a command (e.g. ros2-shell ros2 topic list)
+# GUI apps (rviz2, rqt) work: X11/Wayland sockets are passed through.
+# Your ~/ros2_ws persists on the host; serial + CAN devices are shared.
+IMAGE="osrf/ros:jazzy-desktop"
+WS="$HOME/ros2_ws"
+mkdir -p "$WS/src"
+
+exec docker run -it --rm \
+    --net=host --ipc=host --pid=host \
+    -e DISPLAY="${DISPLAY:-:1}" \
+    -e WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
+    -e XDG_RUNTIME_DIR=/tmp/xdg \
+    -e QT_X11_NO_MITSHM=1 \
+    -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}" \
+    -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
+    -v "${XDG_RUNTIME_DIR:-/run/user/1000}/$WAYLAND_DISPLAY:/tmp/xdg/$WAYLAND_DISPLAY:rw" \
+    -v "$WS:/ros2_ws" \
+    -v /dev:/dev \
+    --device-cgroup-rule='c 166:* rmw' \
+    --device-cgroup-rule='c 188:* rmw' \
+    --group-add dialout \
+    -w /ros2_ws \
+    "$IMAGE" \
+    bash -c 'source /opt/ros/jazzy/setup.bash 2>/dev/null;
+             [ -f install/setup.bash ] && source install/setup.bash;
+             exec "${@:-bash}"' -- "$@"

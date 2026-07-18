@@ -6,6 +6,7 @@ WIDGET_DIR="$HOME/.config/conky/widgets"
 CONF="$HOME/.config/conky/widgets.conf"
 PET="$HOME/.local/bin/hypr-pet"
 DOCK="$HOME/.local/bin/hypr-appdock"
+SERWATCH="$HOME/.local/bin/serial-watch"
 
 setting() {   # setting <key> <default>
     v=$(grep -s "^$1=" "$CONF" | tail -1 | cut -d= -f2)
@@ -17,6 +18,7 @@ stop)
     pkill -f "conky -c $WIDGET_DIR" 2>/dev/null
     pkill -xf "python3 $PET" 2>/dev/null
     pkill -xf "python3 $DOCK" 2>/dev/null
+    pkill -xf "python3 $SERWATCH" 2>/dev/null
     # wait for real exit — a half-dead conky makes restart's pgrep guard
     # skip widgets as "already running"
     for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
@@ -39,6 +41,8 @@ start)
         pgrep -xf "python3 $DOCK" >/dev/null ||
             "$DOCK" >/dev/null 2>&1 &
     fi
+    pgrep -xf "python3 $SERWATCH" >/dev/null ||
+        "$SERWATCH" >/dev/null 2>&1 &
     if [ "$(setting pet on)" = "on" ]; then
         if ! pgrep -xf "python3 $PET" >/dev/null; then
             layer=$(setting pet_layer bottom)

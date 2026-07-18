@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""hypr-serial — dependency-free serial monitor (pure stdlib termios).
+
+  hypr-serial                 pick a port from a menu (by board name)
+  hypr-serial <match> [baud]  open first port whose by-id name contains
+                              <match> (case-insensitive). Default 115200.
+Ctrl+] to exit. Lines are timestamped; everything logs to
+~/robot-logs/<port>-<date>.log
+"""
+import datetime
+import os
+import select
+import sys
+import termios
+import tty
+from pathlib import Path
+
+BYID = Path("/dev/serial/by-id")
+BAUD = {9600: termios.B9600, 19200: termios.B19200, 38400: termios.B38400,
+        57600: termios.B57600, 115200: termios.B115200,
+        230400: termios.B230400, 460800: termios.B460800,
+        921600: getattr(termios, "B921600", termios.B460800)}
+
+
+def ports():
+    return sorted(BYID.iterdir()) if BYID.is_dir() else []
+
+
+def choose():
+    ps = ports()
+    if not ps:
+        sys.exit("no serial devices under /dev/serial/by-id — plug a board in")
+    if len(ps) == 1:
+        return ps[0]
+    for i, p in enumerate(ps):
+        print(f"  [{i}] {p.name}  →  {os.path.realpath(p)}")
+    try:
+        return ps[int(input("port #: "))]
+    except (ValueError, IndexError, EOFError):
+        sys.exit("no selection")
+
+
+def main():
+    args = sys.argv[1:]
+    baud = 115200
+    if args and args[-1].isdigit():
+        baud = int(args.pop())
+    if baud not in BAUD:
+        sys.exit(f"unsupported baud {baud}; pick from {sorted(BAUD)}")
+    if args:
+        match = args[0].lower()
+        cands = [p for p in ports() if match in p.name.lower()]
+        if not cands:
+            sys.exit(f"no port matching '{match}'")
+        port = cands[0]
+    else:
+        port = choose()
+
+    dev = os.path.realpath(port)
+    fd = os.open(dev, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    attrs = termios.tcgetattr(fd)
+    tty.cfmakeraw(attrs)
+    attrs[4] = attrs[5] = BAUD[baud]
+    termios.tcsetattr(fd, termios.TCSANOW, attrs)
+
+    logdir = Path.home() / "robot-logs"
+    logdir.mkdir(exist_ok=True)
+    log = open(logdir / f"{Path(dev).name}-"
+               f"{datetime.date.today():%Y%m%d}.log", "a")
+
+    print(f"── {port.name} @ {baud} — Ctrl+] exits, log: {log.name} ──")
+    stdin = sys.stdin.fileno()
+    old = termios.tcgetattr(stdin)
+    tty.setraw(stdin)
+    line = b""
+    try:
+        while True:
+            r, _, _ = select.select([fd, stdin], [], [])
+            if fd in r:
+                try:
+                    data = os.read(fd, 4096)
+                except OSError:
+                    print("\r\n[device disappeared]\r")
+                    break
+                for b in data:
+                    line += bytes([b])
+                    if b == 0x0A:
+                        ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                        txt = line.decode(errors="replace").rstrip("\r\n")
+                        sys.stdout.write(f"\r{ts}  {txt}\r\n")
+                        sys.stdout.flush()
+                        log.write(f"{ts}  {txt}\n")
+                        log.flush()
+                        line = b""
+            if stdin in r:
+                ch = os.read(stdin, 1)
+                if ch == b"\x1d":           # Ctrl+]
+                    break
+                os.write(fd, ch)
+    finally:
+        termios.tcsetattr(stdin, termios.TCSANOW, old)
+        os.close(fd)
+        log.close()
+        print("bye")
+
+
+if __name__ == "__main__":
+    main()

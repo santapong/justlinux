@@ -1,0 +1,37 @@
+#!/bin/sh
+# hypr-project — open a whole project across the desktop in one command.
+#   hypr-project <path> [name]
+# Layout: editor+terminal on the CURRENT workspace, lazygit/tests terminal
+# on the next workspace, and the project's docs/README on the bottom monitor.
+# Projects are remembered; `hypr-project` alone lists known ones via rofi.
+STATE="$HOME/.local/state/hypr-projects.list"
+touch "$STATE"
+
+if [ -z "${1:-}" ]; then
+    pick=$(sort -u "$STATE" | rofi -dmenu -i -p "󰉋 Project") || exit 0
+    [ -n "$pick" ] && exec "$0" "$pick"
+    exit 0
+fi
+
+dir=$(realpath "$1") || exit 1
+[ -d "$dir" ] || { notify-send "hypr-project" "No such directory: $dir"; exit 1; }
+name="${2:-$(basename "$dir")}"
+grep -qxF "$dir" "$STATE" || echo "$dir" >> "$STATE"
+
+ws=$(hyprctl activeworkspace -j | jq -r .id)
+next=$((ws % 10 + 1))
+
+# main workspace: editor + a terminal in the repo
+hyprctl dispatch exec "[workspace $ws silent] code --new-window '$dir'" >/dev/null
+hyprctl dispatch exec "[workspace $ws silent] kitty --directory '$dir'" >/dev/null
+# next workspace: git UI (falls back to git status shell)
+if command -v lazygit >/dev/null; then
+    hyprctl dispatch exec "[workspace $next silent] kitty --directory '$dir' lazygit" >/dev/null
+else
+    hyprctl dispatch exec "[workspace $next silent] kitty --directory '$dir' --hold sh -c 'git status; echo; git log --oneline -15'" >/dev/null
+fi
+# bottom monitor (ws 8): docs / README
+if [ -f "$dir/README.md" ]; then
+    hyprctl dispatch exec "[workspace 8 silent] kitty --directory '$dir' nvim README.md" >/dev/null
+fi
+notify-send "󰉋 $name" "editor+shell on ws $ws · git on ws $next · docs on ws 8"
