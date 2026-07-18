@@ -216,7 +216,8 @@ class Picker(Gtk.Window):
 
     def on_toggle(self, chk, stem):
         ws = str(self.dock.ws)
-        state = self.dock.pins
+        state = load_pins()             # fresh read: dock may have written
+        self.dock.pins = state
         # first edit on an inheriting workspace: copy the default set
         if ws not in state["workspaces"]:
             state["workspaces"][ws] = list(state["default"])

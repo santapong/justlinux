@@ -44,6 +44,6 @@ try:
     text = "\n".join(rows)
     CACHE.write_text(text)
 except Exception:
-    text = CACHE.read_text() if CACHE.exists() else \
-        "${color3} github unreachable${color}"
+    text = (CACHE.read_text() + "\n${color3}(stale)${color}") \
+        if CACHE.exists() else "${color3} github unreachable${color}"
 print(text)

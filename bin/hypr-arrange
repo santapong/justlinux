@@ -58,7 +58,8 @@ def surfaces():
                          text=True, timeout=3).stdout
     mons = subprocess.run(["hyprctl", "-j", "monitors"], capture_output=True,
                           text=True, timeout=3).stdout
-    geo = {m["name"]: (m["x"], m["y"], m["width"], m["height"])
+    geo = {m["name"]: (m["x"], m["y"], m["width"], m["height"],
+                       (m.get("reserved") or [0, 0, 0, 0]))
            for m in json.loads(mons)}
     best, items = None, []
     for mon_name, mon in json.loads(out).items():
@@ -77,12 +78,12 @@ def surfaces():
         if len(found) > len(items):
             items, best = found, mon_name
     if not best:
-        return [], (0, 0, 1600, 900), None
-    mx, my, mw, mh = geo.get(best, (0, 0, 1600, 900))
+        return [], (0, 0, 1600, 900), None, (0, 0, 0, 0)
+    mx, my, mw, mh, res = geo.get(best, (0, 0, 1600, 900, (0, 0, 0, 0)))
     for it in items:
         it["x"] -= mx
         it["y"] -= my
-    return items, (mx, my, mw, mh), best
+    return items, (mx, my, mw, mh), best, tuple(res)
 
 
 def widget_of_pid(pid):
@@ -114,7 +115,8 @@ class Arranger(LayerWindow):
         GLib.timeout_add_seconds(300, Gtk.main_quit)
         self.set_app_paintable(True)
         self.pal = colors()
-        self.items, (mx, my, self.mon_w, self.mon_h), _mon_name = surfaces()
+        (self.items, (mx, my, self.mon_w, self.mon_h),
+         _mon_name, self.reserved) = surfaces()
         # open ON the monitor that holds the widgets, not the focused one
         display = Gdk.Display.get_default()
         for i in range(display.get_n_monitors()):
@@ -161,8 +163,11 @@ class Arranger(LayerWindow):
             if col == "middle" and row == "middle":
                 row = "top"     # no middle_middle anchor exists
             pos = f"{row}_{col}"
-            gx = {"left": x, "right": self.mon_w - (x + w), "middle": 0}[col]
-            gy = {"top": y, "bottom": self.mon_h - (y + h),
+            res_l, res_t, res_r, res_b = self.reserved
+            # conky gaps are WORKAREA-relative: subtract reserved insets
+            gx = {"left": x - res_l, "right": self.mon_w - res_r - (x + w),
+                  "middle": 0}[col]
+            gy = {"top": y - res_t, "bottom": self.mon_h - res_b - (y + h),
                   "middle": 0}[row]
             conf_set(f"{name}_pos", pos)
             conf_set(f"{name}_x", max(0, int(gx)))

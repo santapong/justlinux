@@ -1,0 +1,8 @@
+#!/bin/sh
+# Dropdown terminal (guake-style): ALT+U toggles a kitty that lives on the
+# special:term workspace — appears over everything, hides when toggled.
+if ! hyprctl clients -j | grep -q '"dropterm"'; then
+    hyprctl dispatch exec "[workspace special:term silent] kitty --class dropterm" >/dev/null
+    sleep 0.4
+fi
+hyprctl dispatch togglespecialworkspace term >/dev/null

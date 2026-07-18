@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+"""MPRIS media control without playerctl: media-ctl play-pause|next|prev
+Talks D-Bus directly; prefers the currently Playing player."""
+import sys
+from gi.repository import Gio, GLib
+
+CMD = {"play-pause": "PlayPause", "next": "Next", "prev": "Previous"}
+method = CMD.get(sys.argv[1] if len(sys.argv) > 1 else "play-pause")
+if not method:
+    sys.exit(f"usage: media-ctl {'|'.join(CMD)}")
+
+bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+names = bus.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus",
+                      "org.freedesktop.DBus", "ListNames", None, None,
+                      Gio.DBusCallFlags.NONE, 1000, None).unpack()[0]
+players = [n for n in names if n.startswith("org.mpris.MediaPlayer2.")]
+
+
+def status(pl):
+    try:
+        return bus.call_sync(pl, "/org/mpris/MediaPlayer2",
+                             "org.freedesktop.DBus.Properties", "Get",
+                             GLib.Variant("(ss)",
+                                          ("org.mpris.MediaPlayer2.Player",
+                                           "PlaybackStatus")), None,
+                             Gio.DBusCallFlags.NONE, 800, None).unpack()[0]
+    except Exception:
+        return ""
+
+
+players.sort(key=lambda p: status(p) != "Playing")
+for pl in players:
+    try:
+        bus.call_sync(pl, "/org/mpris/MediaPlayer2",
+                      "org.mpris.MediaPlayer2.Player", method, None, None,
+                      Gio.DBusCallFlags.NONE, 1000, None)
+        break
+    except Exception:
+        continue

@@ -25,10 +25,13 @@
         "custom/power"
     ],
     "hyprland/workspaces": {
+        "on-scroll-up": "hyprctl dispatch workspace e-1",
+        "on-scroll-down": "hyprctl dispatch workspace e+1",
         "format": "{id}",
         "on-click": "activate"
     },
     "hyprland/window": {
+        "separate-outputs": true,
         "max-length": 50
     },
     "clock": {

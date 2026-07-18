@@ -124,14 +124,14 @@ CLAWD_COLORS = {"O": rgb("#D97757"), "D": rgb("#8f4830"),
 CAT = {"walk": (CAT_WALK_A, CAT_WALK_B), "sit": (CAT_SIT_A, CAT_SIT_B),
        "sleep": (CAT_SLEEP, CAT_SLEEP), "love": (CAT_SIT_A, CAT_SIT_B),
        "follow": (CAT_WALK_A, CAT_WALK_B), "carried": (CAT_SIT_A, CAT_SIT_A),
-       "colors": CAT_COLORS}
+       "falling": (CAT_WALK_B, CAT_WALK_B), "colors": CAT_COLORS}
 CLAWD = {"walk": (CLAWD_WALK_A, CLAWD_WALK_B),
          "sit": (CLAWD_WALK_A, CLAWD_WALK_A),
          "sleep": (CLAWD_SLEEP, CLAWD_SLEEP),
          "love": (CLAWD_WALK_A, CLAWD_WALK_B),
          "follow": (CLAWD_WALK_A, CLAWD_WALK_B),
          "carried": (CLAWD_WALK_A, CLAWD_WALK_A),
-         "colors": CLAWD_COLORS}
+         "falling": (CLAWD_WALK_B, CLAWD_WALK_B), "colors": CLAWD_COLORS}
 
 
 def draw_frame(cr, frame, colors_, x, y, facing_right):
@@ -190,11 +190,19 @@ class Pet:
         return top <= py <= top + h
 
     def love(self):
+        if self.y_off > 0:              # petted mid-air → gravity first
+            self.state = "falling"
+            self.vy = 0
+            return
         self.state = "love"
         self.zzz = 0
         self.ticks_left = 14
 
     def toggle_sleep(self):
+        if self.y_off > 0:
+            self.state = "falling"
+            self.vy = 0
+            return
         if self.state == "sleep":
             self.state = "walk"
             self.ticks_left = random.randint(30, 120)
@@ -278,7 +286,10 @@ class Pet:
             self.ticks_left = random.randint(60, 150)
 
     def frame(self):
-        return self.sprites[self.state][self.frame_no]
+        # a state without art must NEVER crash the draw loop (that is how
+        # "drag and the pet vanishes" happened) — fall back to walk frames
+        pair = self.sprites.get(self.state) or self.sprites["walk"]
+        return pair[self.frame_no]
 
     def draw(self, cr):
         frame = self.frame()
@@ -425,7 +436,8 @@ class PetWindow(LayerWindow):
             self.grab = None
             self.area.queue_draw()
             return True
-        self.grab = [pet, ev.x, time.monotonic(), False]
+        self._cancel_love()             # stale love must not hijack a drag
+        self.grab = [pet, ev.x, time.monotonic(), False, ev.y]
         return True
 
     def _cancel_love(self):
@@ -445,7 +457,8 @@ class PetWindow(LayerWindow):
             self.update_input_region()
             return False
         pet = self.grab[0]
-        if not self.grab[3] and abs(ev.x - self.grab[1]) > DRAG_PX:
+        if not self.grab[3] and (abs(ev.x - self.grab[1]) > DRAG_PX
+                                 or abs(ev.y - self.grab[4]) > DRAG_PX):
             self.grab[3] = True
             self.update_input_region(everything=True)
         if self.grab[3]:
@@ -458,7 +471,7 @@ class PetWindow(LayerWindow):
             return bool(self.grab)
         if not self.grab:
             return False
-        pet, _px, t, dragging = self.grab
+        pet, _px, t, dragging = self.grab[:4]
         self.grab = None
         if dragging:
             pet.drop()

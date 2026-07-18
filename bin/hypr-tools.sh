@@ -334,7 +334,7 @@ clock_menu() {
 }
 
 restart_bar() {
-    pkill waybar; sleep 0.5
+    pkill -x waybar; sleep 0.5
     hyprctl dispatch exec waybar >/dev/null
     # a fresh waybar starts visible — restart the auto-hide daemon so its state matches
     if pgrep -f "waybar-autohid[e]" >/dev/null; then

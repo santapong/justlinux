@@ -66,20 +66,22 @@ WIDGET_LABELS = {"clock": "Clock & date", "stats": "System stats",
                  "calendar": "Calendar", "claude": "Claude plan usage",
                  "apps": "Applications dock (★ pins)",
                  "weather": "Weather", "nowplaying": "Now playing",
-                 "pomodoro": "Pomodoro timer", "notes": "Sticky notes",
+                 "notes": "Sticky notes",
                  "security": "Security status", "netgraph": "Network graph",
-                 "github": "GitHub graph", "habitica": "Habitica",
-                 "trading": "Markets / trading"}
+                 "github": "GitHub graph", "trading": "Markets / trading",
+                 "devgit": "Dev repos (git)", "robotics": "Robotics bench"}
 POS_CYCLE = ["top_left", "top_middle", "top_right", "middle_right",
              "bottom_right", "bottom_middle", "bottom_left", "middle_left"]
 DEFAULT_POS = {"clock": ("top_right", 24, 44), "stats": ("middle_right", 24, 0),
                "calendar": ("top_left", 24, 44), "claude": ("bottom_right", 24, 44),
                "apps": ("bottom_middle", 0, 12),
                "weather": ("top_middle", 0, 44), "nowplaying": ("bottom_left", 24, 44),
-               "pomodoro": ("top_left", 24, 250), "notes": ("middle_left", 24, 120),
+               "notes": ("middle_left", 24, 120),
                "security": ("top_right", 24, 230), "netgraph": ("bottom_left", 24, 180),
-               "github": ("top_middle", 0, 250), "habitica": ("middle_right", 360, 0),
-               "trading": ("bottom_middle", 0, 130)}
+               "github": ("top_middle", 0, 240),
+               "trading": ("bottom_middle", 0, 120),
+               "devgit": ("top_left", 24, 250),
+               "robotics": ("top_middle", 0, 460)}
 
 
 def theme_list():
@@ -93,7 +95,7 @@ def widget_list():
     """Every conky conf in the widgets dir + the app dock — drop a new
     .conf in ~/.config/conky/widgets/ and it appears here automatically."""
     names = sorted(p.stem for p in (HOME / ".config/conky/widgets").glob("*.conf")
-                   if p.stem != "apps")
+                   if p.stem != "apps" and re.fullmatch(r"[A-Za-z][\w-]*", p.stem))
     names.append("apps")
     return [(n, WIDGET_LABELS.get(n, f"{n.title()} (custom)")) for n in names]
 
@@ -101,7 +103,7 @@ def widget_list():
 def widgets_conf():
     d = {"clock": "on", "stats": "on", "calendar": "on", "claude": "on",
          "apps": "on", "pet": "on", "pet_layer": "bottom", "cards": "on",
-         "claude_pet": "on"}
+         "claude_pet": "on", "devgit": "on", "robotics": "on"}
     d["theme"] = "wallust"
     for name, (pos, x, y) in DEFAULT_POS.items():
         d[f"{name}_pos"], d[f"{name}_x"], d[f"{name}_y"] = pos, str(x), str(y)
@@ -673,7 +675,7 @@ class HyprSettings(App):
             else:
                 widgets_conf_set(wkey, "on" if event.value else "off")
             self.widgets = widgets_conf()
-            launch(str(HOME / ".local/bin/desktop-widgets.sh"), "restart")
+            self.schedule_widget_restart()
             self.notify("Widgets updated")
             return
         key = sid.removeprefix("sw_")

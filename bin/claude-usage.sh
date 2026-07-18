@@ -34,8 +34,8 @@ def when(iso, kind):
         left = (t - datetime.now(timezone.utc).astimezone()).total_seconds()
         if left <= 0:
             return "resets soon"
-        return f"resets in {int(left // 3600)} h {int(left % 3600 // 60):02d} m"
-    return f"resets {t.strftime('%a %H:%M')}"
+        return f"↺ {int(left // 3600)}h{int(left % 3600 // 60):02d}"
+    return f"↺ {t.strftime('%a %H:%M')}"
 
 
 def fetch():
@@ -58,7 +58,7 @@ try:
         if lim.get("kind") == "session":
             label = "Session (5 h)"
         elif lim.get("kind") == "weekly_all":
-            label = "Weekly · all models"
+            label = "Weekly · all"
         elif lim.get("kind") == "weekly_scoped":
             model = ((lim.get("scope") or {}).get("model") or {})
             label = f"Weekly · {(model.get('display_name') or 'model')[:14]}"

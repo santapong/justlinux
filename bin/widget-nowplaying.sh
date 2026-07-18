@@ -30,7 +30,7 @@ try:
             if status not in ("Playing", "Paused"):
                 continue
             meta = prop("Metadata")
-            title = esc(str(meta.get("xesam:title", "?"))[:34])
+            title = esc(str(meta.get("xesam:title", "?"))[:30])
             artist = esc(", ".join(meta.get("xesam:artist", []))[:30])
             ic = "󰐊" if status == "Playing" else "󰏤"
             # org.mpris.MediaPlayer2.chromium.instance2 -> "chromium"

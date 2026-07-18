@@ -1,0 +1,9 @@
+#!/bin/sh
+# Click any pixel — its hex color lands in the clipboard (grim+slurp+magick,
+# no hyprpicker needed).
+pos=$(slurp -p 2>/dev/null) || exit 0
+hex=$(grim -g "$pos" -t ppm - 2>/dev/null |
+      magick - -format '%[hex:p{0,0}]' info: 2>/dev/null | head -c 6)
+[ -n "$hex" ] || exit 1
+printf '#%s' "$hex" | wl-copy
+notify-send -t 2500 "󰈊 Color picked" "#$hex copied to clipboard"
