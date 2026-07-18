@@ -33,7 +33,8 @@ from hyprdesk.layer import LayerWindow
 
 SCALE = 4          # one pixel-art cell = SCALE screen pixels
 FPS_MS = 140       # animation tick
-STRIP_H = 14 * SCALE
+STRIP_H = 40 * SCALE      # tall strip: room to lift a pet
+GROUND = STRIP_H          # sprites sit on the bottom edge
 DRAG_PX = 6        # click-vs-drag threshold (ui-ux heuristics)
 
 WALLUST = colors()
@@ -164,14 +165,29 @@ class Pet:
         self.ticks_left = random.randint(30, 90)
         self.zzz = 0
         self.follow_x = None
+        self.y_off = 0              # height above the ground (carried/fall)
+        self.vy = 0
         self._tick_n = 0
 
     # --- interactions ---
-    def bbox(self):
-        return (self.x - 8, 0, self.span + 16, STRIP_H)
+    def sprite_h(self):
+        return len(self.frame()) * SCALE
 
-    def hit(self, px):
-        return self.x - 8 <= px <= self.x + self.span + 8
+    def top_y(self):
+        return GROUND - self.sprite_h() - SCALE - self.y_off
+
+    def bbox(self):
+        top = max(0, self.top_y() - 28)     # includes the z/♥ space above
+        return (self.x - 8, top, self.span + 16,
+                min(STRIP_H, GROUND - top))
+
+    def hit(self, px, py=None):
+        if not (self.x - 8 <= px <= self.x + self.span + 8):
+            return False
+        if py is None:
+            return True
+        x, top, w, h = self.bbox()
+        return top <= py <= top + h
 
     def love(self):
         self.state = "love"
@@ -187,14 +203,21 @@ class Pet:
             self.zzz = 0
             self.ticks_left = random.randint(60, 150)
 
-    def carry(self, px):
+    def carry(self, px, py=None):
         self.state = "carried"
         self.x = max(0, min(self.width - self.span, int(px) - self.span // 2))
+        if py is not None:
+            want = GROUND - int(py) - self.sprite_h() // 2
+            self.y_off = max(0, min(STRIP_H - self.sprite_h() - SCALE, want))
 
     def drop(self):
-        self.state = "walk"
-        self.dir = random.choice((-1, 1))
-        self.ticks_left = random.randint(30, 120)
+        if self.y_off > 0:
+            self.state = "falling"          # gravity takes it from here
+            self.vy = 0
+        else:
+            self.state = "walk"
+            self.dir = random.choice((-1, 1))
+            self.ticks_left = random.randint(30, 120)
 
     # --- simulation ---
     def tick(self):
@@ -225,6 +248,15 @@ class Pet:
                 self.dir = 1 if dx > 0 else -1
                 self.x = max(0, min(self.width - self.span,
                                     self.x + self.dir * SCALE * 2))
+        elif self.state == "falling":
+            self.vy += 6
+            self.y_off -= self.vy
+            if self.y_off <= 0:
+                self.y_off = 0
+                self.state = "walk"
+                self.dir = random.choice((-1, 1))
+                self.ticks_left = random.randint(30, 120)
+            return True
         elif self.state == "love":
             self.zzz = (self.zzz + 1) % 3
         if self.ticks_left <= 0:
@@ -250,7 +282,7 @@ class Pet:
 
     def draw(self, cr):
         frame = self.frame()
-        y = STRIP_H - len(frame) * SCALE - SCALE
+        y = self.top_y()
         draw_frame(cr, frame, self.sprites["colors"], self.x, y, self.dir > 0)
         if self.state == "sleep":
             cr.set_source_rgb(*rgb(WALLUST["accent2"]))
@@ -375,16 +407,16 @@ class PetWindow(LayerWindow):
         return 0
 
     # ----- pointer interactions -----
-    def pet_at(self, x):
+    def pet_at(self, x, y=None):
         for pet in reversed(self.pets):     # topmost-drawn pet wins
-            if pet.hit(x):
+            if pet.hit(x, y):
                 return pet
         return None
 
     def on_press(self, _w, ev):
         if ev.button != 1:
             return bool(self.grab)          # never clobber an active grab
-        pet = self.pet_at(ev.x)
+        pet = self.pet_at(ev.x, ev.y)
         if pet is None:
             return False
         if ev.type == Gdk.EventType._2BUTTON_PRESS:
@@ -417,7 +449,7 @@ class PetWindow(LayerWindow):
             self.grab[3] = True
             self.update_input_region(everything=True)
         if self.grab[3]:
-            pet.carry(ev.x)
+            pet.carry(ev.x, ev.y)
             self.area.queue_draw()
         return True
 
