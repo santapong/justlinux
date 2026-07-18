@@ -369,7 +369,13 @@ def category_of(entry):
 
 
 def launch_app(entry):
-    argv = [a for a in shlex.split(entry["exec"]) if not a.startswith("%")]
+    try:
+        tokens = shlex.split(entry["exec"])
+    except ValueError:              # unbalanced quotes in a stray .desktop file
+        tokens = entry["exec"].split()
+    # %u/%F… are desktop-spec field codes; @@u/@@ are flatpak URI markers —
+    # neither is a real argument, and leaking @@ into Chromium opens junk tabs.
+    argv = [a for a in tokens if not a.startswith("%") and not a.startswith("@@")]
     if entry["terminal"]:
         argv = ["kitty", "-e"] + argv
     run_detached(*argv)
@@ -829,11 +835,15 @@ class HyprLauncher(App):
                 for k, _ in sorted(rec.items(), key=lambda kv: kv[1])[:len(rec) - 20]:
                     del rec[k]
             save_json(STATE_FILE, self.state)
-            launch_app(obj)
-            self.exit()
+            try:
+                launch_app(obj)
+            finally:
+                self.exit()     # the picker must never outlive a launch
         elif obj["kind"] == "tool":
-            run_detached(*obj["cmd"])
-            self.exit()
+            try:
+                run_detached(*obj["cmd"])
+            finally:
+                self.exit()
         elif obj["kind"] == "mon":
             self.wp_target = obj["target"]
             self.run_worker(self.show_folder(), exclusive=True)

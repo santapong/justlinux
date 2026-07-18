@@ -1,0 +1,268 @@
+#!/usr/bin/env python3
+"""hypr-pet — tiny pixel creatures that wander along the bottom of the desktop.
+
+Creatures: a wallust-colored cat, and Clawd, a little Claude-orange
+starburst mascot (toggle via claude_pet in ~/.config/conky/widgets.conf).
+
+Runs as a gtk-layer-shell surface on the BOTTOM layer (above wallpaper,
+below windows) with an empty input region, so it can never block clicks,
+steal focus, or show up in window lists. gtk-layer-shell is driven through
+ctypes because the GIR typelib for it isn't packaged on this box.
+"""
+import os
+import random
+import signal
+import sys
+from pathlib import Path
+
+import cairo
+import gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, Gdk, GLib
+
+sys.path.insert(0, str(Path.home() / ".local/lib"))
+from hyprdesk import colors, conf_get, rgb          # central config/theme
+from hyprdesk.layer import LayerWindow
+
+SCALE = 4          # one pixel-art cell = SCALE screen pixels
+FPS_MS = 140       # animation tick
+STRIP_H = 14 * SCALE
+
+WALLUST = colors()
+
+
+# ---------------- sprites (all drawn FACING LEFT — head on the left) -------
+
+CAT_WALK_A = [
+    ".B..B...........",
+    ".BBBBB..........",
+    ".BEBNB.......T..",
+    ".BBBBB......TT..",
+    "..BBBBBBBBBBT...",
+    "..BBBBBBBBBB....",
+    "..BBBBBBBBBB....",
+    "..B..B...B..B...",
+    "..B..B...B..B...",
+]
+CAT_WALK_B = [
+    ".B..B...........",
+    ".BBBBB..........",
+    ".BEBNB......T...",
+    ".BBBBB......T...",
+    "..BBBBBBBBBBT...",
+    "..BBBBBBBBBB....",
+    "..BBBBBBBBBB....",
+    "...B..B.B..B....",
+    "...B..B.B..B....",
+]
+CAT_SIT_A = [
+    ".B..B....",
+    ".BBBBB...",
+    ".BEBNB..T",
+    ".BBBBB..T",
+    "..BBBBBBT",
+    "..BBBBBB.",
+    "..BBBBBB.",
+    "..BBBBBB.",
+    "..BB.BB..",
+]
+CAT_SIT_B = [r.replace("..T", ".T.").replace("BBT", "BT.") for r in CAT_SIT_A]
+CAT_SLEEP = [
+    ".........",
+    "..BBBBB..",
+    ".BBBBBBB.",
+    ".BDBBDBB.",
+    ".BBBBBBB.",
+    "..BBBBB..",
+]
+
+# Clawd — the Claude starburst: orange rays around a round face
+CLAWD_WALK_A = [
+    "....O..O....",
+    ".O..OOOO..O.",
+    "..OOOOOOOO..",
+    "...OOOOOO...",
+    "OOOEOOOOEOOO",
+    "...OOOOOO...",
+    "..OOOOOOOO..",
+    ".O..OOOO..O.",
+    "....O..O....",
+]
+CLAWD_WALK_B = [
+    "....O..O....",
+    "....OOOO....",
+    ".O.OOOOOO.O.",
+    "..OOOOOOOO..",
+    ".OOEOOOOEOO.",
+    "..OOOOOOOO..",
+    ".O.OOOOOO.O.",
+    "....OOOO....",
+    "....O..O....",
+]
+CLAWD_SIT_A = CLAWD_WALK_A
+CLAWD_SIT_B = CLAWD_WALK_B
+CLAWD_SLEEP = [
+    "............",
+    "....OOOO....",
+    "..OOOOOOOO..",
+    ".OODOOOODOO.",
+    "..OOOOOOOO..",
+    "....OOOO....",
+]
+
+CAT_COLORS = {"B": rgb(WALLUST["fg"]), "D": rgb(WALLUST["muted"]),
+              "E": rgb(WALLUST["accent2"]), "N": rgb(WALLUST["accent"]),
+              "T": rgb(WALLUST["fg"])}
+# Claude brand orange, independent of wallpaper
+CLAWD_COLORS = {"O": rgb("#D97757"), "D": rgb("#8f4830"),
+                "E": rgb("#1d1d1b")}
+
+CAT = {"walk": (CAT_WALK_A, CAT_WALK_B), "sit": (CAT_SIT_A, CAT_SIT_B),
+       "sleep": (CAT_SLEEP, CAT_SLEEP), "colors": CAT_COLORS}
+CLAWD = {"walk": (CLAWD_WALK_A, CLAWD_WALK_B),
+         "sit": (CLAWD_SIT_A, CLAWD_SIT_B),
+         "sleep": (CLAWD_SLEEP, CLAWD_SLEEP), "colors": CLAWD_COLORS}
+
+
+def draw_frame(cr, frame, colors, x, y, facing_right):
+    w = max(len(r) for r in frame)
+    for ry, row in enumerate(frame):
+        for rx, ch in enumerate(row):
+            col = colors.get(ch)
+            if not col:
+                continue
+            # art faces LEFT — mirror it when the creature moves right
+            px = (w - 1 - rx) if facing_right else rx
+            cr.set_source_rgb(*col)
+            cr.rectangle(x + px * SCALE, y + ry * SCALE, SCALE, SCALE)
+            cr.fill()
+
+
+# ---------------- behavior ----------------
+
+class Pet:
+    SPAN = 16 * SCALE
+
+    def __init__(self, sprites, width, speed=1):
+        self.sprites = sprites
+        self.width = width
+        self.speed = speed
+        self.x = random.randint(50, max(51, width - 150))
+        self.dir = random.choice((-1, 1))
+        self.state = "walk"
+        self.frame_no = 0
+        self.ticks_left = random.randint(30, 90)
+        self.zzz = 0
+        self._tick_n = 0
+
+    def tick(self):
+        self._tick_n += 1
+        if self.state == "sleep":
+            # sleepers move slowly: animate every 4th tick only
+            if self._tick_n % 4:
+                return False
+            self.zzz = (self.zzz + 1) % 3
+        self.frame_no ^= 1
+        self.ticks_left -= 1
+        if self.state == "walk":
+            self.x += self.dir * SCALE * self.speed
+            if self.x < 10:
+                self.x, self.dir = 10, 1
+            elif self.x > self.width - self.SPAN - 10:
+                self.x, self.dir = self.width - self.SPAN - 10, -1
+        if self.ticks_left <= 0:
+            self.choose_state()
+        return True
+
+    def choose_state(self):
+        self.state = random.choices(("walk", "sit", "sleep"),
+                                    weights=(55, 30, 15))[0]
+        if self.state == "walk":
+            self.dir = random.choice((-1, 1))
+            self.ticks_left = random.randint(30, 120)
+        elif self.state == "sit":
+            self.ticks_left = random.randint(20, 60)
+        else:
+            self.ticks_left = random.randint(60, 150)
+
+    def frame(self):
+        return self.sprites[self.state][self.frame_no]
+
+    def draw(self, cr):
+        frame = self.frame()
+        y = STRIP_H - len(frame) * SCALE - SCALE
+        draw_frame(cr, frame, self.sprites["colors"], self.x, y, self.dir > 0)
+        if self.state == "sleep":
+            cr.set_source_rgb(*rgb(WALLUST["accent2"]))
+            cr.select_font_face("JetBrainsMono Nerd Font")
+            for i in range(self.zzz + 1):
+                cr.set_font_size(8 + i * 3)
+                cr.move_to(self.x + 9 * SCALE + i * 10, y - 2 - i * 8)
+                cr.show_text("z")
+
+
+# ---------------- layer-shell window ----------------
+
+class PetWindow(LayerWindow):
+    def __init__(self):
+        # bottom = under windows (default); HYPRPET_LAYER=top floats above
+        # windows, overlay above even fullscreen (debug)
+        lname = os.environ.get("HYPRPET_LAYER") or conf_get("pet_layer", "bottom")
+        super().__init__("pet", default_pos="bottom_left",
+                         default_x=0, default_y=0, layer=lname,
+                         namespace="hypr-pet")
+        self.set_app_paintable(True)
+
+        # size explicitly to the monitor — anchors stretch the wayland
+        # surface but GTK's allocation doesn't follow
+        display = Gdk.Display.get_default()
+        mon = display.get_monitor(0)
+        self.mon_w = mon.get_geometry().width if mon else 1600
+
+        # a childless app-paintable Gtk.Window never emits draw —
+        # render in a DrawingArea instead
+        self.area = Gtk.DrawingArea()
+        self.area.set_size_request(self.mon_w, STRIP_H)
+        self.area.connect("draw", self.on_draw)
+        self.add(self.area)
+
+        self.connect("map-event", self.on_map)
+        self.pets = []
+        self.show_all()
+
+    def on_map(self, *_):
+        # clicks pass straight through an empty input region
+        self.get_window().input_shape_combine_region(cairo.Region(), 0, 0)
+        if not self.pets:
+            self.pets.append(Pet(CAT, self.mon_w))
+            if conf_get("claude_pet", "on") == "on":
+                self.pets.append(Pet(CLAWD, self.mon_w))
+            GLib.timeout_add(FPS_MS, self.on_tick)
+
+    def on_tick(self):
+        for pet in self.pets:
+            pet.width = self.mon_w
+            old_x = pet.x
+            if pet.tick():
+                x0 = min(old_x, pet.x) - SCALE * 2
+                self.area.queue_draw_area(
+                    x0, 0, Pet.SPAN + abs(pet.x - old_x) + SCALE * 6, STRIP_H)
+        return True
+
+    def on_draw(self, _w, cr):
+        cr.set_operator(cairo.OPERATOR_CLEAR)
+        cr.paint()
+        cr.set_operator(cairo.OPERATOR_OVER)
+        for pet in self.pets:
+            pet.draw(cr)
+
+
+def main():
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    signal.signal(signal.SIGTERM, lambda *_: Gtk.main_quit())
+    PetWindow()
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

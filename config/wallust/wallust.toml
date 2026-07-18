@@ -20,3 +20,6 @@ swaync.target = "~/.config/swaync/colors.css"
 
 wlogout.template = "colors-wlogout.css"
 wlogout.target = "~/.config/wlogout/colors.css"
+
+conky.template = "colors-conky.lua"
+conky.target = "~/.config/conky/colors.lua"

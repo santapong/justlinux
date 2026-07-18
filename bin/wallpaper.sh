@@ -88,5 +88,6 @@ wallust run "$RECOLOR"
 hyprctl reload >/dev/null                       # window borders
 pkill -SIGUSR2 waybar 2>/dev/null || true       # waybar restyles in place
 swaync-client -rs 2>/dev/null || true           # swaync reloads css
+~/.local/bin/desktop-widgets.sh restart         # conky widgets re-read colors.lua
 
 echo "Desktop recolored ✔"

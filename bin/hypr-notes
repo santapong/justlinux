@@ -1,0 +1,5 @@
+#!/bin/sh
+# Edit the desktop sticky note in a floating kitty (widget updates on save).
+NOTES="$HOME/.local/share/hypr-notes.txt"
+[ -f "$NOTES" ] || printf -- "- my first desktop note\n" > "$NOTES"
+exec kitty --class floatterm --title "Desktop notes" nvim "$NOTES"

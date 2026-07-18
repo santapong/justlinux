@@ -56,9 +56,80 @@ NAV = [
     ("appearance", "󰉼", "Appearance"),
     ("bar",        "󰜬", "Bar"),
     ("wallpaper",  "󰸉", "Wallpaper"),
+    ("widgets",    "󰕰", "Widgets"),
     ("security",   "󰕥", "Security"),
     ("power",      "⏻", "Power"),
 ]
+
+WIDGETS_CONF = HOME / ".config/conky/widgets.conf"
+WIDGET_LABELS = {"clock": "Clock & date", "stats": "System stats",
+                 "calendar": "Calendar", "claude": "Claude plan usage",
+                 "apps": "Applications dock (★ pins)",
+                 "weather": "Weather", "nowplaying": "Now playing",
+                 "pomodoro": "Pomodoro timer", "notes": "Sticky notes",
+                 "security": "Security status", "netgraph": "Network graph",
+                 "github": "GitHub graph", "habitica": "Habitica",
+                 "trading": "Markets / trading"}
+POS_CYCLE = ["top_left", "top_middle", "top_right", "middle_right",
+             "bottom_right", "bottom_middle", "bottom_left", "middle_left"]
+DEFAULT_POS = {"clock": ("top_right", 24, 44), "stats": ("middle_right", 24, 0),
+               "calendar": ("top_left", 24, 44), "claude": ("bottom_right", 24, 44),
+               "apps": ("bottom_middle", 0, 12),
+               "weather": ("top_middle", 0, 44), "nowplaying": ("bottom_left", 24, 44),
+               "pomodoro": ("top_left", 24, 250), "notes": ("middle_left", 24, 120),
+               "security": ("top_right", 24, 230), "netgraph": ("bottom_left", 24, 180),
+               "github": ("top_middle", 0, 250), "habitica": ("middle_right", 360, 0),
+               "trading": ("bottom_middle", 0, 130)}
+
+
+def theme_list():
+    """wallust (follows the wallpaper) + every palette in themes/."""
+    themes = sorted(p.stem for p in
+                    (HOME / ".config/conky/themes").glob("*.lua"))
+    return ["wallust"] + themes
+
+
+def widget_list():
+    """Every conky conf in the widgets dir + the app dock — drop a new
+    .conf in ~/.config/conky/widgets/ and it appears here automatically."""
+    names = sorted(p.stem for p in (HOME / ".config/conky/widgets").glob("*.conf")
+                   if p.stem != "apps")
+    names.append("apps")
+    return [(n, WIDGET_LABELS.get(n, f"{n.title()} (custom)")) for n in names]
+
+
+def widgets_conf():
+    d = {"clock": "on", "stats": "on", "calendar": "on", "claude": "on",
+         "apps": "on", "pet": "on", "pet_layer": "bottom", "cards": "on",
+         "claude_pet": "on"}
+    d["theme"] = "wallust"
+    for name, (pos, x, y) in DEFAULT_POS.items():
+        d[f"{name}_pos"], d[f"{name}_x"], d[f"{name}_y"] = pos, str(x), str(y)
+    try:
+        for line in WIDGETS_CONF.read_text().splitlines():
+            m = re.match(r"^(\w+)\s*=\s*([-\w.,]+)", line)
+            if m:
+                d[m.group(1)] = m.group(2)
+    except OSError:
+        pass
+    return d
+
+
+def widgets_conf_set(key, val):
+    try:
+        lines = WIDGETS_CONF.read_text().splitlines()
+    except OSError:
+        lines = []
+    out, done = [], False
+    for line in lines:
+        if re.match(rf"^{key}\s*=", line):
+            out.append(f"{key}={val}")
+            done = True
+        else:
+            out.append(line)
+    if not done:
+        out.append(f"{key}={val}")
+    WIDGETS_CONF.write_text("\n".join(out) + "\n")
 
 GAUGE_SLOTS = 12
 
@@ -293,6 +364,7 @@ class HyprSettings(App):
 
     .row {{ height: 3; background: transparent; }}
     .row Label {{ width: 30; padding: 1 0; }}
+    .posbtn {{ min-width: 16; }}
     .gauge {{ width: {GAUGE_SLOTS + 2}; padding: 1 1 1 0; }}
     .multival {{ width: 36; padding: 1 0; }}
     .val {{ width: 4; text-align: right; padding: 1 1 1 0;
@@ -350,6 +422,7 @@ class HyprSettings(App):
         # fix 10: Save only writes settings actually touched in this session
         self.dirty = set()
         self._refreshing = False
+        self.widgets = widgets_conf()
 
     # ---------- layout ----------
     def compose(self) -> ComposeResult:
@@ -414,6 +487,76 @@ class HyprSettings(App):
                             yield Button("󰋩 Pick image / folder…", id="wp_pick")
                         yield Static("Every change recolors the whole desktop.\n"
                                      "This panel wears the new colors next time it opens.",
+                                     classes="hint")
+                with VerticalScroll(id="pane-widgets"):
+                    with Card("Desktop widgets · changes apply right away"):
+                        for key, label in widget_list():
+                            with Horizontal(classes="row"):
+                                yield Label(label)
+                                yield Switch(
+                                    value=self.widgets.get(key, "on") == "on",
+                                    id=f"sw_w_{key}")
+                        with Horizontal(classes="row"):
+                            yield Button("󰀻 Choose dock apps…", id="dock_pick")
+                        yield Static("Pick which apps sit on THIS workspace's "
+                                     "dock (each workspace has its own set).",
+                                     classes="hint")
+                    with Card("Layout · where each widget sits"):
+                        for key, label in widget_list():
+                            pos = self.widgets.get(
+                                f"{key}_pos", DEFAULT_POS.get(key, ("top_left",))[0])
+                            with Horizontal(classes="row"):
+                                yield Label(label)
+                                b = Button(pos.replace("_", " "),
+                                           id=f"pos_{key}", classes="posbtn")
+                                b.active_effect_duration = 0
+                                yield b
+                                yield stepper("-", f"xm_{key}")
+                                yield Static(self.widgets.get(f"{key}_x", "0"),
+                                             id=f"xv_{key}", classes="val")
+                                yield stepper("+", f"xp_{key}")
+                                yield stepper("-", f"ym_{key}")
+                                yield Static(self.widgets.get(f"{key}_y", "0"),
+                                             id=f"yv_{key}", classes="val")
+                                yield stepper("+", f"yp_{key}")
+                        yield Static("Click the position name to cycle corners; "
+                                     "-/+ pairs nudge X then Y by 12 px. "
+                                     "Widgets restart a moment after you stop.",
+                                     classes="hint")
+                    with Card("Style"):
+                        with Horizontal(classes="row"):
+                            yield Label("Card look (border + background)")
+                            yield Switch(value=self.widgets["cards"] == "on",
+                                         id="sw_w_cards")
+                        with Horizontal(classes="row"):
+                            yield Label("Color theme")
+                            tb = Button(self.widgets.get("theme", "wallust"),
+                                        id="theme_btn", classes="posbtn")
+                            tb.active_effect_duration = 0
+                            yield tb
+                        yield Static("wallust follows the wallpaper; drop more "
+                                     "palettes in ~/.config/conky/themes/.",
+                                     classes="hint")
+                    with Card("Pet 󰄛"):
+                        with Horizontal(classes="row"):
+                            yield Label("Show the pixel cat")
+                            yield Switch(value=self.widgets["pet"] == "on",
+                                         id="sw_w_pet")
+                        with Horizontal(classes="row"):
+                            yield Label("Clawd (Claude mascot)")
+                            yield Switch(value=self.widgets["claude_pet"] == "on",
+                                         id="sw_w_claude_pet")
+                        with Horizontal(classes="row"):
+                            yield Label("Walk above windows too")
+                            yield Switch(value=self.widgets["pet_layer"] == "top",
+                                         id="sw_w_petlayer")
+                        yield Static("Off = the cat stays on the desktop layer, "
+                                     "under your windows.", classes="hint")
+                    with Card("Maintenance"):
+                        with Horizontal(classes="row"):
+                            yield Button("󰑓 Restart widgets", id="wg_restart")
+                        yield Static("Widgets recolor with every wallpaper change.\n"
+                                     "Files live in ~/.config/conky/widgets/.",
                                      classes="hint")
                 with VerticalScroll(id="pane-security"):
                     with Card("Firewall · ufw"):
@@ -521,14 +664,62 @@ class HyprSettings(App):
             self.notify("Auto-hide " + ("ON — move mouse to top edge to reveal"
                                         if event.value else "OFF — bar always visible"))
             return
+        if sid.startswith("sw_w_"):
+            wkey = sid.removeprefix("sw_w_")
+            if wkey == "petlayer":
+                widgets_conf_set("pet_layer", "top" if event.value else "bottom")
+            else:
+                widgets_conf_set(wkey, "on" if event.value else "off")
+            self.widgets = widgets_conf()
+            launch(str(HOME / ".local/bin/desktop-widgets.sh"), "restart")
+            self.notify("Widgets updated")
+            return
         key = sid.removeprefix("sw_")
         if key in BOOLS:
             self.bools[key] = event.value
             self.dirty.add(key)
             hyprctl_set(BOOLS[key][0], 1 if event.value else 0)
 
+    def schedule_widget_restart(self):
+        if getattr(self, "_wg_timer", None):
+            self._wg_timer.stop()
+        self._wg_timer = self.set_timer(
+            1.2, lambda: launch(str(HOME / ".local/bin/desktop-widgets.sh"),
+                                "restart"))
+
     def on_button_pressed(self, event: Button.Pressed):
         bid = event.button.id or ""
+        if bid == "theme_btn":
+            themes = theme_list()
+            cur = self.widgets.get("theme", "wallust")
+            nxt = themes[(themes.index(cur) + 1) % len(themes)] \
+                if cur in themes else themes[0]
+            widgets_conf_set("theme", nxt)
+            self.widgets = widgets_conf()
+            event.button.label = nxt
+            self.schedule_widget_restart()
+            return
+        if bid.startswith("pos_"):
+            key = bid.removeprefix("pos_")
+            cur = self.widgets.get(f"{key}_pos",
+                                   DEFAULT_POS.get(key, ("top_left",))[0])
+            nxt = POS_CYCLE[(POS_CYCLE.index(cur) + 1) % len(POS_CYCLE)] \
+                if cur in POS_CYCLE else POS_CYCLE[0]
+            widgets_conf_set(f"{key}_pos", nxt)
+            self.widgets = widgets_conf()
+            event.button.label = nxt.replace("_", " ")
+            self.schedule_widget_restart()
+            return
+        if bid.startswith(("xm_", "xp_", "ym_", "yp_")):
+            axis, sign = bid[0], (1 if bid[1] == "p" else -1)
+            key = bid[3:]
+            ck = f"{key}_{axis}"
+            val = max(0, int(self.widgets.get(ck, "0") or 0) + sign * 12)
+            widgets_conf_set(ck, str(val))
+            self.widgets = widgets_conf()
+            self.query_one(f"#{axis}v_{key}", Static).update(str(val))
+            self.schedule_widget_restart()
+            return
         if bid.startswith(("inc_", "dec_")):
             key = bid[4:]
             opt, _, lo, _, _ = INTS[key]
@@ -559,6 +750,10 @@ class HyprSettings(App):
                                         "pkexec bash -c 'systemctl stop clamav-freshclam; freshclam; systemctl start clamav-freshclam'; echo; read -rp 'Enter to close…'"),
             "p_lock": lambda: launch("hyprlock"),
             "p_suspend": lambda: launch("systemctl", "suspend"),
+            "wg_restart": lambda: launch(
+                str(HOME / ".local/bin/desktop-widgets.sh"), "restart"),
+            "dock_pick": lambda: launch(
+                str(HOME / ".local/bin/hypr-appdock"), "--picker"),
         }
         if bid in actions:
             actions[bid]()

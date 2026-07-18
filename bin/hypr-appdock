@@ -1,0 +1,404 @@
+#!/usr/bin/env python3
+"""hypr-appdock — pinned applications panel on the desktop, per workspace.
+
+Each workspace can have its own set of pinned apps:
+  · ➕ at the end of the dock opens the picker — tick the apps you want on
+    THIS workspace (searchable list of everything installed)
+  · right-click a dock icon to unpin it from this workspace
+  · workspaces without their own set inherit the Default set
+
+Pins live in ~/.local/state/hypr-appdock/pins.json; the first run seeds the
+Default set from Hypr Launcher ★ favorites. The dock follows workspace
+switches live via Hyprland's event socket.
+
+A gtk-layer-shell surface on the BOTTOM layer (desktop level): rounded
+glass via GTK CSS + Hyprland blur layerrule. Position: apps_pos/_x/_y in
+~/.config/conky/widgets.conf; colors honor the widgets theme.
+"""
+import json
+import os
+import re
+import shlex
+import sys
+import signal
+import socket
+import subprocess
+from pathlib import Path
+
+import gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, Gdk, GLib, GdkPixbuf
+
+sys.path.insert(0, str(Path.home() / ".local/lib"))
+from hyprdesk import conf, colors, css_rgba        # central config/theme
+from hyprdesk.layer import LayerWindow
+
+HOME = Path.home()
+LAUNCHER_STATE = HOME / ".local/state/hypr-launcher/state.json"
+PINS = HOME / ".local/state/hypr-appdock/pins.json"
+RESOLVE = HOME / ".cache/hypr-launcher/resolve.json"
+WIDGETS_CONF = HOME / ".config/conky/widgets.conf"
+ICON = 44
+APP_DIRS = [
+    HOME / ".local/share/applications",
+    Path("/usr/share/applications"),
+    Path("/var/lib/flatpak/exports/share/applications"),
+    HOME / ".local/share/flatpak/exports/share/applications",
+]
+
+
+# ---------------- pins state ----------------
+
+def load_pins():
+    try:
+        return json.loads(PINS.read_text())
+    except json.JSONDecodeError:
+        # mid-write/corrupt: use defaults but DON'T overwrite the file —
+        # the next good save wins, per-workspace pins survive
+        return {"default": [], "workspaces": {}}
+    except OSError:
+        # first run: seed the default set from Hypr Launcher favorites
+        try:
+            favs = json.loads(LAUNCHER_STATE.read_text()).get("favorites", [])
+        except (OSError, json.JSONDecodeError):
+            favs = []
+        state = {"default": favs, "workspaces": {}}
+        save_pins(state)
+        return state
+
+
+def save_pins(state):
+    PINS.parent.mkdir(parents=True, exist_ok=True)
+    tmp = PINS.with_suffix(".tmp")          # atomic: picker + dock share it
+    tmp.write_text(json.dumps(state, indent=1))
+    os.replace(tmp, PINS)
+
+
+def pins_for(state, ws):
+    return state["workspaces"].get(str(ws), state["default"])
+
+
+# ---------------- app catalogue ----------------
+
+def all_apps():
+    """{stem: entry} for every visible .desktop app, first dir wins."""
+    apps = {}
+    for d in APP_DIRS:
+        if not d.is_dir():
+            continue
+        for p in sorted(d.glob("*.desktop")):
+            if p.stem in apps:
+                continue
+            entry = parse_desktop(p)
+            if entry:
+                apps[p.stem] = entry
+    return apps
+
+
+def parse_desktop(path):
+    entry = {"stem": path.stem, "name": "", "exec": "", "icon": "",
+             "terminal": False}
+    try:
+        for line in path.read_text(errors="replace").splitlines():
+            if line.startswith("[") and "[Desktop Entry]" not in line:
+                break
+            low = line.strip().lower().replace(" ", "")
+            if low in ("nodisplay=true", "hidden=true"):
+                return None
+            for key, field in (("Name=", "name"), ("Exec=", "exec"),
+                               ("Icon=", "icon")):
+                if line.startswith(key) and not entry[field]:
+                    entry[field] = line[len(key):].strip()
+            if line.startswith("Terminal=true"):
+                entry["terminal"] = True
+    except OSError:
+        return None
+    return entry if entry["exec"] else None
+
+
+def safe_pixbuf(path, size):
+    """Some cached icons are unloadable (broken SVG/format) — never crash."""
+    try:
+        return GdkPixbuf.Pixbuf.new_from_file_at_size(path, size, size)
+    except Exception:
+        return None
+
+
+def icon_path(icon_name):
+    if not icon_name:
+        return None
+    if icon_name.startswith("/") and Path(icon_name).is_file():
+        return icon_name
+    try:
+        resolved = json.loads(RESOLVE.read_text()).get(icon_name)
+        if resolved and Path(resolved).is_file():
+            return resolved
+    except (OSError, json.JSONDecodeError):
+        pass
+    return None
+
+
+def launch(entry):
+    try:
+        tokens = shlex.split(entry["exec"])
+    except ValueError:
+        tokens = entry["exec"].split()
+    argv = [a for a in tokens if not a.startswith("%") and not a.startswith("@@")]
+    if not argv:
+        return
+    if entry["terminal"]:
+        argv = ["kitty", "-e"] + argv
+    subprocess.Popen(argv, start_new_session=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+# ---------------- hyprland workspace tracking ----------------
+
+def hypr_socket_path():
+    sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+    run = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
+    return f"{run}/hypr/{sig}/.socket2.sock"
+
+
+def active_workspace():
+    try:
+        out = subprocess.run(["hyprctl", "activeworkspace", "-j"],
+                             capture_output=True, text=True, timeout=2).stdout
+        return json.loads(out).get("id", 1)
+    except Exception:
+        return 1
+
+
+class Picker(Gtk.Window):
+    """Searchable checklist of installed apps for the current workspace."""
+
+    def __init__(self, dock):
+        super().__init__(title=f"Dock apps — workspace {dock.ws}")
+        self.dock = dock
+        self.set_default_size(420, 520)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6,
+                      margin=10)
+        self.add(box)
+        self.search = Gtk.SearchEntry(placeholder_text="type to filter…")
+        self.search.connect("search-changed", lambda *_: self.lst.invalidate_filter())
+        box.pack_start(self.search, False, False, 0)
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        box.pack_start(scroll, True, True, 0)
+        self.lst = Gtk.ListBox()
+        self.lst.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.lst.set_filter_func(self.filter_row)
+        scroll.add(self.lst)
+
+        current = set(pins_for(dock.pins, dock.ws))
+        for stem, entry in sorted(dock.apps.items(),
+                                  key=lambda kv: kv[1]["name"].lower()):
+            row = Gtk.ListBoxRow()
+            h = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
+                        margin=4)
+            chk = Gtk.CheckButton()
+            chk.set_active(stem in current)
+            chk.connect("toggled", self.on_toggle, stem)
+            h.pack_start(chk, False, False, 0)
+            path = icon_path(entry["icon"])
+            pix = safe_pixbuf(path, 24) if path else None
+            if pix:
+                h.pack_start(Gtk.Image.new_from_pixbuf(pix), False, False, 0)
+            h.pack_start(Gtk.Label(label=entry["name"], xalign=0), True, True, 0)
+            row.add(h)
+            row.app_name = entry["name"].lower()
+            self.lst.add(row)
+        self.show_all()
+
+    def filter_row(self, row):
+        q = self.search.get_text().lower().strip()
+        return not q or q in row.app_name
+
+    def on_toggle(self, chk, stem):
+        ws = str(self.dock.ws)
+        state = self.dock.pins
+        # first edit on an inheriting workspace: copy the default set
+        if ws not in state["workspaces"]:
+            state["workspaces"][ws] = list(state["default"])
+        pins = state["workspaces"][ws]
+        if chk.get_active() and stem not in pins:
+            pins.append(stem)
+        elif not chk.get_active() and stem in pins:
+            pins.remove(stem)
+        save_pins(state)
+        self.dock.rebuild()
+
+
+class Dock(LayerWindow):
+    def __init__(self):
+        super().__init__("apps", default_pos="bottom_middle",
+                         default_x=0, default_y=12, namespace="hypr-appdock")
+        pal = colors()
+        css = Gtk.CssProvider()
+        css.load_from_data(f"""
+            #dock {{
+                background-color: {css_rgba(pal["bg"], 0.72)};
+                border-radius: 14px;
+                padding: 6px 10px;
+            }}
+            #dock button {{
+                background: transparent; border: none; box-shadow: none;
+                padding: 5px; border-radius: 10px; min-width: 0;
+            }}
+            #dock button:hover {{ background: rgba(255,255,255,0.12); }}
+            #hint {{ color: {pal['muted']}; padding: 4px 8px; }}
+        """.encode())
+        Gtk.StyleContext.add_provider_for_screen(
+            self.get_screen(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+        self.apps = all_apps()
+        self.pins = load_pins()
+        self.ws = active_workspace()
+        self.picker = None
+
+        self.box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+        self.box.set_name("dock")
+        self.add(self.box)
+        self.rebuild()
+        self.show_all()
+        self.watch_workspaces()
+        self._pins_mtime = self._pins_stat()
+        GLib.timeout_add_seconds(2, self._check_pins)
+
+    # ----- rendering -----
+    def rebuild(self):
+        for child in self.box.get_children():
+            self.box.remove(child)
+        shown = 0
+        for stem in pins_for(self.pins, self.ws):
+            entry = self.apps.get(stem) or None
+            if not entry:
+                continue
+            btn = Gtk.Button()
+            btn.set_tooltip_text(f"{entry['name']} — right-click to unpin")
+            path = icon_path(entry["icon"])
+            pix = safe_pixbuf(path, ICON) if path else None
+            if pix:
+                btn.set_image(Gtk.Image.new_from_pixbuf(pix))
+            else:
+                btn.set_label(entry["name"][:2])
+            btn.connect("clicked", lambda _b, e=entry: launch(e))
+            btn.connect("button-press-event", self.on_icon_press, stem)
+            self.box.pack_start(btn, False, False, 0)
+            shown += 1
+        if not shown:
+            lbl = Gtk.Label(label=f"ws {self.ws} · no pins")
+            lbl.set_name("hint")
+            self.box.pack_start(lbl, False, False, 0)
+        plus = Gtk.Button(label="＋")
+        plus.set_tooltip_text("Choose apps for this workspace")
+        plus.connect("clicked", self.open_picker)
+        self.box.pack_start(plus, False, False, 0)
+        self.box.show_all()
+
+    def on_icon_press(self, _btn, event, stem):
+        if event.button == 3:                       # right-click: unpin
+            ws = str(self.ws)
+            if ws not in self.pins["workspaces"]:
+                self.pins["workspaces"][ws] = list(self.pins["default"])
+            if stem in self.pins["workspaces"][ws]:
+                self.pins["workspaces"][ws].remove(stem)
+                save_pins(self.pins)
+                self.rebuild()
+            return True
+        return False
+
+    def open_picker(self, *_):
+        if self.picker:
+            self.picker.destroy()
+        self.picker = Picker(self)
+
+    def _pins_stat(self):
+        try:
+            return PINS.stat().st_mtime
+        except OSError:
+            return 0
+
+    def _check_pins(self):
+        mt = self._pins_stat()
+        if mt != self._pins_mtime:
+            self._pins_mtime = mt
+            self.pins = load_pins()
+            self.rebuild()
+        return True
+
+    # ----- workspace tracking -----
+    def watch_workspaces(self):
+        try:
+            self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.sock.connect(hypr_socket_path())
+            self.sock.setblocking(False)
+            self._sock_buf = ""
+            GLib.io_add_watch(self.sock.fileno(), GLib.IO_IN, self.on_event)
+        except OSError:
+            GLib.timeout_add_seconds(3, self.poll_workspace)
+
+    def on_event(self, _fd, _cond):
+        try:
+            data = self.sock.recv(4096)
+        except OSError:
+            return True
+        if not data:                    # Hyprland restarted: EOF — stop the
+            self.sock.close()           # watch or it busy-loops at 100% CPU
+            GLib.timeout_add_seconds(3, self.poll_workspace)
+            return False
+        self._sock_buf += data.decode(errors="replace")
+        *lines, self._sock_buf = self._sock_buf.split("\n")
+        for line in lines:
+            if line.startswith("workspacev2>>"):
+                try:
+                    self.set_ws(int(line.split(">>")[1].split(",")[0]))
+                except ValueError:
+                    pass
+            elif line.startswith("workspace>>"):
+                name = line.split(">>")[1]
+                if name.isdigit():
+                    self.set_ws(int(name))
+        return True
+
+    def poll_workspace(self):
+        self.set_ws(active_workspace())
+        return True
+
+    def set_ws(self, ws):
+        if ws != self.ws:
+            self.ws = ws
+            self.pins = load_pins()
+            self.rebuild()
+            if self.picker:
+                self.picker.destroy()
+                self.picker = None
+
+
+class StandaloneCtl:
+    """Picker controller without a dock window (— --picker mode, launched
+    from Hypr Settings). The running dock notices pins.json changes itself."""
+
+    def __init__(self):
+        self.ws = active_workspace()
+        self.pins = load_pins()
+        self.apps = all_apps()
+
+    def rebuild(self):
+        pass                    # the live dock re-reads pins.json on its own
+
+
+def main():
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    signal.signal(signal.SIGTERM, lambda *_: Gtk.main_quit())
+    GLib.set_prgname("hyprdockpick")     # picker window app_id → windowrule
+    if "--picker" in sys.argv:
+        win = Picker(StandaloneCtl())
+        win.connect("destroy", Gtk.main_quit)
+    else:
+        Dock()
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()
