@@ -37,12 +37,20 @@ def fk(joints):
     return tip, z_axis
 
 
+# a natural elbow-bent posture — spreading the bend across shoulder/elbow/
+# wrist keeps the torch from folding back into the forearm (a self-collision)
+NOMINAL = [0.0, 1.0, 1.0, 0.0, 1.14, 0.0]
+
+
 def cost(joints, target):
     tip, za = fk(joints)
     dp = sum((tip[i] - target[i]) ** 2 for i in range(3))
     # torch pointing down: local +Z should equal world -Z
     do = (za[0] ** 2 + za[1] ** 2 + (za[2] + 1) ** 2)
-    return dp + 0.5 * do
+    # regularize toward the natural posture (esp. keep wrist j5 moderate)
+    reg = sum((joints[i] - NOMINAL[i]) ** 2 for i in (1, 2, 4)) * 0.02
+    reg += max(0.0, abs(joints[4]) - 1.5) ** 2 * 0.2   # punish a cranked wrist
+    return dp + 0.5 * do + reg
 
 
 def _descend(q, target):

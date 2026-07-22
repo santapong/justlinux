@@ -41,14 +41,15 @@
     <parent link="world"/><child link="car_part"/>
   </joint>
 
-  <!-- ===== three welding robots, each 0.25 in front of its seam ===== -->
+  <!-- ===== three welding robots on 0.30 m pedestals, each 0.30 in front
+       of its seam, reaching DOWN-forward onto the part ===== -->
   <!-- arm1: welds the left rail (world +y) -->
   <xacro:weld_arm prefix="arm1_" parent="world"
-                  x="0.0" y="0.38" z="0.0" yaw="-1.5708" color="wc_accent"/>
+                  x="0.0" y="0.43" z="0.30" yaw="-1.5708" color="wc_accent" ped="0.30"/>
   <!-- arm2: welds the right rail (world -y) -->
   <xacro:weld_arm prefix="arm2_" parent="world"
-                  x="0.0" y="-0.38" z="0.0" yaw="1.5708" color="wc_accent"/>
+                  x="0.0" y="-0.43" z="0.30" yaw="1.5708" color="wc_accent" ped="0.30"/>
   <!-- arm3: welds the cross member (world +x) -->
   <xacro:weld_arm prefix="arm3_" parent="world"
-                  x="0.38" y="0.0" z="0.0" yaw="3.1416" color="wc_accent"/>
+                  x="0.43" y="0.0" z="0.30" yaw="3.1416" color="wc_accent" ped="0.30"/>
 </robot>

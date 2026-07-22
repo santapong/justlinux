@@ -35,7 +35,7 @@
     </inertial>
   </xacro:macro>
 
-  <xacro:macro name="weld_arm" params="prefix parent x y z yaw color:=wc_accent">
+  <xacro:macro name="weld_arm" params="prefix parent x y z yaw color:=wc_accent ped:=0.0">
     <xacro:property name="pi2" value="1.5708"/>
     <xacro:property name="waist_h" value="0.08"/>
     <xacro:property name="upper" value="0.18"/>
@@ -48,8 +48,15 @@
       <origin xyz="${x} ${y} ${z}" rpy="0 0 ${yaw}"/>
     </joint>
 
-    <!-- ribbed base + riser -->
+    <!-- ribbed base + riser (+ pedestal down to the floor if ped>0) -->
     <link name="${prefix}base_link">
+      <xacro:if value="${ped > 0}">
+        <visual><origin xyz="0 0 ${-ped/2}"/>
+          <geometry><cylinder radius="0.07" length="${ped}"/></geometry>
+          <material name="wc_joint"/></visual>
+        <collision><origin xyz="0 0 ${-ped/2}"/>
+          <geometry><cylinder radius="0.07" length="${ped}"/></geometry></collision>
+      </xacro:if>
       <visual><origin xyz="0 0 0.015"/>
         <geometry><cylinder radius="0.08" length="0.03"/></geometry>
         <material name="wc_joint"/></visual>

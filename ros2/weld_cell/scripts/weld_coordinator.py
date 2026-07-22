@@ -20,11 +20,14 @@ ARMS = ["arm1_", "arm2_", "arm3_"]
 # IK-derived (tools/arm_ik.py): torch reaches ~0.25 forward/up pointing DOWN;
 # joint1 (waist) sweeps the seam. The arms are placed 0.25 in front of each
 # seam in the cell URDF so these land the torch on the workpiece.
+# arms on 0.30 m pedestals reach DOWN-forward to the seam — natural posture
+# (elbow bent, moderate wrist) so the torch never folds into the forearm.
+# IK-solved + collision-verified (tools/arm_ik.py, check_trajectory.py).
 HOME = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-APPROACH_L = [-0.45, 0.521, 0.0, 0.0, 2.585, 0.0]  # above seam start
-WELD_L = [-0.45, 0.691, 0.0, 0.0, 2.438, 0.0]      # seam start (on part)
-WELD_R = [0.45, 0.691, 0.0, 0.0, 2.438, 0.0]       # seam end (swept +waist)
-APPROACH_R = [0.45, 0.521, 0.0, 0.0, 2.585, 0.0]   # retract up
+APPROACH_L = [-0.5, 0.53, 1.138, 0.0, 1.474, 0.0]  # above seam start
+WELD_L = [-0.5, 0.795, 1.391, 0.0, 0.956, 0.0]     # seam start (on part)
+WELD_R = [0.5, 0.795, 1.391, 0.0, 0.956, 0.0]      # seam end (swept +waist)
+APPROACH_R = [0.5, 0.53, 1.138, 0.0, 1.474, 0.0]   # retract up
 
 
 class Coordinator(Node):
