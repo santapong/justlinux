@@ -1,0 +1,74 @@
+<?xml version="1.0"?>
+<!-- Auto-generated cell SRDF: groups + collision matrix (ACM). -->
+<robot name="weld_cell">
+  <group name="arm1">
+    <chain base_link="arm1_base_link" tip_link="arm1_tool0"/>
+  </group>
+  <group_state name="home" group="arm1">
+    <joint name="arm1_joint1" value="0"/>
+    <joint name="arm1_joint2" value="0"/>
+    <joint name="arm1_joint3" value="0"/>
+    <joint name="arm1_joint4" value="0"/>
+    <joint name="arm1_joint5" value="0"/>
+    <joint name="arm1_joint6" value="0"/>
+  </group_state>
+  <group name="arm2">
+    <chain base_link="arm2_base_link" tip_link="arm2_tool0"/>
+  </group>
+  <group_state name="home" group="arm2">
+    <joint name="arm2_joint1" value="0"/>
+    <joint name="arm2_joint2" value="0"/>
+    <joint name="arm2_joint3" value="0"/>
+    <joint name="arm2_joint4" value="0"/>
+    <joint name="arm2_joint5" value="0"/>
+    <joint name="arm2_joint6" value="0"/>
+  </group_state>
+  <group name="arm3">
+    <chain base_link="arm3_base_link" tip_link="arm3_tool0"/>
+  </group>
+  <group_state name="home" group="arm3">
+    <joint name="arm3_joint1" value="0"/>
+    <joint name="arm3_joint2" value="0"/>
+    <joint name="arm3_joint3" value="0"/>
+    <joint name="arm3_joint4" value="0"/>
+    <joint name="arm3_joint5" value="0"/>
+    <joint name="arm3_joint6" value="0"/>
+  </group_state>
+  <virtual_joint name="cell_base" type="fixed" parent_frame="world" child_link="world"/>
+  <!-- arm1_ self-collisions -->
+  <disable_collisions link1="arm1_base_link" link2="arm1_link1" reason="Adjacent"/>
+  <disable_collisions link1="arm1_link1" link2="arm1_link2" reason="Adjacent"/>
+  <disable_collisions link1="arm1_link2" link2="arm1_link3" reason="Adjacent"/>
+  <disable_collisions link1="arm1_link3" link2="arm1_link4" reason="Adjacent"/>
+  <disable_collisions link1="arm1_link4" link2="arm1_link5" reason="Adjacent"/>
+  <disable_collisions link1="arm1_link5" link2="arm1_tool0" reason="Adjacent"/>
+  <disable_collisions link1="arm1_base_link" link2="arm1_link2" reason="Never"/>
+  <disable_collisions link1="arm1_link1" link2="arm1_link3" reason="Never"/>
+  <disable_collisions link1="arm1_link2" link2="arm1_link4" reason="Never"/>
+  <disable_collisions link1="arm1_link3" link2="arm1_link5" reason="Never"/>
+  <disable_collisions link1="arm1_link4" link2="arm1_tool0" reason="Never"/>
+  <!-- arm2_ self-collisions -->
+  <disable_collisions link1="arm2_base_link" link2="arm2_link1" reason="Adjacent"/>
+  <disable_collisions link1="arm2_link1" link2="arm2_link2" reason="Adjacent"/>
+  <disable_collisions link1="arm2_link2" link2="arm2_link3" reason="Adjacent"/>
+  <disable_collisions link1="arm2_link3" link2="arm2_link4" reason="Adjacent"/>
+  <disable_collisions link1="arm2_link4" link2="arm2_link5" reason="Adjacent"/>
+  <disable_collisions link1="arm2_link5" link2="arm2_tool0" reason="Adjacent"/>
+  <disable_collisions link1="arm2_base_link" link2="arm2_link2" reason="Never"/>
+  <disable_collisions link1="arm2_link1" link2="arm2_link3" reason="Never"/>
+  <disable_collisions link1="arm2_link2" link2="arm2_link4" reason="Never"/>
+  <disable_collisions link1="arm2_link3" link2="arm2_link5" reason="Never"/>
+  <disable_collisions link1="arm2_link4" link2="arm2_tool0" reason="Never"/>
+  <!-- arm3_ self-collisions -->
+  <disable_collisions link1="arm3_base_link" link2="arm3_link1" reason="Adjacent"/>
+  <disable_collisions link1="arm3_link1" link2="arm3_link2" reason="Adjacent"/>
+  <disable_collisions link1="arm3_link2" link2="arm3_link3" reason="Adjacent"/>
+  <disable_collisions link1="arm3_link3" link2="arm3_link4" reason="Adjacent"/>
+  <disable_collisions link1="arm3_link4" link2="arm3_link5" reason="Adjacent"/>
+  <disable_collisions link1="arm3_link5" link2="arm3_tool0" reason="Adjacent"/>
+  <disable_collisions link1="arm3_base_link" link2="arm3_link2" reason="Never"/>
+  <disable_collisions link1="arm3_link1" link2="arm3_link3" reason="Never"/>
+  <disable_collisions link1="arm3_link2" link2="arm3_link4" reason="Never"/>
+  <disable_collisions link1="arm3_link3" link2="arm3_link5" reason="Never"/>
+  <disable_collisions link1="arm3_link4" link2="arm3_tool0" reason="Never"/>
+</robot>
