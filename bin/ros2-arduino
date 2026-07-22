@@ -1,0 +1,92 @@
+#!/bin/sh
+# ros2-arduino — connect ROS2 to an Arduino Uno R3 over USB serial.
+#
+#   ros2-arduino run [PORT]   bridge the Uno -> ROS2 topics (auto-detects port)
+#   ros2-arduino test         no-hardware loopback test (fake Arduino + bridge)
+#   ros2-arduino topics       list/echo the /arduino/* topics
+#   ros2-arduino led on|off   flip the onboard D13 LED via ROS2
+#   ros2-arduino stop
+#
+# The Uno enumerates as /dev/ttyACM0 (genuine) or /dev/ttyUSB0 (CH340 clone).
+D=47
+IMG=ros2-arduino:jazzy
+NAME=arduino
+
+detect_port() {
+  for p in /dev/ttyACM0 /dev/ttyACM1 /dev/ttyUSB0 /dev/ttyUSB1; do
+    [ -e "$p" ] && { echo "$p"; return 0; }
+  done
+  return 1
+}
+
+case "${1:-run}" in
+stop) docker rm -f $NAME 2>/dev/null; echo stopped ;;
+
+run)
+  PORT="${2:-$(detect_port)}"
+  if [ -z "$PORT" ]; then
+    echo "No Arduino serial port found (/dev/ttyACM* or /dev/ttyUSB*)."
+    echo "Plug in the Uno, flash arduino_uno_bridge.ino, then re-run."
+    echo "Tip: 'ros2-arduino test' runs the full pipeline with no hardware."
+    exit 1
+  fi
+  echo "Using serial port: $PORT"
+  docker rm -f $NAME 2>/dev/null >/dev/null
+  docker run -d --name $NAME --net=host --ipc=host \
+    -e RMW_IMPLEMENTATION=rmw_fastrtps_cpp -e ROS_DOMAIN_ID=$D \
+    --device "$PORT" \
+    -v "$HOME/ros2_ws:/ros2_ws" -w /ros2_ws \
+    $IMG bash -c "source /opt/ros/jazzy/setup.bash
+      python3 -u /ros2_ws/src/arduino_bridge/arduino_bridge/serial_bridge.py \
+        --ros-args -p port:=$PORT >/ros2_ws/arduino.log 2>&1; sleep 100000" \
+    >/dev/null 2>&1
+  sleep 3
+  echo "bridge running (domain $D). Watch data:  ros2-arduino topics"
+  echo "                        flip the LED:  ros2-arduino led on|off" ;;
+
+test)
+  # full pipeline, no board: socat makes two linked PTYs; fake Arduino on one,
+  # the real bridge on the other. Proves ROS2 side works before you have hardware.
+  docker rm -f $NAME 2>/dev/null >/dev/null
+  docker run -d --name $NAME --net=host --ipc=host \
+    -e RMW_IMPLEMENTATION=rmw_fastrtps_cpp -e ROS_DOMAIN_ID=$D \
+    -v "$HOME/ros2_ws:/ros2_ws" -w /ros2_ws \
+    $IMG bash -c '
+      source /opt/ros/jazzy/setup.bash
+      B=/ros2_ws/src/arduino_bridge/arduino_bridge
+      socat -d -d pty,raw,echo=0 pty,raw,echo=0 2>/ros2_ws/socat.log &
+      sleep 2
+      P1=$(grep -o "/dev/pts/[0-9]*" /ros2_ws/socat.log | sed -n 1p)
+      P2=$(grep -o "/dev/pts/[0-9]*" /ros2_ws/socat.log | sed -n 2p)
+      echo "virtual ports: fake=$P1 bridge=$P2"
+      python3 -u $B/fake_arduino.py $P1 >/ros2_ws/fake.log 2>&1 &
+      python3 -u $B/serial_bridge.py --ros-args -p port:=$P2 >/ros2_ws/arduino.log 2>&1
+    ' >/dev/null 2>&1
+  sleep 5
+  echo "loopback test running (fake Arduino <-> bridge, domain $D)."
+  echo "Watch the (simulated) sensor move:  ros2-arduino topics" ;;
+
+topics)
+  docker exec -e ROS_DOMAIN_ID=$D $NAME bash -c '
+    source /opt/ros/jazzy/setup.bash
+    echo "=== /arduino topics ==="; ros2 topic list | grep /arduino
+    echo "=== /arduino/analog0 (5 samples) ==="
+    ros2 topic echo /arduino/analog0 --once
+    ros2 topic echo /arduino/analog0 --once
+    ros2 topic echo /arduino/analog0 --once
+    echo "=== link status ==="; ros2 topic echo /arduino/connected --once' ;;
+
+led)
+  V=0; [ "$2" = "on" ] && V=1
+  docker exec -e ROS_DOMAIN_ID=$D $NAME bash -c "source /opt/ros/jazzy/setup.bash
+    ros2 topic pub -1 /arduino/led std_msgs/Bool 'data: $([ $V = 1 ] && echo true || echo false)'"
+  echo "LED -> $2" ;;
+
+servo)
+  A="${2:-90}"
+  docker exec -e ROS_DOMAIN_ID=$D $NAME bash -c "source /opt/ros/jazzy/setup.bash
+    ros2 topic pub -1 /arduino/servo std_msgs/Int32 'data: $A'"
+  echo "SERVO -> $A" ;;
+
+*) echo "usage: ros2-arduino {run [PORT]|test|topics|led on|off|servo <deg>|stop}" ;;
+esac

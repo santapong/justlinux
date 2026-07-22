@@ -73,10 +73,12 @@ if task.plan(10):
         print(f"  solution {i}: cost={s.cost:.3f}")
     task.publish(task.solutions[0])
     print("published best solution to the MTC RViz panel")
-    print("\n=== TASK TREE (each stage planned + stitched) ===")
-    print(str(task))
+    # NOTE: task.execute() is unreliable through the container (its internal
+    # executor can't connect to the execute_task_solution action). The arm is
+    # animated by weld_replay.py streaming to /arm_controller instead. Keep the
+    # node alive so the published solution stays visible in the panel.
+    while True:
+        time.sleep(5)
 else:
     print("no full solution (see per-stage failures in the RViz panel)")
-
-# keep introspection alive so RViz keeps showing the task tree
-time.sleep(600)
+    time.sleep(30)
