@@ -1,0 +1,34 @@
+#!/bin/sh
+# ros2-slam — TurtleBot3 SLAM demo (Gazebo world + slam_toolbox + RViz).
+# Drives you into a container running the full stack; a teleop terminal
+# lets you steer the robot to build the map. Save the map with:
+#   ros2 run nav2_map_server map_saver_cli -f ~/ros2_ws/my_map
+#
+#   ros2-slam            world + SLAM + RViz + keyboard teleop (this term)
+#   ros2-slam headless   same, no Gazebo GUI (lighter; RViz still shows map)
+MODE="${1:-gui}"
+export TURTLEBOT3_MODEL=burger
+
+if ! docker image inspect ros2-robotics:jazzy >/dev/null 2>&1; then
+    echo "The robotics image isn't built yet. Build it with:"
+    echo "  docker build -t ros2-robotics:jazzy ~/ros2_ws/.docker/"
+    exit 1
+fi
+
+GZ="ros2 launch turtlebot3_gazebo turtlebot3_world.launch.py"
+[ "$MODE" = headless ] && GZ="$GZ headless:=True"
+
+exec ros2-shell bash -lic "
+source /opt/ros/jazzy/setup.bash
+echo '[1/3] starting Gazebo world...'; $GZ >/tmp/gz.log 2>&1 &
+sleep 12
+echo '[2/3] starting slam_toolbox...'
+ros2 launch slam_toolbox online_async_launch.py use_sim_time:=true >/tmp/slam.log 2>&1 &
+sleep 4
+echo '[3/3] starting RViz...'
+ros2 launch nav2_bringup rviz_launch.py >/tmp/rviz.log 2>&1 &
+sleep 3
+echo
+echo '=== DRIVE THE ROBOT to build the map (this terminal): ==='
+ros2 run teleop_twist_keyboard teleop_twist_keyboard
+"
