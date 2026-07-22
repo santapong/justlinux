@@ -1,0 +1,15 @@
+#!/bin/sh
+# ros2-cell — multi-robot welding cell: 3 arms weld a car underbody together.
+#   ros2-cell        run the cell (watch in RViz)
+#   ros2-cell stop   stop it
+command -v xhost >/dev/null && xhost +local:root >/dev/null 2>&1
+if [ "$1" = stop ]; then docker rm -f cellloop 2>/dev/null; echo stopped; exit 0; fi
+docker rm -f cellloop 2>/dev/null >/dev/null
+docker run -d --name cellloop --net=host --ipc=host \
+  -e DISPLAY="${DISPLAY:-:1}" -e RMW_IMPLEMENTATION=rmw_fastrtps_cpp \
+  -e QT_X11_NO_MITSHM=1 -e ROS_DOMAIN_ID=43 \
+  --device /dev/dri --group-add video \
+  -v /tmp/.X11-unix:/tmp/.X11-unix:rw -v "$HOME/ros2_ws:/ros2_ws" -w /ros2_ws \
+  ros2-weld:jazzy bash -c 'source /opt/ros/jazzy/setup.bash; source install/setup.bash
+export ROS_DOMAIN_ID=43; ros2 launch weld_cell cell.launch.py >/ros2_ws/cell.log 2>&1; sleep 100000' >/dev/null 2>&1
+echo "3-arm welding cell starting in RViz — ~40s to first weld. Stop: ros2-cell stop"
