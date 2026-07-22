@@ -22,6 +22,7 @@ exec docker run -it --rm \
     -e DISPLAY="${DISPLAY:-:1}" \
     -e QT_X11_NO_MITSHM=1 \
     -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}" \
+    -e RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}" \
     -e TURTLEBOT3_MODEL="${TURTLEBOT3_MODEL:-burger}" \
     -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
     -v "$WS:/ros2_ws" \

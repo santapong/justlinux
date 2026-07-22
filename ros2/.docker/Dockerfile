@@ -13,5 +13,5 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 ENV TURTLEBOT3_MODEL=burger
-ENV RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+ENV RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 RUN echo 'source /opt/ros/jazzy/setup.bash' >> /root/.bashrc

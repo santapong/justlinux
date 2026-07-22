@@ -8,6 +8,7 @@
 #   ros2-slam headless   same, no Gazebo GUI (lighter; RViz still shows map)
 MODE="${1:-gui}"
 export TURTLEBOT3_MODEL=burger
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 
 if ! docker image inspect ros2-robotics:jazzy >/dev/null 2>&1; then
     echo "The robotics image isn't built yet. Build it with:"
