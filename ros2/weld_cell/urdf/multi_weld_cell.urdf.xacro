@@ -1,0 +1,52 @@
+<?xml version="1.0"?>
+<!-- Multi-robot welding cell: 3 six-DOF arms weld a car underbody panel
+     simultaneously (body-in-white, like an automotive line). Each arm is a
+     prefixed instance of weld_arm; the car part is a fixed fixture. -->
+<robot name="weld_cell" xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <xacro:include filename="$(find weld_cell)/urdf/weld_arm.xacro"/>
+
+  <material name="car_body"><color rgba="0.62 0.64 0.68 1"/></material>
+  <material name="fixture"><color rgba="0.25 0.26 0.28 1"/></material>
+
+  <link name="world"/>
+
+  <!-- ===== the car part: an underbody floor pan on a fixture ===== -->
+  <link name="car_part">
+    <!-- floor pan -->
+    <visual><origin xyz="0 0 0.40"/>
+      <geometry><box size="0.55 0.40 0.02"/></geometry>
+      <material name="car_body"/></visual>
+    <!-- left side rail (seam #1 where it meets the floor) -->
+    <visual><origin xyz="0 0.17 0.45"/>
+      <geometry><box size="0.55 0.03 0.10"/></geometry>
+      <material name="car_body"/></visual>
+    <!-- right side rail (seam #2) -->
+    <visual><origin xyz="0 -0.17 0.45"/>
+      <geometry><box size="0.55 0.03 0.10"/></geometry>
+      <material name="car_body"/></visual>
+    <!-- cross member (seam #3) -->
+    <visual><origin xyz="0.18 0 0.45"/>
+      <geometry><box size="0.03 0.40 0.10"/></geometry>
+      <material name="car_body"/></visual>
+    <!-- fixture legs -->
+    <visual><origin xyz="0 0 0.20"/>
+      <geometry><box size="0.5 0.35 0.4"/></geometry>
+      <material name="fixture"/></visual>
+    <inertial><mass value="20"/>
+      <inertia ixx="1" iyy="1" izz="1" ixy="0" ixz="0" iyz="0"/></inertial>
+  </link>
+  <joint name="world_to_part" type="fixed">
+    <parent link="world"/><child link="car_part"/>
+  </joint>
+
+  <!-- ===== three welding robots around the part ===== -->
+  <!-- arm1: left side, welds the left rail seam -->
+  <xacro:weld_arm prefix="arm1_" parent="world"
+                  x="0.0" y="0.62" z="0.0" yaw="-1.5708" color="wc_accent"/>
+  <!-- arm2: right side, welds the right rail seam -->
+  <xacro:weld_arm prefix="arm2_" parent="world"
+                  x="0.0" y="-0.62" z="0.0" yaw="1.5708" color="wc_accent"/>
+  <!-- arm3: front, welds the cross member -->
+  <xacro:weld_arm prefix="arm3_" parent="world"
+                  x="0.66" y="0.0" z="0.0" yaw="3.1416" color="wc_accent"/>
+</robot>

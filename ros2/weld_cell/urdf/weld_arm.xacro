@@ -1,0 +1,154 @@
+<?xml version="1.0"?>
+<!-- Reusable 6-DOF welding arm as a macro. Instantiate several times with
+     different prefixes + base placements to build a multi-robot cell.
+     Each arm carries a torch on its flange (tool0). -->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <material name="wc_link"><color rgba="0.90 0.90 0.92 1"/></material>
+  <material name="wc_joint"><color rgba="0.17 0.17 0.20 1"/></material>
+  <material name="wc_accent"><color rgba="0.85 0.47 0.34 1"/></material>
+  <material name="wc_torch"><color rgba="0.12 0.12 0.14 1"/></material>
+  <material name="wc_copper"><color rgba="0.72 0.45 0.20 1"/></material>
+
+  <xacro:macro name="weld_arm" params="prefix parent x y z yaw color:=wc_accent">
+    <xacro:property name="pi2" value="1.5708"/>
+    <xacro:property name="waist_h" value="0.08"/>
+    <xacro:property name="upper" value="0.18"/>
+    <xacro:property name="fore" value="0.15"/>
+    <xacro:property name="wrist" value="0.06"/>
+    <xacro:property name="jl" value="2.9"/>
+
+    <xacro:macro name="ibox" params="mass">
+      <inertial><mass value="${mass}"/>
+        <inertia ixx="0.002" iyy="0.002" izz="0.002" ixy="0" ixz="0" iyz="0"/>
+      </inertial>
+    </xacro:macro>
+
+    <!-- fix the arm base to the world/table at (x,y,z) -->
+    <joint name="${prefix}anchor" type="fixed">
+      <parent link="${parent}"/><child link="${prefix}base_link"/>
+      <origin xyz="${x} ${y} ${z}" rpy="0 0 ${yaw}"/>
+    </joint>
+
+    <link name="${prefix}base_link">
+      <visual><origin xyz="0 0 0.015"/>
+        <geometry><cylinder radius="0.08" length="0.03"/></geometry>
+        <material name="wc_joint"/></visual>
+      <visual><origin xyz="0 0 0.05"/>
+        <geometry><cylinder radius="0.055" length="0.05"/></geometry>
+        <material name="wc_link"/></visual>
+      <collision><origin xyz="0 0 0.03"/>
+        <geometry><cylinder radius="0.08" length="0.06"/></geometry></collision>
+      <xacro:ibox mass="1.5"/>
+    </link>
+
+    <link name="${prefix}link1">
+      <visual><geometry><cylinder radius="0.055" length="${waist_h}"/></geometry>
+        <material name="wc_joint"/></visual>
+      <collision><geometry><cylinder radius="0.055" length="${waist_h}"/></geometry></collision>
+      <xacro:ibox mass="0.8"/>
+    </link>
+    <joint name="${prefix}joint1" type="revolute">
+      <parent link="${prefix}base_link"/><child link="${prefix}link1"/>
+      <origin xyz="0 0 0.075"/><axis xyz="0 0 1"/>
+      <limit lower="-${jl}" upper="${jl}" effort="30" velocity="2.0"/>
+    </joint>
+
+    <link name="${prefix}link2">
+      <visual><origin rpy="${pi2} 0 0"/>
+        <geometry><cylinder radius="0.05" length="0.11"/></geometry>
+        <material name="${color}"/></visual>
+      <visual><origin xyz="0 0 ${upper/2}"/>
+        <geometry><box size="0.055 0.055 ${upper}"/></geometry>
+        <material name="wc_link"/></visual>
+      <collision><origin xyz="0 0 ${upper/2}"/>
+        <geometry><box size="0.055 0.055 ${upper}"/></geometry></collision>
+      <xacro:ibox mass="0.8"/>
+    </link>
+    <joint name="${prefix}joint2" type="revolute">
+      <parent link="${prefix}link1"/><child link="${prefix}link2"/>
+      <origin xyz="0 0 ${waist_h}"/><axis xyz="0 1 0"/>
+      <limit lower="-${jl}" upper="${jl}" effort="30" velocity="2.0"/>
+    </joint>
+
+    <link name="${prefix}link3">
+      <visual><origin rpy="${pi2} 0 0"/>
+        <geometry><cylinder radius="0.042" length="0.095"/></geometry>
+        <material name="${color}"/></visual>
+      <visual><origin xyz="0 0 ${fore/2}"/>
+        <geometry><box size="0.045 0.045 ${fore}"/></geometry>
+        <material name="wc_link"/></visual>
+      <collision><origin xyz="0 0 ${fore/2}"/>
+        <geometry><box size="0.045 0.045 ${fore}"/></geometry></collision>
+      <xacro:ibox mass="0.6"/>
+    </link>
+    <joint name="${prefix}joint3" type="revolute">
+      <parent link="${prefix}link2"/><child link="${prefix}link3"/>
+      <origin xyz="0 0 ${upper}"/><axis xyz="0 1 0"/>
+      <limit lower="-${jl}" upper="${jl}" effort="20" velocity="2.0"/>
+    </joint>
+
+    <link name="${prefix}link4">
+      <visual><geometry><cylinder radius="0.036" length="0.07"/></geometry>
+        <material name="wc_joint"/></visual>
+      <visual><origin xyz="0 0 ${wrist/2}"/>
+        <geometry><box size="0.04 0.04 ${wrist}"/></geometry>
+        <material name="wc_link"/></visual>
+      <collision><origin xyz="0 0 ${wrist/2}"/>
+        <geometry><box size="0.04 0.04 ${wrist}"/></geometry></collision>
+      <xacro:ibox mass="0.3"/>
+    </link>
+    <joint name="${prefix}joint4" type="revolute">
+      <parent link="${prefix}link3"/><child link="${prefix}link4"/>
+      <origin xyz="0 0 ${fore}"/><axis xyz="0 0 1"/>
+      <limit lower="-${jl}" upper="${jl}" effort="10" velocity="2.5"/>
+    </joint>
+
+    <link name="${prefix}link5">
+      <visual><origin rpy="${pi2} 0 0"/>
+        <geometry><cylinder radius="0.034" length="0.07"/></geometry>
+        <material name="${color}"/></visual>
+      <xacro:ibox mass="0.2"/>
+    </link>
+    <joint name="${prefix}joint5" type="revolute">
+      <parent link="${prefix}link4"/><child link="${prefix}link5"/>
+      <origin xyz="0 0 ${wrist}"/><axis xyz="0 1 0"/>
+      <limit lower="-${jl}" upper="${jl}" effort="10" velocity="2.5"/>
+    </joint>
+
+    <!-- tool0 flange + a welding torch (neck + copper nozzle) -->
+    <link name="${prefix}tool0">
+      <visual><geometry><cylinder radius="0.03" length="0.03"/></geometry>
+        <material name="wc_joint"/></visual>
+      <visual><origin xyz="0 0 0.06"/>
+        <geometry><cylinder radius="0.014" length="0.10"/></geometry>
+        <material name="wc_torch"/></visual>
+      <visual><origin xyz="0 0 0.13"/>
+        <geometry><cylinder radius="0.022" length="0.04"/></geometry>
+        <material name="wc_copper"/></visual>
+      <collision><origin xyz="0 0 0.07"/>
+        <geometry><cylinder radius="0.03" length="0.16"/></geometry></collision>
+      <xacro:ibox mass="0.2"/>
+    </link>
+    <joint name="${prefix}joint6" type="revolute">
+      <parent link="${prefix}link5"/><child link="${prefix}tool0"/>
+      <origin xyz="0 0 0.05"/><axis xyz="0 0 1"/>
+      <limit lower="-${jl}" upper="${jl}" effort="10" velocity="2.5"/>
+    </joint>
+
+    <!-- ros2_control system for this arm (mock hardware) -->
+    <ros2_control name="${prefix}hw" type="system">
+      <hardware><plugin>mock_components/GenericSystem</plugin></hardware>
+      <xacro:macro name="ji" params="jn">
+        <joint name="${jn}">
+          <command_interface name="position"/>
+          <state_interface name="position"/>
+          <state_interface name="velocity"/>
+        </joint>
+      </xacro:macro>
+      <xacro:ji jn="${prefix}joint1"/><xacro:ji jn="${prefix}joint2"/>
+      <xacro:ji jn="${prefix}joint3"/><xacro:ji jn="${prefix}joint4"/>
+      <xacro:ji jn="${prefix}joint5"/><xacro:ji jn="${prefix}joint6"/>
+    </ros2_control>
+  </xacro:macro>
+</robot>
