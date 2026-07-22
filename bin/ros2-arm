@@ -5,6 +5,10 @@
 #   ros2-arm demo        launch the MoveIt2 demo (Panda arm in RViz — drag
 #                        the interactive marker, hit Plan & Execute)
 # GUI (RViz/MoveIt) works via X passthrough + hardware GL; ~/ros2_ws mounts.
+if [ "$1" = stop ]; then
+    docker rm -f armloop armmoveit armdemo armview 2>/dev/null
+    echo "stopped all arm containers"; exit 0
+fi
 WS="$HOME/ros2_ws"
 mkdir -p "$WS/src"
 command -v xhost >/dev/null && xhost +local:root >/dev/null 2>&1
@@ -17,6 +21,8 @@ fi
 
 CMD="$@"
 [ "$1" = demo ] && CMD="ros2 launch moveit_resources_panda_moveit_config demo.launch.py"
+[ "$1" = arm ]  && CMD="ros2 launch robot_arm_moveit_config demo.launch.py"
+[ "$1" = loop ] && CMD="ros2 launch robot_arm_moveit_config loop.launch.py"
 
 exec docker run -it --rm \
     --net=host --ipc=host --pid=host \
