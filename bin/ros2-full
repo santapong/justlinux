@@ -1,0 +1,23 @@
+#!/bin/sh
+# ros2-full — the COMPLETE welding-cell ROS2 system in one command:
+# 3 robots + controllers + move_group (collision matrix) + coordinator +
+# effects + RViz. Then watch the data with:
+#   ros2-full graph   -> render the live node/topic data-flow to a PNG
+#   ros2-full plot    -> record + plot joint positions moving (one cycle)
+#   ros2-full stop
+D=48
+command -v xhost >/dev/null && xhost +local:root >/dev/null 2>&1
+case "${1:-run}" in
+stop) docker rm -f fullsys 2>/dev/null; echo stopped;;
+graph) docker exec -e ROS_DOMAIN_ID=$D fullsys bash -lc 'source install/setup.bash 2>/dev/null; python3 /ros2_ws/tools/gen_rosgraph.py'; echo "-> ~/ros2_ws/rosgraph.png";;
+plot) docker exec -e ROS_DOMAIN_ID=$D fullsys bash -lc 'source install/setup.bash 2>/dev/null; python3 /ros2_ws/tools/record_joints.py && python3 /ros2_ws/tools/plot_joints.py'; echo "-> ~/ros2_ws/joints_plot.png";;
+run)
+  docker rm -f fullsys 2>/dev/null >/dev/null
+  docker run -d --name fullsys --net=host --ipc=host \
+    -e DISPLAY="${DISPLAY:-:1}" -e RMW_IMPLEMENTATION=rmw_fastrtps_cpp \
+    -e QT_X11_NO_MITSHM=1 -e ROS_DOMAIN_ID=$D --device /dev/dri --group-add video \
+    -v /tmp/.X11-unix:/tmp/.X11-unix:rw -v "$HOME/ros2_ws:/ros2_ws" -w /ros2_ws \
+    ros2-cell-full:jazzy bash -c 'source /opt/ros/jazzy/setup.bash; source install/setup.bash
+export ROS_DOMAIN_ID='$D'; ros2 launch weld_cell full_system.launch.py >/ros2_ws/full.log 2>&1; sleep 100000' >/dev/null 2>&1
+  echo "full system starting in RViz (~45s). Then: ros2-full graph | plot";;
+esac
