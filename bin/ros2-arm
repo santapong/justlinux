@@ -1,0 +1,39 @@
+#!/bin/sh
+# ros2-arm — ROS2 Jazzy + MoveIt2 container for robot-arm work.
+#   ros2-arm             interactive shell (MoveIt2 + ros2_control ready)
+#   ros2-arm <cmd...>    run a command in the arm container
+#   ros2-arm demo        launch the MoveIt2 demo (Panda arm in RViz — drag
+#                        the interactive marker, hit Plan & Execute)
+# GUI (RViz/MoveIt) works via X passthrough + hardware GL; ~/ros2_ws mounts.
+WS="$HOME/ros2_ws"
+mkdir -p "$WS/src"
+command -v xhost >/dev/null && xhost +local:root >/dev/null 2>&1
+
+if ! docker image inspect ros2-arm:jazzy >/dev/null 2>&1; then
+    echo "ros2-arm:jazzy isn't built yet. Build it with:"
+    echo "  docker build -t ros2-arm:jazzy ~/ros2_ws/.docker-arm/"
+    exit 1
+fi
+
+CMD="$@"
+[ "$1" = demo ] && CMD="ros2 launch moveit2_tutorials demo.launch.py"
+
+exec docker run -it --rm \
+    --net=host --ipc=host --pid=host \
+    -e DISPLAY="${DISPLAY:-:1}" \
+    -e QT_X11_NO_MITSHM=1 \
+    -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}" \
+    -e RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}" \
+    -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
+    -v "$WS:/ros2_ws" \
+    -v /dev:/dev \
+    --device /dev/dri \
+    --device-cgroup-rule='c 166:* rmw' \
+    --device-cgroup-rule='c 188:* rmw' \
+    --group-add dialout \
+    --group-add video \
+    -w /ros2_ws \
+    ros2-arm:jazzy \
+    bash -c 'source /opt/ros/jazzy/setup.bash 2>/dev/null;
+             [ -f install/setup.bash ] && source install/setup.bash;
+             exec "${@:-bash}"' -- $CMD
