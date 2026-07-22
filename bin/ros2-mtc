@@ -1,0 +1,35 @@
+#!/bin/sh
+# ros2-mtc — MoveIt Task Constructor welding demo: plan the weld as a
+# multi-stage task (current -> ready -> approach -> weld -> retract -> home)
+# where MTC plans each stage and stitches the best collision-free solution.
+#   ros2-mtc        run move_group + rviz + the MTC task
+#   ros2-mtc stop
+D=49
+command -v xhost >/dev/null && xhost +local:root >/dev/null 2>&1
+[ "$1" = stop ] && { docker rm -f mtcdemo 2>/dev/null; echo stopped; exit 0; }
+docker rm -f mtcdemo 2>/dev/null >/dev/null
+docker run -d --name mtcdemo --net=host --ipc=host \
+  -e DISPLAY="${DISPLAY:-:1}" -e RMW_IMPLEMENTATION=rmw_fastrtps_cpp \
+  -e QT_X11_NO_MITSHM=1 -e ROS_DOMAIN_ID=$D -e PYTHONUNBUFFERED=1 \
+  --device /dev/dri --group-add video \
+  -v /tmp/.X11-unix:/tmp/.X11-unix:rw -v "$HOME/ros2_ws:/ros2_ws" -w /ros2_ws \
+  ros2-mtc:jazzy bash -c '
+source /opt/ros/jazzy/setup.bash; source /mtc_ws/install/setup.bash; source install/setup.bash
+export ROS_DOMAIN_ID='$D'
+ros2 launch robot_arm_moveit_config demo.launch.py >/ros2_ws/mtc-mg.log 2>&1 &
+sleep 22; pkill -f rviz2; sleep 2
+rviz2 -d /ros2_ws/src/robot_arm_moveit_config/rviz/mtc.rviz >/ros2_ws/mtc-rviz.log 2>&1 &
+sleep 6
+PKG=$(ros2 pkg prefix robot_arm_moveit_config)/share/robot_arm_moveit_config
+python3 - <<PY
+import subprocess, yaml
+u=subprocess.run(["xacro",f"{"'$PKG'"}/config/robot_arm.urdf.xacro"],capture_output=True,text=True).stdout
+p={"mtc_welding":{"ros__parameters":{"robot_description":u,
+ "robot_description_semantic":open(f"{"'$PKG'"}/config/robot_arm.srdf").read(),
+ "robot_description_kinematics":yaml.safe_load(open(f"{"'$PKG'"}/config/kinematics.yaml")),
+ "robot_description_planning":yaml.safe_load(open(f"{"'$PKG'"}/config/joint_limits.yaml"))}}}
+yaml.safe_dump(p,open("/ros2_ws/mtc_params.yaml","w"))
+PY
+python3 /ros2_ws/src/robot_arm_moveit_config/scripts/welding_mtc.py --ros-args --params-file /ros2_ws/mtc_params.yaml >/ros2_ws/mtc-task.log 2>&1 &
+sleep 100000' >/dev/null 2>&1
+echo "MTC welding demo starting (~50s). Result in the terminal + rviz."
