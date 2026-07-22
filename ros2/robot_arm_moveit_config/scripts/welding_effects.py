@@ -33,8 +33,10 @@ class Welder(Node):
         super().__init__("welding_effects")
         self.declare_parameter("torch_frame", "tool0")
         self.declare_parameter("base_frame", "base_link")
+        self.declare_parameter("torch_len", 0.14)   # flange → torch tip
         self.torch = self.get_parameter("torch_frame").value
         self.base = self.get_parameter("base_frame").value
+        self.torch_len = self.get_parameter("torch_len").value
         self.pub = self.create_publisher(MarkerArray, "/welding_markers", 10)
         self.create_subscription(Bool, "/welding_active", self.on_active, 10)
         self.tf_buf = tf2_ros.Buffer()
@@ -45,17 +47,20 @@ class Welder(Node):
         self.rng = Rng()
         self.mid = 0
         self.create_timer(0.05, self.tick)
+        self.create_timer(0.1, self.publish_torch)
         self.create_timer(1.0, self.publish_workpiece)
 
     def on_active(self, msg):
         self.active = msg.data
 
     def torch_pos(self):
+        """World position of the TORCH TIP (flange pos, minus torch length
+        straight down — the torch always points down while welding)."""
         try:
             t = self.tf_buf.lookup_transform(
                 self.base, self.torch, rclpy.time.Time())
             return (t.transform.translation.x, t.transform.translation.y,
-                    t.transform.translation.z)
+                    t.transform.translation.z - self.torch_len)
         except Exception:
             return None
 
@@ -94,12 +99,48 @@ class Welder(Node):
         arr.markers.append(bead)
         self.pub.publish(arr)
 
+    def publish_torch(self):
+        """The welding gun mounted on the flange — drawn in the tool0 frame
+        so it rides with the arm. Torch points along local +Z (down while
+        welding); tip glows when the arc is on."""
+        arr = MarkerArray()
+        L = self.torch_len
+
+        def cyl(mid, zc, length, dia, rgb, a=1.0):
+            m = Marker()
+            m.header.frame_id = self.torch
+            m.ns = "torch"; m.id = mid
+            m.type = Marker.CYLINDER; m.action = Marker.ADD
+            m.pose.position.z = zc; m.pose.orientation.w = 1.0
+            m.scale.x = m.scale.y = dia; m.scale.z = length
+            m.color.r, m.color.g, m.color.b = rgb; m.color.a = a
+            return m
+
+        arr.markers.append(cyl(0, L * 0.35, L * 0.7, 0.028,
+                               (0.12, 0.12, 0.14)))     # dark neck
+        arr.markers.append(cyl(1, L * 0.82, L * 0.30, 0.05,
+                               (0.72, 0.45, 0.20)))      # copper gas nozzle
+        # glowing arc tip
+        tip = Marker()
+        tip.header.frame_id = self.torch
+        tip.ns = "torch"; tip.id = 2
+        tip.type = Marker.SPHERE; tip.action = Marker.ADD
+        tip.pose.position.z = L; tip.pose.orientation.w = 1.0
+        s = 0.03 if self.active else 0.014
+        tip.scale.x = tip.scale.y = tip.scale.z = s
+        tip.color.r = 1.0
+        tip.color.g = 0.9 if self.active else 0.5
+        tip.color.b = 0.7 if self.active else 0.15
+        tip.color.a = 1.0
+        arr.markers.append(tip)
+        self.pub.publish(arr)
+
     def publish_workpiece(self):
         """Two steel plates meeting at the weld seam (an L / fillet joint)."""
         arr = MarkerArray()
         for i, (px, py, pz, sx, sy, sz) in enumerate([
-            (1.0, 0.0, 0.585, 0.34, 0.42, 0.02),     # base plate under the seam
-            (1.0, 0.17, 0.66, 0.34, 0.02, 0.16),     # upright plate (fillet joint)
+            (1.0, 0.0, 0.59, 0.34, 0.42, 0.02),      # base plate under the seam
+            (1.0, 0.17, 0.67, 0.34, 0.02, 0.16),     # upright plate (fillet joint)
         ]):
             m = Marker()
             m.header.frame_id = self.base

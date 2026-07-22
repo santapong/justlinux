@@ -18,8 +18,9 @@ from builtin_interfaces.msg import Duration
 JOINTS = [f"joint_{i}" for i in range(1, 7)]
 DOWN = (1.0, 0.0, 0.0, 0.0)     # torch points -Z (down at the workpiece)
 X = 1.0                          # seam plane (reachable, IK-verified)
-Z_WELD = 0.60                    # torch height at the seam
-Z_UP = 0.72                      # approach/retract height
+# tool0 (flange) sits a torch-length ABOVE the seam so the torch reaches down
+Z_WELD = 0.74                    # flange height while welding
+Z_UP = 0.88                      # approach/retract height
 Y0, Y1 = -0.15, 0.15             # seam runs 30 cm along Y
 
 
