@@ -18,3 +18,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Fast DDS — CycloneDDS discovery breaks on this multi-NIC host
 ENV RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 RUN echo 'source /opt/ros/jazzy/setup.bash' >> /root/.bashrc
+
+# MediaPipe hand tracking, isolated in a venv (system numpy/cv2 stay untouched;
+# PEP-668 blocks pip on the system python otherwise). --system-site-packages
+# lets rclpy / trajectory_msgs still import from inside the venv.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3-pip \
+    python3-venv \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3 -m venv --system-site-packages /opt/mpvenv \
+    && /opt/mpvenv/bin/pip install --no-cache-dir --ignore-installed mediapipe==0.10.35
+
+# Bake the hand landmarker model at build time so runtime needs no network.
+RUN mkdir -p /opt/models \
+    && curl -fL -o /opt/models/hand_landmarker.task \
+       https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task \
+    && sha256sum /opt/models/hand_landmarker.task > /opt/models/hand_landmarker.task.sha256 \
+    && cat /opt/models/hand_landmarker.task.sha256
