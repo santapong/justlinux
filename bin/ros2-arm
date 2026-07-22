@@ -4,12 +4,6 @@
 #   ros2-arm <cmd...>    run a command in the arm container
 #   ros2-arm demo        launch the MoveIt2 demo (Panda arm in RViz — drag
 #                        the interactive marker, hit Plan & Execute)
-#   ros2-arm arm         launch the 6-joint weld_arm MoveIt demo
-#   ros2-arm loop        arm demo + a repeating pick-and-place cycle
-#   ros2-arm handfollow            arm demo + webcam hand-following (camera)
-#   ros2-arm handfollow synthetic  arm demo + sine-sweep test target (no cam)
-#   ros2-arm handfollow [synthetic] latency_probe:=true   + per-stage timing
-#                        see ~/ros2_ws/docs/handfollow-run.md
 # GUI (RViz/MoveIt) works via X passthrough + hardware GL; ~/ros2_ws mounts.
 if [ "$1" = stop ]; then
     docker rm -f armloop armmoveit armdemo armview 2>/dev/null
@@ -29,20 +23,6 @@ CMD="$@"
 [ "$1" = demo ] && CMD="ros2 launch moveit_resources_panda_moveit_config demo.launch.py"
 [ "$1" = arm ]  && CMD="ros2 launch robot_arm_moveit_config demo.launch.py"
 [ "$1" = loop ] && CMD="ros2 launch robot_arm_moveit_config loop.launch.py"
-if [ "$1" = handfollow ]; then
-    shift
-    if [ "$1" = synthetic ]; then
-        shift
-        CMD="ros2 launch /ros2_ws/src/robot_arm_moveit_config/launch/handfollow.launch.py synthetic:=true $*"
-    else
-        CMD="ros2 launch /ros2_ws/src/robot_arm_moveit_config/launch/handfollow.launch.py $*"
-    fi
-fi
-
-# USB webcam is optional: --device on a missing path aborts docker run
-# entirely, and only the handfollow camera mode actually needs it.
-CAMDEV=""
-[ -e /dev/video0 ] && CAMDEV="--device /dev/video0"
 
 exec docker run -it --rm \
     --net=host --ipc=host --pid=host \
@@ -54,7 +34,6 @@ exec docker run -it --rm \
     -v "$WS:/ros2_ws" \
     -v /dev:/dev \
     --device /dev/dri \
-    $CAMDEV \
     --device-cgroup-rule='c 166:* rmw' \
     --device-cgroup-rule='c 188:* rmw' \
     --group-add dialout \
