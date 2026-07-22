@@ -7,6 +7,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-jazzy-moveit-resources \
     ros-jazzy-moveit-setup-assistant \
     ros-jazzy-moveit-servo \
+    ros-jazzy-moveit-visual-tools \
+    ros-jazzy-joint-state-publisher-gui \
     ros-jazzy-ros2-control \
     ros-jazzy-ros2-controllers \
     ros-jazzy-controller-manager \
