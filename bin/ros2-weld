@@ -1,0 +1,35 @@
+#!/bin/sh
+# ros2-weld — welding demo: a Fanuc M-10iA (real industrial 6-DOF welding
+# robot) traces a weld seam with MoveIt IK while a glowing bead + sparks are
+# laid down. Runs on an isolated ROS domain so it can't clash with other
+# ros2 containers.
+#   ros2-weld            run the welding demo (watch it in RViz)
+#   ros2-weld stop       stop it
+WS="$HOME/ros2_ws"
+command -v xhost >/dev/null && xhost +local:root >/dev/null 2>&1
+
+if [ "$1" = stop ]; then
+    docker rm -f weldloop 2>/dev/null; echo "welding demo stopped"; exit 0
+fi
+if ! docker image inspect ros2-weld:jazzy >/dev/null 2>&1; then
+    echo "build first: docker build -t ros2-weld:jazzy ~/ros2_ws/.docker-weld/"; exit 1
+fi
+
+docker rm -f weldloop 2>/dev/null >/dev/null
+docker run -d --name weldloop --net=host --ipc=host \
+    -e DISPLAY="${DISPLAY:-:1}" -e RMW_IMPLEMENTATION=rmw_fastrtps_cpp \
+    -e QT_X11_NO_MITSHM=1 -e ROS_DOMAIN_ID=42 \
+    --device /dev/dri --group-add video \
+    -v /tmp/.X11-unix:/tmp/.X11-unix:rw -v "$WS:/ros2_ws" -w /ros2_ws \
+    ros2-weld:jazzy bash -c '
+source /opt/ros/jazzy/setup.bash; export ROS_DOMAIN_ID=42
+ros2 launch moveit_resources_fanuc_moveit_config demo.launch.py >/ros2_ws/weld-demo.log 2>&1 &
+sleep 26; pkill -f rviz2 2>/dev/null; sleep 2
+rviz2 -d /ros2_ws/src/robot_arm_moveit_config/rviz/welding.rviz >/ros2_ws/weld-rviz.log 2>&1 &
+sleep 4
+python3 /ros2_ws/src/robot_arm_moveit_config/scripts/welding_effects.py >/ros2_ws/weld-fx.log 2>&1 &
+sleep 2
+python3 /ros2_ws/src/robot_arm_moveit_config/scripts/welding_motion.py >/ros2_ws/weld-motion.log 2>&1 &
+sleep 100000' >/dev/null 2>&1
+echo "welding demo starting on RViz — give it ~40s to strike the first arc."
+echo "stop with:  ros2-weld stop"
