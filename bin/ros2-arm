@@ -16,7 +16,7 @@ if ! docker image inspect ros2-arm:jazzy >/dev/null 2>&1; then
 fi
 
 CMD="$@"
-[ "$1" = demo ] && CMD="ros2 launch moveit2_tutorials demo.launch.py"
+[ "$1" = demo ] && CMD="ros2 launch moveit_resources_panda_moveit_config demo.launch.py"
 
 exec docker run -it --rm \
     --net=host --ipc=host --pid=host \
