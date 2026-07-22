@@ -10,27 +10,29 @@
 
   <link name="world"/>
 
-  <!-- ===== the car part: an underbody floor pan on a fixture ===== -->
+  <!-- ===== the car part: an underbody floor pan on a low fixture =====
+       Seams sit at z=0.25 so the floor-mounted arms reach them torch-down.
+       Rails at y=+/-0.13, cross member at x=0.13. -->
   <link name="car_part">
-    <!-- floor pan -->
-    <visual><origin xyz="0 0 0.40"/>
-      <geometry><box size="0.55 0.40 0.02"/></geometry>
+    <!-- floor pan (top at z=0.25) -->
+    <visual><origin xyz="0 0 0.24"/>
+      <geometry><box size="0.32 0.28 0.02"/></geometry>
       <material name="car_body"/></visual>
-    <!-- left side rail (seam #1 where it meets the floor) -->
-    <visual><origin xyz="0 0.17 0.45"/>
-      <geometry><box size="0.55 0.03 0.10"/></geometry>
+    <!-- left side rail (seam #1) -->
+    <visual><origin xyz="0 0.13 0.29"/>
+      <geometry><box size="0.32 0.03 0.08"/></geometry>
       <material name="car_body"/></visual>
     <!-- right side rail (seam #2) -->
-    <visual><origin xyz="0 -0.17 0.45"/>
-      <geometry><box size="0.55 0.03 0.10"/></geometry>
+    <visual><origin xyz="0 -0.13 0.29"/>
+      <geometry><box size="0.32 0.03 0.08"/></geometry>
       <material name="car_body"/></visual>
     <!-- cross member (seam #3) -->
-    <visual><origin xyz="0.18 0 0.45"/>
-      <geometry><box size="0.03 0.40 0.10"/></geometry>
+    <visual><origin xyz="0.13 0 0.29"/>
+      <geometry><box size="0.03 0.28 0.08"/></geometry>
       <material name="car_body"/></visual>
-    <!-- fixture legs -->
-    <visual><origin xyz="0 0 0.20"/>
-      <geometry><box size="0.5 0.35 0.4"/></geometry>
+    <!-- fixture -->
+    <visual><origin xyz="0 0 0.115"/>
+      <geometry><box size="0.26 0.22 0.23"/></geometry>
       <material name="fixture"/></visual>
     <inertial><mass value="20"/>
       <inertia ixx="1" iyy="1" izz="1" ixy="0" ixz="0" iyz="0"/></inertial>
@@ -39,14 +41,14 @@
     <parent link="world"/><child link="car_part"/>
   </joint>
 
-  <!-- ===== three welding robots around the part ===== -->
-  <!-- arm1: left side, welds the left rail seam -->
+  <!-- ===== three welding robots, each 0.25 in front of its seam ===== -->
+  <!-- arm1: welds the left rail (world +y) -->
   <xacro:weld_arm prefix="arm1_" parent="world"
-                  x="0.0" y="0.62" z="0.0" yaw="-1.5708" color="wc_accent"/>
-  <!-- arm2: right side, welds the right rail seam -->
+                  x="0.0" y="0.38" z="0.0" yaw="-1.5708" color="wc_accent"/>
+  <!-- arm2: welds the right rail (world -y) -->
   <xacro:weld_arm prefix="arm2_" parent="world"
-                  x="0.0" y="-0.62" z="0.0" yaw="1.5708" color="wc_accent"/>
-  <!-- arm3: front, welds the cross member -->
+                  x="0.0" y="-0.38" z="0.0" yaw="1.5708" color="wc_accent"/>
+  <!-- arm3: welds the cross member (world +x) -->
   <xacro:weld_arm prefix="arm3_" parent="world"
-                  x="0.66" y="0.0" z="0.0" yaw="3.1416" color="wc_accent"/>
+                  x="0.38" y="0.0" z="0.0" yaw="3.1416" color="wc_accent"/>
 </robot>
