@@ -1,0 +1,137 @@
+<?xml version="1.0"?>
+<!-- Starter 6-DOF robot arm. Replace the box/cylinder <geometry> with your
+     3D-printed meshes (STL from FreeCAD) as the design firms up; tune the
+     link lengths / joint limits below. This is a working skeleton, not a
+     final design. -->
+<robot name="robot_arm" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- ============ tunable parameters ============ -->
+  <xacro:property name="base_h"   value="0.06"/>   <!-- base height -->
+  <xacro:property name="l1"       value="0.14"/>   <!-- shoulder link -->
+  <xacro:property name="l2"       value="0.16"/>   <!-- upper arm -->
+  <xacro:property name="l3"       value="0.14"/>   <!-- forearm -->
+  <xacro:property name="l4"       value="0.08"/>   <!-- wrist -->
+  <xacro:property name="r"        value="0.03"/>   <!-- link radius -->
+  <xacro:property name="jlim"     value="2.9"/>    <!-- ±rad joint limit -->
+  <xacro:property name="effort"   value="20.0"/>
+  <xacro:property name="vel"      value="2.0"/>
+
+  <material name="accent"><color rgba="0.85 0.47 0.34 1.0"/></material>
+  <material name="dark">  <color rgba="0.15 0.15 0.17 1.0"/></material>
+
+  <!-- reusable cylinder link with inertia (needed by ros2_control/gazebo) -->
+  <xacro:macro name="arm_link" params="name length material:=accent">
+    <link name="${name}">
+      <visual>
+        <origin xyz="0 0 ${length/2}" rpy="0 0 0"/>
+        <geometry><cylinder radius="${r}" length="${length}"/></geometry>
+        <material name="${material}"/>
+      </visual>
+      <collision>
+        <origin xyz="0 0 ${length/2}" rpy="0 0 0"/>
+        <geometry><cylinder radius="${r}" length="${length}"/></geometry>
+      </collision>
+      <inertial>
+        <origin xyz="0 0 ${length/2}"/>
+        <mass value="0.5"/>
+        <inertia ixx="0.001" iyy="0.001" izz="0.001" ixy="0" ixz="0" iyz="0"/>
+      </inertial>
+    </link>
+  </xacro:macro>
+
+  <!-- ============ world anchor ============ -->
+  <link name="world"/>
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 ${base_h/2}"/>
+      <geometry><cylinder radius="0.06" length="${base_h}"/></geometry>
+      <material name="dark"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 ${base_h/2}"/>
+      <geometry><cylinder radius="0.06" length="${base_h}"/></geometry>
+    </collision>
+    <inertial><mass value="1.0"/>
+      <inertia ixx="0.002" iyy="0.002" izz="0.002" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+  </link>
+  <joint name="world_to_base" type="fixed">
+    <parent link="world"/><child link="base_link"/>
+  </joint>
+
+  <!-- ============ the 6 links ============ -->
+  <xacro:arm_link name="link1" length="${l1}"/>
+  <xacro:arm_link name="link2" length="${l2}"/>
+  <xacro:arm_link name="link3" length="${l3}"/>
+  <xacro:arm_link name="link4" length="${l4}"/>
+  <xacro:arm_link name="link5" length="0.05"/>
+  <link name="tool0">   <!-- end-effector mount flange -->
+    <visual>
+      <geometry><box size="0.04 0.04 0.02"/></geometry>
+      <material name="dark"/>
+    </visual>
+    <inertial><mass value="0.1"/>
+      <inertia ixx="0.0001" iyy="0.0001" izz="0.0001" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+  </link>
+
+  <!-- ============ the 6 joints (waist,shoulder,elbow,3x wrist) ============ -->
+  <joint name="joint1" type="revolute">   <!-- waist: rotate about Z -->
+    <parent link="base_link"/><child link="link1"/>
+    <origin xyz="0 0 ${base_h}"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-${jlim}" upper="${jlim}" effort="${effort}" velocity="${vel}"/>
+  </joint>
+  <joint name="joint2" type="revolute">   <!-- shoulder: pitch about Y -->
+    <parent link="link1"/><child link="link2"/>
+    <origin xyz="0 0 ${l1}"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-${jlim}" upper="${jlim}" effort="${effort}" velocity="${vel}"/>
+  </joint>
+  <joint name="joint3" type="revolute">   <!-- elbow: pitch about Y -->
+    <parent link="link2"/><child link="link3"/>
+    <origin xyz="0 0 ${l2}"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-${jlim}" upper="${jlim}" effort="${effort}" velocity="${vel}"/>
+  </joint>
+  <joint name="joint4" type="revolute">   <!-- wrist roll: about Z -->
+    <parent link="link3"/><child link="link4"/>
+    <origin xyz="0 0 ${l3}"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-${jlim}" upper="${jlim}" effort="${effort}" velocity="${vel}"/>
+  </joint>
+  <joint name="joint5" type="revolute">   <!-- wrist pitch: about Y -->
+    <parent link="link4"/><child link="link5"/>
+    <origin xyz="0 0 ${l4}"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-${jlim}" upper="${jlim}" effort="${effort}" velocity="${vel}"/>
+  </joint>
+  <joint name="joint6" type="revolute">   <!-- wrist roll: about Z -->
+    <parent link="link5"/><child link="tool0"/>
+    <origin xyz="0 0 0.05"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-${jlim}" upper="${jlim}" effort="${effort}" velocity="${vel}"/>
+  </joint>
+
+  <!-- ============ ros2_control: mock hardware for now ============ -->
+  <!-- swap mock_components/GenericSystem for your real servo driver later -->
+  <ros2_control name="arm_hw" type="system">
+    <hardware>
+      <plugin>mock_components/GenericSystem</plugin>
+    </hardware>
+    <xacro:macro name="ji" params="name">
+      <joint name="${name}">
+        <command_interface name="position"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+      </joint>
+    </xacro:macro>
+    <xacro:ji name="joint1"/>
+    <xacro:ji name="joint2"/>
+    <xacro:ji name="joint3"/>
+    <xacro:ji name="joint4"/>
+    <xacro:ji name="joint5"/>
+    <xacro:ji name="joint6"/>
+  </ros2_control>
+
+</robot>

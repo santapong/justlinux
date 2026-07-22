@@ -1,0 +1,47 @@
+<?xml version="1.0"?>
+<!-- Semantic robot description: planning groups, named poses, collision
+     rules. This is what the MoveIt Setup Assistant would generate; written
+     by hand here because the arm's structure is known. -->
+<robot name="robot_arm">
+
+  <!-- the planning group: the whole kinematic chain the planner controls -->
+  <group name="arm">
+    <chain base_link="base_link" tip_link="tool0"/>
+  </group>
+
+  <!-- named poses you can plan TO by name -->
+  <group_state name="home" group="arm">
+    <joint name="joint1" value="0"/>
+    <joint name="joint2" value="0"/>
+    <joint name="joint3" value="0"/>
+    <joint name="joint4" value="0"/>
+    <joint name="joint5" value="0"/>
+    <joint name="joint6" value="0"/>
+  </group_state>
+  <group_state name="ready" group="arm">
+    <joint name="joint1" value="0"/>
+    <joint name="joint2" value="-0.6"/>
+    <joint name="joint3" value="1.2"/>
+    <joint name="joint4" value="0"/>
+    <joint name="joint5" value="0.9"/>
+    <joint name="joint6" value="0"/>
+  </group_state>
+
+  <!-- end-effector frame -->
+  <end_effector name="tool" parent_link="tool0" group="arm"/>
+
+  <!-- adjacent links touch by design — tell the planner not to flag those
+       as collisions (Setup Assistant computes this from geometry) -->
+  <disable_collisions link1="base_link" link2="link1" reason="Adjacent"/>
+  <disable_collisions link1="link1" link2="link2" reason="Adjacent"/>
+  <disable_collisions link1="link2" link2="link3" reason="Adjacent"/>
+  <disable_collisions link1="link3" link2="link4" reason="Adjacent"/>
+  <disable_collisions link1="link4" link2="link5" reason="Adjacent"/>
+  <disable_collisions link1="link5" link2="tool0" reason="Adjacent"/>
+  <disable_collisions link1="base_link" link2="link2" reason="Never"/>
+  <disable_collisions link1="link1" link2="link3" reason="Never"/>
+  <disable_collisions link1="link2" link2="link4" reason="Never"/>
+  <disable_collisions link1="link3" link2="link5" reason="Never"/>
+  <disable_collisions link1="link4" link2="tool0" reason="Never"/>
+
+</robot>
