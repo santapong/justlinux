@@ -10,6 +10,13 @@ window#waybar {
     background: alpha(@base, 0.85);
     color: @text;
     border-bottom: 2px solid alpha(@accent, 0.6);
+    /* smart-bar (bar_smart): fade instead of popping on reveal/hide */
+    transition: opacity 250ms ease;
+}
+/* SIGUSR1-hidden state — fully transparent; the waybar ignore_alpha
+   layerrule makes the invisible bar click-through on the bare desktop */
+window#waybar.hidden {
+    opacity: 0;
 }
 
 #workspaces button {
