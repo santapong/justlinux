@@ -63,8 +63,14 @@ class LayerWindow(Gtk.Window):
             LLS.gtk_layer_set_exclusive_zone(p, -1)
         else:
             pos = c.get(f"{name}_pos", default_pos)
-            x = int(c.get(f"{name}_x", default_x))
-            y = int(c.get(f"{name}_y", default_y))
+            try:                        # hand-edited conf must never crash
+                x = int(c.get(f"{name}_x", default_x))
+            except (TypeError, ValueError):
+                x = int(default_x)
+            try:
+                y = int(c.get(f"{name}_y", default_y))
+            except (TypeError, ValueError):
+                y = int(default_y)
             for edge in POS_ANCHORS.get(pos, ("bottom",)):
                 LLS.gtk_layer_set_anchor(p, EDGE[edge], True)
                 LLS.gtk_layer_set_margin(

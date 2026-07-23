@@ -1,0 +1,31 @@
+[template]
+name = "netgraph"
+label = "Network graph"
+icon = "󰖩"
+description = "Live down/up throughput graphs"
+default_width = 300
+default_pos = "bottom_left"
+
+[source]
+builtin = "netgraph"
+interval = 2
+
+[[rows]]
+type = "title"
+text = "󰖩  NETWORK · {iface}"
+badge = "▼ {down}"
+
+[[rows]]
+type = "graph"
+series = "down"
+height = 28
+
+[[rows]]
+type = "keyval"
+key = "▲ up"
+value = "{up}"
+
+[[rows]]
+type = "graph"
+series = "up"
+height = 18

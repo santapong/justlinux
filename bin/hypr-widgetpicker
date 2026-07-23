@@ -1,0 +1,666 @@
+#!/usr/bin/env python3
+"""hypr-widgetpicker — browse widget templates, create & manage instances.
+
+Two tabs:
+  · Add     — gallery of every template in ~/.config/hyprcard/templates/
+              (search, multi-instance + instance-count badges, broken
+              TOML shown as a red tile with its parse error), with a live
+              preview rendered by the host's OWN hyprdesk/rows.py at 0.55
+              scale — what you pick is exactly what lands on the desktop.
+              Parameter form from [params.*], monitor dropdown, and
+              [Add to desktop]: one atomic widgets.conf write, placed in
+              the first free grid cell, live via hypr-cardhost --ctl.
+  · Manage  — every instance: on/off, Configure (params), Remove.
+
+Launched from Hypr Settings → Widgets → "Add widget…", or CLI.
+Window class `hyprwidgetpick` floats via hyprland.conf windowrule.
+"""
+import os
+import shlex
+import signal
+import subprocess
+import sys
+from pathlib import Path
+
+import cairo
+import gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, Gdk, GLib
+
+sys.path.insert(0, str(Path.home() / ".local/lib"))
+from hyprdesk import conf, colors, css_rgba
+from hyprdesk import cardspec, rows, grid
+from hyprdesk.confwrite import conf_set, conf_delete
+import json
+
+# id prefixes that can never be instance ids (they'd collide with other
+# widgets.conf key families)
+RESERVED = {"apps", "pet", "dock", "dockedge", "cards", "theme", "grid",
+            "claude_pet", "inst", "arrange"}
+
+PREVIEW_SCALE = 0.55
+BUILTIN_SAMPLE = {
+    "stats": {"cpu": "37", "cputemp": "62", "mem_pct": "54",
+              "mem_used": "8.6G", "mem_max": "31.2G", "disk_pct": "61",
+              "disk_used": "283G", "disk_size": "456G", "iface": "wlan0",
+              "net_down": "1.2MiB/s", "net_up": "88KiB/s",
+              "top1_name": "chromium", "top1_cpu": "21.3",
+              "top2_name": "python3", "top2_cpu": "9.1"},
+    "netgraph": {"iface": "wlan0", "down": "1.2MiB/s", "up": "88KiB/s"},
+}
+SAMPLE_SERIES = {"down": [1, 3, 2, 5, 9, 4, 6, 12, 8, 5, 7, 10, 14, 9, 6,
+                          4, 8, 11, 7, 5, 3, 6, 9, 13],
+                 "up": [.2, .5, .3, 1, .8, .4, .6, 1.2, .9, .5, .3, .8,
+                        1.1, .6, .4, .7]}
+
+
+def hypr_json(cmd):
+    try:
+        out = subprocess.run(["hyprctl", "-j", cmd], capture_output=True,
+                             text=True, timeout=3).stdout
+        return json.loads(out)
+    except Exception:
+        return []
+
+
+def monitor_names():
+    names = [m.get("name") for m in hypr_json("monitors")
+             if isinstance(m, dict)]
+    return names or ["DP-1"]
+
+
+def cardhost_reload():
+    try:
+        subprocess.run([str(Path.home() / ".local/bin/hypr-cardhost"),
+                        "--ctl", "reload"], capture_output=True, timeout=3)
+    except Exception:
+        pass
+
+
+def notify(msg):
+    try:
+        subprocess.Popen(["notify-send", "-a", "hypr-widgetpicker",
+                          "Widgets", msg], start_new_session=True)
+    except OSError:
+        pass
+
+
+def next_instance_id(template_name, c):
+    """template name → free instance id: name, name2, name3 …"""
+    if template_name in RESERVED:
+        template_name = f"w_{template_name}"
+    n = 1
+    while True:
+        cand = template_name if n == 1 else f"{template_name}{n}"
+        if f"inst_{cand}" not in c and cand not in RESERVED:
+            return cand
+        n += 1
+
+
+def find_free_cell(mon, card_w, card_h, c):
+    """First grid cell (biased toward the template's home corner is the
+    caller's business — this scans row-major) whose span doesn't overlap
+    an existing card on `mon`. Falls back to (0, 0)."""
+    geo = next((m for m in hypr_json("monitors")
+                if isinstance(m, dict) and m.get("name") == mon), None)
+    if not geo:
+        return 0, 0
+    res = geo.get("reserved") or (0, 0, 0, 0)
+    ww = geo["width"] - res[0] - res[2]
+    wh = geo["height"] - res[1] - res[3]
+    cols, rows_n, _, _ = grid.geometry(ww, wh, c)
+    span_c, span_r = grid.span(ww, wh, card_w, card_h, c)
+    # occupied cells: live card surfaces UNION conf-declared cells —
+    # a just-added card isn't mapped yet (500ms respawn debounce), and a
+    # hyprctl hiccup must degrade to conf-derived placement, not none
+    taken = set()
+    layers = hypr_json("layers")
+    if isinstance(layers, dict):
+        m = layers.get(mon, {})
+        for lvl in (m.get("levels") or {}).values():
+            for layer in lvl:
+                if not layer.get("namespace", "").startswith("hypr-card-"):
+                    continue
+                lx = layer["x"] - geo["x"] - res[0]
+                ly = layer["y"] - geo["y"] - res[1]
+                col, row = grid.cell_at(ww, wh, lx, ly, c)
+                cs, rs = grid.span(ww, wh, layer["w"], layer["h"], c)
+                taken |= grid.cells_of(col, row, cs, rs)
+    for inst_id, _tname in cardspec.instances(c):
+        if c.get(inst_id, "on") == "off" or c.get(f"{inst_id}_mon") != mon:
+            continue
+        icol, irow = c.get(f"{inst_id}_col"), c.get(f"{inst_id}_row")
+        if icol is None or irow is None:
+            continue
+        try:
+            # conservative span estimate: 3×2 cells unless we can do better
+            taken |= grid.cells_of(int(icol), int(irow), 3, 2)
+        except (TypeError, ValueError):
+            continue
+    for row in range(max(1, rows_n - span_r + 1)):
+        for col in range(max(1, cols - span_c + 1)):
+            if not (grid.cells_of(col, row, span_c, span_r) & taken):
+                return col, row
+    return 0, 0
+
+
+class AsyncCmd:
+    """Tiny non-blocking runner for one preview fetch (10s timeout)."""
+
+    def __init__(self, argv, cb):
+        self.cb, self.buf = cb, b""
+        try:
+            self.proc = subprocess.Popen(argv, stdout=subprocess.PIPE,
+                                         stderr=subprocess.DEVNULL,
+                                         start_new_session=True)
+        except OSError:
+            GLib.idle_add(cb, None)
+            return
+        os.set_blocking(self.proc.stdout.fileno(), False)
+        self.watch = GLib.io_add_watch(self.proc.stdout.fileno(),
+                                       GLib.IO_IN | GLib.IO_HUP, self.on_io)
+        self.killer = GLib.timeout_add_seconds(10, self.on_timeout)
+
+    def on_io(self, fd, cond):
+        try:
+            chunk = self.proc.stdout.read()
+        except (OSError, ValueError):
+            chunk = None
+        if chunk:
+            self.buf += chunk
+            return True
+        self.watch = None
+        self.done(self.buf.decode(errors="replace"))
+        return False
+
+    def on_timeout(self):
+        self.killer = None
+        try:
+            os.killpg(self.proc.pid, signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            pass
+        self.done(None)
+        return False
+
+    def done(self, text):
+        if getattr(self, "watch", None) is not None:
+            GLib.source_remove(self.watch)
+            self.watch = None
+        if getattr(self, "killer", None) is not None:
+            GLib.source_remove(self.killer)
+            self.killer = None
+        if self.cb:
+            cb, self.cb = self.cb, None
+            GLib.child_watch_add(self.proc.pid,
+                                 lambda *a: self.proc.poll())
+            cb(text)
+
+
+class Preview(Gtk.DrawingArea):
+    """The template rendered by the real card renderers, scaled down."""
+
+    def __init__(self):
+        super().__init__()
+        self.template = None
+        self.fields = {}
+        self.params = {}
+        self.pal = colors()
+        self.gen = 0            # staleness token for async fetches
+        self._debounce = None
+        self.connect("draw", self.on_draw)
+
+    def show_template(self, t, params):
+        self.template, self.params = t, dict(params)
+        self.gen += 1           # anything in flight is now stale
+        self.fields = dict(t.preview_fields) or \
+            dict(BUILTIN_SAMPLE.get(t.name, {}))
+        self.resize()
+        if t.source_cmd:
+            # debounce: params arrive per keystroke — refetching each one
+            # hammers real APIs and lets out-of-order results win
+            if self._debounce is not None:
+                GLib.source_remove(self._debounce)
+            self._debounce = GLib.timeout_add(400, self._fetch, self.gen)
+        self.queue_draw()
+
+    def _fetch(self, gen):
+        self._debounce = None
+        if gen != self.gen or not self.template:
+            return False        # a newer selection/param superseded us
+        cmd = cardspec.subst(self.template.source_cmd, self.params)
+        try:
+            argv = shlex.split(os.path.expanduser(cmd))
+            AsyncCmd(argv, lambda text, g=gen: self.on_fetch(g, text))
+        except ValueError:
+            pass
+        return False
+
+    def on_fetch(self, gen, text):
+        if gen != self.gen:
+            return              # stale result must never overwrite newer
+        if text:
+            self.fields = cardspec.parse_fields(text)
+            self.resize()
+            self.queue_draw()
+
+    def ctx(self):
+        return {"pal": self.pal, "params": self.params,
+                "fields": self.fields, "series": SAMPLE_SERIES,
+                "width": self.template.width, "scale": 1.0}
+
+    def resize(self):
+        if not self.template:
+            return
+        try:
+            h = rows.measure(self.template.rows, self.ctx())
+        except Exception:
+            h = 60
+        self.set_size_request(
+            int((self.template.width + 2 * rows.PAD) * PREVIEW_SCALE),
+            int((h + 2 * rows.PAD) * PREVIEW_SCALE))
+
+    def on_draw(self, _w, cr):
+        if not self.template:
+            return True
+        cr.scale(PREVIEW_SCALE, PREVIEW_SCALE)
+        try:
+            rows.render_card(cr, self.template.rows, self.ctx())
+        except Exception as e:
+            cr.identity_matrix()
+            cr.set_source_rgba(1, .4, .4, .9)
+            cr.select_font_face(rows.FONT)
+            cr.set_font_size(11)
+            cr.move_to(8, 24)
+            cr.show_text(f"preview error: {str(e)[:50]}")
+        return True
+
+
+class Picker(Gtk.Window):
+    def __init__(self):
+        super().__init__(title="Hypr Widgets")
+        self.set_default_size(760, 560)
+        self.pal = colors()
+        self.templates = cardspec.load_templates()
+        self.selected = None
+        self.param_widgets = {}
+
+        css = Gtk.CssProvider()
+        css.load_from_data(f"""
+            window {{ background-color: {css_rgba(self.pal['bg'], 0.97)}; }}
+            label {{ color: {self.pal['fg']}; }}
+            .tile {{ background: {css_rgba(self.pal['fg'], 0.06)};
+                     border-radius: 10px; padding: 8px;
+                     border: 1px solid {css_rgba(self.pal['accent2'], 0.15)}; }}
+            .tile:hover {{ background: {css_rgba(self.pal['accent'], 0.15)}; }}
+            .tile-broken {{ border: 1px solid {css_rgba(self.pal['bad'], 0.7)}; }}
+            .tile-title {{ color: {self.pal['accent2']}; font-weight: bold; }}
+            .dim {{ color: {self.pal['sub']}; font-size: 90%; }}
+            .hint {{ color: {self.pal['sub']}; }}
+            button {{ background: {css_rgba(self.pal['fg'], 0.08)};
+                      color: {self.pal['fg']}; border: none;
+                      border-radius: 8px; padding: 6px 14px; }}
+            button:hover {{ background: {css_rgba(self.pal['accent'], 0.25)}; }}
+            entry {{ background: {css_rgba(self.pal['fg'], 0.08)};
+                     color: {self.pal['fg']}; border: none;
+                     border-radius: 6px; padding: 4px 8px; }}
+        """.encode())
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(), css,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+        stack = Gtk.Stack()
+        switcher = Gtk.StackSwitcher(stack=stack, halign=Gtk.Align.CENTER)
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6,
+                       margin=10)
+        root.pack_start(switcher, False, False, 0)
+        root.pack_start(stack, True, True, 0)
+        self.add(root)
+
+        stack.add_titled(self.build_add_page(), "add", "Add")
+        stack.add_titled(self.build_manage_page(), "manage", "Manage")
+        self.connect("key-press-event", self.on_key)
+        self.show_all()
+
+    # ---------------- Add tab ----------------
+    def build_add_page(self):
+        pane = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.search = Gtk.SearchEntry(placeholder_text="filter templates…")
+        self.search.connect("search-changed",
+                            lambda *_: self.flow.invalidate_filter())
+        left.pack_start(self.search, False, False, 0)
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self.flow = Gtk.FlowBox(valign=Gtk.Align.START, max_children_per_line=2,
+                                selection_mode=Gtk.SelectionMode.SINGLE,
+                                homogeneous=True)
+        self.flow.set_filter_func(self.filter_tile)
+        self.flow.connect("child-activated", self.on_tile)
+        scroll.add(self.flow)
+        left.pack_start(scroll, True, True, 0)
+        pane.pack_start(left, True, True, 0)
+
+        self.detail = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.detail.set_size_request(300, -1)
+        detail_scroll = Gtk.ScrolledWindow()
+        detail_scroll.set_policy(Gtk.PolicyType.NEVER,
+                                 Gtk.PolicyType.AUTOMATIC)
+        detail_scroll.add(self.detail)
+        pane.pack_start(detail_scroll, False, False, 0)
+
+        self.populate_gallery()
+        return pane
+
+    def instance_count(self, tname, c=None):
+        c = conf() if c is None else c
+        return sum(1 for _id, t in cardspec.instances(c) if t == tname)
+
+    def populate_gallery(self):
+        for child in self.flow.get_children():
+            self.flow.remove(child)
+        c = conf()
+        for name in sorted(self.templates):
+            t = self.templates[name]
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            box.get_style_context().add_class("tile")
+            if isinstance(t, Exception):
+                box.get_style_context().add_class("tile-broken")
+                title = Gtk.Label(label=f"⚠ {name}", xalign=0)
+                title.get_style_context().add_class("tile-title")
+                err = Gtk.Label(label=str(t)[:60], xalign=0, wrap=True)
+                err.get_style_context().add_class("dim")
+                box.pack_start(title, False, False, 0)
+                box.pack_start(err, False, False, 0)
+                box.tname, box.searchable = name, name
+            else:
+                n = self.instance_count(name, c)
+                badges = []
+                if t.multi:
+                    badges.append("multi")
+                if n:
+                    badges.append(f"{n} on desktop")
+                title = Gtk.Label(label=f"{t.icon}  {t.label}", xalign=0)
+                title.get_style_context().add_class("tile-title")
+                desc = Gtk.Label(label=t.description, xalign=0, wrap=True)
+                desc.get_style_context().add_class("dim")
+                box.pack_start(title, False, False, 0)
+                box.pack_start(desc, False, False, 0)
+                if badges:
+                    b = Gtk.Label(label=" · ".join(badges), xalign=0)
+                    b.get_style_context().add_class("dim")
+                    box.pack_start(b, False, False, 0)
+                box.tname = name
+                box.searchable = f"{name} {t.label} {t.description}".lower()
+            self.flow.add(box)
+        self.flow.show_all()
+
+    def filter_tile(self, child):
+        q = self.search.get_text().lower().strip()
+        return not q or q in child.get_child().searchable
+
+    def on_tile(self, _flow, child):
+        name = child.get_child().tname
+        t = self.templates.get(name)
+        if isinstance(t, Exception):
+            return
+        self.selected = t
+        self.build_detail(t)
+
+    def build_detail(self, t):
+        for child in self.detail.get_children():
+            self.detail.remove(child)
+        title = Gtk.Label(label=f"{t.icon}  {t.label}", xalign=0)
+        title.get_style_context().add_class("tile-title")
+        self.detail.pack_start(title, False, False, 0)
+
+        self.preview = Preview()
+        frame = Gtk.Box(halign=Gtk.Align.START)
+        frame.add(self.preview)
+        self.detail.pack_start(frame, False, False, 0)
+
+        self.param_widgets = {}
+        for pname, p in t.params.items():
+            self.detail.pack_start(
+                Gtk.Label(label=p["label"], xalign=0), False, False, 0)
+            if p["type"] == "choice" and p["choices"]:
+                w = Gtk.ComboBoxText()
+                for ch in p["choices"]:
+                    w.append_text(ch)
+                w.set_active(p["choices"].index(p["default"])
+                             if p["default"] in p["choices"] else 0)
+            elif p["type"] == "int":
+                w = Gtk.SpinButton.new_with_range(0, 10 ** 6, 1)
+                try:
+                    w.set_value(int(p["default"] or 0))
+                except ValueError:
+                    pass
+            else:
+                w = Gtk.Entry(text=p["default"])
+                w.connect("changed", lambda *_: self.refresh_preview())
+            self.param_widgets[pname] = w
+            self.detail.pack_start(w, False, False, 0)
+
+        self.detail.pack_start(Gtk.Label(label="Monitor", xalign=0),
+                               False, False, 0)
+        self.mon_combo = Gtk.ComboBoxText()
+        for m in monitor_names():
+            self.mon_combo.append_text(m)
+        self.mon_combo.set_active(0)
+        self.detail.pack_start(self.mon_combo, False, False, 0)
+
+        n = self.instance_count(t.name)
+        if n and not t.multi:
+            note = Gtk.Label(label="already on the desktop "
+                             "(single-instance template)", xalign=0)
+            note.get_style_context().add_class("hint")
+            self.detail.pack_start(note, False, False, 0)
+        else:
+            add = Gtk.Button(label="＋ Add to desktop")
+            add.connect("clicked", self.on_add)
+            self.detail.pack_start(add, False, False, 6)
+
+        self.status = Gtk.Label(label="", xalign=0)
+        self.status.get_style_context().add_class("hint")
+        self.detail.pack_start(self.status, False, False, 0)
+        self.detail.show_all()
+        self.refresh_preview()
+
+    def form_params(self):
+        out = {}
+        for pname, w in self.param_widgets.items():
+            if isinstance(w, Gtk.ComboBoxText):
+                out[pname] = w.get_active_text() or ""
+            elif isinstance(w, Gtk.SpinButton):
+                out[pname] = str(int(w.get_value()))
+            else:
+                out[pname] = w.get_text()
+        return out
+
+    def refresh_preview(self):
+        if self.selected and getattr(self, "preview", None):
+            self.preview.show_template(self.selected, self.form_params())
+
+    # ----- the add flow -----
+    def on_add(self, *_):
+        t = self.selected
+        c = conf()
+        # re-check the single-instance guard HERE: the button built before
+        # the last add is still clickable (double-click, stale detail pane)
+        if not t.multi and self.instance_count(t.name, c):
+            self.status.set_label("already on the desktop "
+                                  "(single-instance template)")
+            return
+        inst_id = next_instance_id(t.name, c)
+        params = self.form_params()
+        mon = self.mon_combo.get_active_text() or monitor_names()[0]
+        # values must be \S+ — reject spaces here with feedback, not deep
+        # in confwrite with a traceback
+        for pname, val in params.items():
+            if val and any(ch.isspace() for ch in val):
+                self.status.set_label(
+                    f"{pname}: no spaces allowed (key=value grammar)")
+                return
+        ctx = {"pal": self.pal, "params": params,
+               "fields": dict(t.preview_fields)
+               or dict(BUILTIN_SAMPLE.get(t.name, {})),
+               "series": SAMPLE_SERIES, "width": t.width, "scale": 1.0}
+        try:
+            est_h = rows.measure(t.rows, ctx) + 2 * rows.PAD
+        except Exception:
+            est_h = 120
+        col, row = find_free_cell(mon, t.width + 2 * rows.PAD, est_h, c)
+        changes = {f"inst_{inst_id}": t.name, inst_id: "on",
+                   f"{inst_id}_mon": mon, f"{inst_id}_col": col,
+                   f"{inst_id}_row": row}
+        for pname, val in params.items():
+            if val:
+                changes[f"{inst_id}_p_{pname}"] = val
+        conf_set(changes)
+        cardhost_reload()
+        notify(f"{t.label} added on {mon} — ALT+SHIFT+E to arrange")
+        self.populate_gallery()
+        self.refresh_manage()
+        # rebuild the detail pane so a single-instance template's Add
+        # button disappears immediately
+        self.build_detail(t)
+        self.status.set_label(f"added {inst_id} on {mon} · "
+                              "ALT+SHIFT+E to arrange")
+
+    # ---------------- Manage tab ----------------
+    def build_manage_page(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self.manage_list = Gtk.ListBox()
+        self.manage_list.set_selection_mode(Gtk.SelectionMode.NONE)
+        scroll.add(self.manage_list)
+        box.pack_start(scroll, True, True, 0)
+        hint = Gtk.Label(label="toggle = hide/show · Remove deletes the "
+                         "instance ('hypr-arrange --undo' reverts)",
+                         xalign=0)
+        hint.get_style_context().add_class("hint")
+        box.pack_start(hint, False, False, 0)
+        self.refresh_manage()
+        return box
+
+    def refresh_manage(self):
+        for child in self.manage_list.get_children():
+            self.manage_list.remove(child)
+        c = conf()
+        for inst_id, tname in cardspec.instances(c):
+            t = self.templates.get(tname)
+            label = t.label if isinstance(t, cardspec.Template) else tname
+            row = Gtk.ListBoxRow()
+            h = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
+                        margin=6)
+            name = Gtk.Label(label=f"{label}  ·  {inst_id}", xalign=0)
+            mon = Gtk.Label(label=c.get(f"{inst_id}_mon", "auto"))
+            mon.get_style_context().add_class("dim")
+            sw = Gtk.Switch(active=c.get(inst_id, "on") != "off")
+            sw.connect("notify::active", self.on_toggle, inst_id)
+            h.pack_start(name, True, True, 0)
+            h.pack_start(mon, False, False, 0)
+            if isinstance(t, cardspec.Template) and t.params:
+                cfg = Gtk.Button(label="Configure")
+                cfg.connect("clicked", self.on_configure, inst_id, t)
+                h.pack_start(cfg, False, False, 0)
+            rm = Gtk.Button(label="Remove")
+            rm.connect("clicked", self.on_remove, inst_id, label)
+            h.pack_start(rm, False, False, 0)
+            h.pack_start(sw, False, False, 0)
+            row.add(h)
+            self.manage_list.add(row)
+        self.manage_list.show_all()
+
+    def on_toggle(self, sw, _pspec, inst_id):
+        conf_set({inst_id: "on" if sw.get_active() else "off"})
+        cardhost_reload()
+
+    def on_configure(self, _btn, inst_id, t):
+        c = conf()
+        current = cardspec.instance_params(c, inst_id, t)
+        dlg = Gtk.Dialog(title=f"Configure {inst_id}", transient_for=self,
+                         modal=True)
+        dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                        "Save", Gtk.ResponseType.OK)
+        area = dlg.get_content_area()
+        area.set_spacing(6)
+        entries = {}
+        for pname, p in t.params.items():
+            area.add(Gtk.Label(label=p["label"], xalign=0))
+            e = Gtk.Entry(text=current.get(pname, p["default"]))
+            entries[pname] = e
+            area.add(e)
+        area.show_all()
+        if dlg.run() == Gtk.ResponseType.OK:
+            changes, doomed = {}, []
+            ok = True
+            for pname, e in entries.items():
+                val = e.get_text()
+                if val and any(ch.isspace() for ch in val):
+                    notify(f"{pname}: spaces not allowed")
+                    ok = False
+                    break
+                if val:
+                    changes[f"{inst_id}_p_{pname}"] = val
+                else:
+                    # a CLEARED field must delete the key — else the old
+                    # value silently survives and the edit is discarded
+                    doomed.append(f"{inst_id}_p_{pname}")
+            if ok and (changes or doomed):
+                conf_set(changes, delete=doomed)
+                cardhost_reload()
+        dlg.destroy()
+
+    def on_remove(self, _btn, inst_id, label):
+        dlg = Gtk.MessageDialog(transient_for=self, modal=True,
+                                message_type=Gtk.MessageType.QUESTION,
+                                buttons=Gtk.ButtonsType.YES_NO,
+                                text=f"Remove {label} ({inst_id}) from "
+                                     "the desktop?")
+        ans = dlg.run()
+        dlg.destroy()
+        if ans != Gtk.ResponseType.YES:
+            return
+        c = conf()
+        # delete ONLY the instance's own key family — a blind prefix sweep
+        # would eat unrelated keys sharing the stem (removing 'claude'
+        # must not kill claude_pet; removing 'trading' must not kill the
+        # legacy trading_coins that other instances still fall back to)
+        suffixes = {"mon", "col", "row", "pos", "x", "y", "scale", "size"}
+        t = self.templates.get(c.get(f"inst_{inst_id}", ""), None)
+        params = t.params if isinstance(t, cardspec.Template) else {}
+        doomed = [f"inst_{inst_id}", inst_id]
+        doomed += [f"{inst_id}_{s}" for s in suffixes
+                   if f"{inst_id}_{s}" in c]
+        doomed += [f"{inst_id}_p_{p}" for p in params
+                   if f"{inst_id}_p_{p}" in c]
+        # unknown _p_ keys from a template that later changed its params
+        doomed += [k for k in c if k.startswith(f"{inst_id}_p_")
+                   and k not in doomed]
+        conf_delete(doomed)
+        cardhost_reload()
+        notify(f"{label} removed — 'hypr-arrange --undo' reverts")
+        self.populate_gallery()
+        self.refresh_manage()
+
+    def on_key(self, _w, ev):
+        if ev.keyval == Gdk.KEY_Escape:
+            Gtk.main_quit()
+            return True
+        return False
+
+
+def main():
+    GLib.set_prgname("hyprwidgetpick")       # → hyprland windowrule float
+    GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGTERM,
+                         lambda *_: os._exit(130))
+    GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGINT,
+                         lambda *_: os._exit(130))
+    win = Picker()
+    win.connect("destroy", Gtk.main_quit)
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

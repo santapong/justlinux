@@ -88,6 +88,19 @@ wallust run "$RECOLOR"
 hyprctl reload >/dev/null                       # window borders
 pkill -SIGUSR2 waybar 2>/dev/null || true       # waybar restyles in place
 swaync-client -rs 2>/dev/null || true           # swaync reloads css
-~/.local/bin/desktop-widgets.sh restart         # conky widgets re-read colors.lua
+# widget cards + docks retheme LIVE (no restart); full restart only as
+# the crash-safe fallback if either ctl socket is unreachable
+if ~/.local/bin/hypr-cardhost --ctl reload-theme >/dev/null 2>&1 &&
+   ~/.local/bin/hypr-appdock  --ctl reload-theme >/dev/null 2>&1; then
+    # the pet bakes its palette at spawn — bounce only the pet
+    pkill -xf "python3 $HOME/.local/bin/hypr-pet" 2>/dev/null || true
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        pgrep -xf "python3 $HOME/.local/bin/hypr-pet" >/dev/null 2>&1 || break
+        sleep 0.1
+    done
+    ~/.local/bin/desktop-widgets.sh start       # respawns pet, skips the rest
+else
+    ~/.local/bin/desktop-widgets.sh restart
+fi
 
 echo "Desktop recolored ✔"

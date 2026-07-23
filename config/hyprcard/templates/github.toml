@@ -1,0 +1,29 @@
+[template]
+name = "github"
+label = "GitHub contributions"
+icon = ""
+description = "16-week contribution heatmap"
+multi_instance = true
+default_width = 300
+default_pos = "top_middle"
+
+[params.user]
+label = "GitHub username"
+type = "string"
+default = "santapong"
+
+[source]
+cmd = "~/.local/bin/widget-github.sh --fields --user {user}"
+interval = 3600
+
+[[rows]]
+type = "title"
+text = "  {user}"
+badge = "{count} this year"
+
+[[rows]]
+type = "hr"
+
+[[rows]]
+type = "heatmap"
+data = "{levels}"

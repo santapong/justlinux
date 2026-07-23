@@ -1,0 +1,41 @@
+[template]
+name = "security"
+label = "Security status"
+icon = "󰕥"
+description = "Firewall, antivirus, VPN, listening ports"
+default_width = 290
+default_pos = "top_right"
+
+[source]
+cmd = "~/.local/bin/widget-security.sh --fields"
+interval = 30
+
+[[rows]]
+type = "title"
+text = "󰕥  SECURITY"
+
+[[rows]]
+type = "hr"
+
+[[rows]]
+type = "keyval"
+key = "firewall (ufw)"
+badge = "{fw}"
+badge_slot = "{fw_slot}"
+
+[[rows]]
+type = "keyval"
+key = "antivirus (clamav)"
+badge = "{av}"
+badge_slot = "{av_slot}"
+
+[[rows]]
+type = "keyval"
+key = "vpn"
+badge = "{vpn}"
+badge_slot = "{vpn_slot}"
+
+[[rows]]
+type = "keyval"
+key = "listening ports"
+value = "{ports}"

@@ -1,0 +1,21 @@
+[template]
+name = "nowplaying"
+label = "Now playing"
+icon = "󰐊"
+description = "MPRIS media: track, artist, player"
+default_width = 320
+default_pos = "bottom_left"
+
+[source]
+cmd = "~/.local/bin/widget-nowplaying.sh --fields"
+interval = 3
+
+[[rows]]
+type = "title"
+text = "{icon}  {title}"
+
+[[rows]]
+type = "keyval"
+key = "{artist}"
+badge = "{app}"
+badge_slot = "sub"

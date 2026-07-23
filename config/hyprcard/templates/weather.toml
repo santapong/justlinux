@@ -1,0 +1,33 @@
+[template]
+name = "weather"
+label = "Weather"
+icon = "󰖕"
+description = "wttr.in conditions + 3-day outlook"
+default_width = 300
+default_pos = "top_middle"
+
+[source]
+cmd = "~/.local/bin/widget-weather.sh --fields"
+interval = 300
+
+[[rows]]
+type = "title"
+text = "{icon}  {area}"
+badge = "{desc}"
+
+[[rows]]
+type = "keyval"
+key = "now"
+value = "{temp}°C"
+badge = "feels {feels}°C"
+
+[[rows]]
+type = "hr"
+
+[[rows]]
+type = "repeat"
+over = "day"
+  [[rows.rows]]
+  type = "keyval"
+  key = "{day.name}"
+  value = "{day.min}–{day.max}°C · {day.rain}%󰖗"

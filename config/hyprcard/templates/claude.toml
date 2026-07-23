@@ -1,0 +1,27 @@
+[template]
+name = "claude"
+label = "Claude plan usage"
+icon = "󱚝"
+description = "Session and weekly usage with reset times"
+default_width = 300
+default_pos = "bottom_right"
+
+[source]
+cmd = "~/.local/bin/claude-usage.sh --fields"
+interval = 60
+
+[[rows]]
+type = "title"
+text = "󱚝  CLAUDE PLAN USAGE"
+
+[[rows]]
+type = "hr"
+
+[[rows]]
+type = "repeat"
+over = "lim"
+  [[rows.rows]]
+  type = "bar"
+  label = "{lim.label}"
+  value = "{lim.pct}"
+  text = "{lim.pct}% · {lim.reset}"

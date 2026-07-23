@@ -1,0 +1,38 @@
+[template]
+name = "trading"
+label = "Crypto markets"
+icon = "󰋂"
+description = "Prices, 24h change and sparkline per coin"
+multi_instance = true
+default_width = 300
+default_pos = "bottom_middle"
+
+[params.coins]
+label = "Coins (CoinGecko ids, comma separated)"
+type = "string"
+default = "bitcoin,ethereum"
+
+[source]
+cmd = "~/.local/bin/widget-trading.sh --fields --coins {coins}"
+interval = 300
+
+[[rows]]
+type = "title"
+text = "󰋂  MARKETS"
+badge = "24 h"
+
+[[rows]]
+type = "hr"
+
+[[rows]]
+type = "repeat"
+over = "coin"
+  [[rows.rows]]
+  type = "keyval"
+  key = "{coin.sym}"
+  value = "{coin.price}"
+  badge = "{coin.change}"
+  [[rows.rows]]
+  type = "sparkline"
+  data = "{coin.spark}"
+  height = 18

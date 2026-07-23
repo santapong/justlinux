@@ -1,22 +1,29 @@
 #!/usr/bin/env python3
-"""hypr-arrange — drag widgets around the desktop, WYSIWYG.
+"""hypr-arrange — phone-style grid edit mode for the desktop, WYSIWYG.
 
-A fullscreen OVERLAY layer surface (renders above everything, even
-fullscreen windows) that shows a ghost frame for every desktop widget at
-its real position:
+One fullscreen OVERLAY surface per monitor (renders above everything,
+even fullscreen windows) showing a ghost frame for every desktop widget:
 
-  · drag a frame        → move the widget (12px grid snap)
-  · drag its corner     → resize (scales the widget's font / icon size)
-  · Enter / Save        → write widgets.conf + restart the fleet
+  · drag a card         → move it; cards snap into the placement grid
+                          (grid_cols × grid_rows per monitor) and can be
+                          dragged ACROSS monitors; occupied cells refuse
+                          the drop (red tint) and the card springs back
+  · drag conky/dock     → classic 12px pixel snap on their own monitor
+  · drag a corner       → resize (card scale / conky font / dock icons)
+  · Enter               → ONE atomic widgets.conf write; cards move live
+                          (no restart), conky restarts only if touched
   · Esc / right-click   → cancel, change nothing
+  · hypr-arrange --undo → revert the last saved layout
 
-Launched from Hypr Settings → Widgets → "Arrange on screen…".
+Launched with ALT+SHIFT+E, from Hypr Settings → Widgets, or hypr-tools.
 """
 import json
+import os
 import re
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import cairo
@@ -27,63 +34,31 @@ from gi.repository import Gtk, Gdk, GLib
 sys.path.insert(0, str(Path.home() / ".local/lib"))
 from hyprdesk import colors, conf
 from hyprdesk.layer import LayerWindow
+from hyprdesk.confwrite import conf_set as _atomic_set, conf_undo
+from hyprdesk import grid
+from hyprdesk.theme import rgb
 
-WIDGETS_CONF = Path.home() / ".config/conky/widgets.conf"
-GRID = 12
+GRID = 12                # pixel snap for conky/dock items
 HANDLE = 18
 PET_STRIP_H = 56
+FONT = "JetBrainsMono Nerd Font"
 
 
-def conf_set(key, val):
+def tool_ctl(tool, cmd):
+    """Best-effort ctl call to hypr-appdock / hypr-cardhost."""
     try:
-        lines = WIDGETS_CONF.read_text().splitlines()
+        subprocess.run([str(Path.home() / f".local/bin/{tool}"),
+                        "--ctl", cmd], capture_output=True, timeout=3)
+    except Exception:
+        pass
+
+
+def notify(msg):
+    try:
+        subprocess.Popen(["notify-send", "-a", "hypr-arrange",
+                          "Widget layout", msg], start_new_session=True)
     except OSError:
-        lines = []
-    out, done = [], False
-    for line in lines:
-        if re.match(rf"^{re.escape(key)}\s*=", line):
-            out.append(f"{key}={val}")
-            done = True
-        else:
-            out.append(line)
-    if not done:
-        out.append(f"{key}={val}")
-    WIDGETS_CONF.write_text("\n".join(out) + "\n")
-
-
-def surfaces():
-    """([items], (mx,my,mw,mh), monitor_name) of widget layer surfaces
-    in local coordinates on the monitor that holds them."""
-    out = subprocess.run(["hyprctl", "-j", "layers"], capture_output=True,
-                         text=True, timeout=3).stdout
-    mons = subprocess.run(["hyprctl", "-j", "monitors"], capture_output=True,
-                          text=True, timeout=3).stdout
-    geo = {m["name"]: (m["x"], m["y"], m["width"], m["height"],
-                       (m.get("reserved") or [0, 0, 0, 0]))
-           for m in json.loads(mons)}
-    best, items = None, []
-    for mon_name, mon in json.loads(out).items():
-        found = []
-        for lvl in mon.get("levels", {}).values():
-            for layer in lvl:
-                ns = layer.get("namespace", "")
-                if ns not in ("conky_namespace", "hypr-appdock"):
-                    continue
-                name = "apps" if ns == "hypr-appdock" else \
-                    widget_of_pid(layer.get("pid", 0))
-                if not name:
-                    continue
-                found.append({"name": name, "x": layer["x"], "y": layer["y"],
-                              "w": layer["w"], "h": layer["h"]})
-        if len(found) > len(items):
-            items, best = found, mon_name
-    if not best:
-        return [], (0, 0, 1600, 900), None, (0, 0, 0, 0)
-    mx, my, mw, mh, res = geo.get(best, (0, 0, 1600, 900, (0, 0, 0, 0)))
-    for it in items:
-        it["x"] -= mx
-        it["y"] -= my
-    return items, (mx, my, mw, mh), best, tuple(res)
+        pass
 
 
 def widget_of_pid(pid):
@@ -107,194 +82,566 @@ def base_font_size(name):
         return 11
 
 
-class Arranger(LayerWindow):
+def monitor_geo():
+    """{name: (x, y, w, h, reserved)} from hyprctl."""
+    try:
+        mons = subprocess.run(["hyprctl", "-j", "monitors"],
+                              capture_output=True, text=True,
+                              timeout=3).stdout
+        return {m["name"]: (m["x"], m["y"], m["width"], m["height"],
+                            tuple(m.get("reserved") or (0, 0, 0, 0)))
+                for m in json.loads(mons)}
+    except Exception:
+        return {}
+
+
+def surfaces_all(geo):
+    """Every arrangeable layer surface, monitor-local, across ALL heads.
+
+    kind: 'card' (hypr-cardhost, grid-snapped, cross-monitor) ·
+          'conky' / 'apps' / 'dock' (legacy pixel snap, own monitor)."""
+    items = []
+    try:
+        out = subprocess.run(["hyprctl", "-j", "layers"],
+                             capture_output=True, text=True, timeout=3).stdout
+        layers = json.loads(out)
+    except Exception:
+        return items
+    for mon_name, mon in layers.items():
+        if mon_name not in geo:
+            continue
+        mx, my = geo[mon_name][0], geo[mon_name][1]
+        for lvl in mon.get("levels", {}).values():
+            for layer in lvl:
+                ns = layer.get("namespace", "")
+                if ns.startswith("hypr-card-"):
+                    name, kind = ns[len("hypr-card-"):], "card"
+                elif ns == "hypr-appdock":
+                    name, kind = "apps", "apps"
+                elif ns.startswith("hypr-appdock-"):
+                    name = "dock_" + re.sub(r"[^\w]", "_",
+                                            ns[len("hypr-appdock-"):])
+                    kind = "dock"
+                elif ns == "conky_namespace":
+                    name, kind = widget_of_pid(layer.get("pid", 0)), "conky"
+                else:
+                    continue
+                if not name:
+                    continue
+                x, y = layer["x"] - mx, layer["y"] - my
+                items.append({"name": name, "kind": kind, "mon": mon_name,
+                              "x": x, "y": y, "w": layer["w"],
+                              "h": layer["h"], "ox": x, "oy": y,
+                              "omon": mon_name, "orig_w": layer["w"],
+                              "orig_h": layer["h"]})
+    return items
+
+
+class Session:
+    """Shared state across the per-monitor overlays."""
+
     def __init__(self):
-        super().__init__("arrange", layer="overlay", namespace="hypr-arrange",
-                         keyboard="on_demand", fullscreen=True)
-        # failsafe: an editor that can't be closed must close itself
-        GLib.timeout_add_seconds(300, Gtk.main_quit)
-        self.set_app_paintable(True)
         self.pal = colors()
-        (self.items, (mx, my, self.mon_w, self.mon_h),
-         _mon_name, self.reserved) = surfaces()
-        # open ON the monitor that holds the widgets, not the focused one
+        self.c = conf()
+        tool_ctl("hypr-appdock", "show-all")     # hidden docks are unmapped
+        time.sleep(0.3)
+        self.geo = monitor_geo()
+        self.items = surfaces_all(self.geo)
+        self.dirty = set()
+        self.grab = None       # [item, mode, dx, dy]
+        self.guides = []       # [("v"|"h", coord, mon)] alignment guides
+        self.overlays = {}     # mon_name -> Overlay
+        self.last_activity = time.monotonic()
         display = Gdk.Display.get_default()
         for i in range(display.get_n_monitors()):
             g = display.get_monitor(i).get_geometry()
-            if (g.x, g.y) == (mx, my):
-                self.set_target_monitor(display.get_monitor(i))
-                break
-        self.grab = None            # [item, mode, dx, dy, orig_w]
-        self.dirty = set()
+            for name, (mx, my, *_r) in self.geo.items():
+                if (g.x, g.y) == (mx, my):
+                    self.overlays[name] = Overlay(
+                        self, name, display.get_monitor(i))
+        # caller checks .ok — quitting a not-yet-running main loop would
+        # leave a 5-minute ghost session with the docks stuck shown
+        self.ok = bool(self.overlays)
+        if not self.ok:
+            print("hypr-arrange: no monitors resolved", file=sys.stderr)
 
+    def touch(self):
+        self.last_activity = time.monotonic()
+
+    def idle_check(self):
+        # failsafe that respects an ACTIVE session: only an editor idle
+        # for 300s closes itself
+        if time.monotonic() - self.last_activity > 300:
+            Gtk.main_quit()
+            return False
+        return True
+
+    # ----- shared helpers -----
+    def mon_size(self, mon):
+        g = self.geo.get(mon, (0, 0, 1600, 900, (0, 0, 0, 0)))
+        return g[2], g[3]
+
+    def work_geo(self, mon):
+        """(res_l, res_t, work_w, work_h) — the grid lives in WORKAREA
+        coordinates (layer margins are workarea-relative; waybar reserves
+        30px top), while hyprctl layer positions are absolute."""
+        g = self.geo.get(mon, (0, 0, 1600, 900, (0, 0, 0, 0)))
+        res_l, res_t, res_r, res_b = g[4]
+        return res_l, res_t, g[2] - res_l - res_r, g[3] - res_t - res_b
+
+    def mon_at_global(self, gx, gy):
+        for name, (mx, my, mw, mh, _r) in self.geo.items():
+            if mx <= gx < mx + mw and my <= gy < my + mh:
+                return name
+        return None
+
+    def items_on(self, mon):
+        return [it for it in self.items if it["mon"] == mon]
+
+    def redraw_all(self):
+        for ov in self.overlays.values():
+            ov.area.queue_draw()
+
+    GUIDE_SNAP = 6         # magnetic alignment range (px)
+
+    def _alignment(self, it, tolerance):
+        """Nearest edge/center alignment against every sibling on the
+        same monitor: ((dx, x_coord)|None, (dy, y_coord)|None)."""
+        ex = (it["x"], it["x"] + it["w"] / 2, it["x"] + it["w"])
+        ey = (it["y"], it["y"] + it["h"] / 2, it["y"] + it["h"])
+        best_x = best_y = None
+        for other in self.items_on(it["mon"]):
+            if other is it:
+                continue
+            for o in (other["x"], other["x"] + other["w"] / 2,
+                      other["x"] + other["w"]):
+                for e in ex:
+                    d = o - e
+                    if abs(d) <= tolerance and \
+                            (best_x is None or abs(d) < abs(best_x[0])):
+                        best_x = (d, o)
+            for o in (other["y"], other["y"] + other["h"] / 2,
+                      other["y"] + other["h"]):
+                for e in ey:
+                    d = o - e
+                    if abs(d) <= tolerance and \
+                            (best_y is None or abs(d) < abs(best_y[0])):
+                        best_y = (d, o)
+        return best_x, best_y
+
+    def card_collides(self, item, col, row):
+        """Does item at (col,row) intersect another card on its monitor?"""
+        _, _, ww, wh = self.work_geo(item["mon"])
+        cs, rs = grid.span(ww, wh, item["w"], item["h"], self.c)
+        mine = grid.cells_of(col, row, cs, rs)
+        for other in self.items_on(item["mon"]):
+            if other is item or other["kind"] != "card":
+                continue
+            ol, ot, oww, owh = self.work_geo(other["mon"])
+            ocol, orow = grid.cell_at(oww, owh, other["x"] - ol,
+                                      other["y"] - ot, self.c)
+            ocs, ors = grid.span(oww, owh, other["w"], other["h"], self.c)
+            if mine & grid.cells_of(ocol, orow, ocs, ors):
+                return True
+        return False
+
+    # ----- input (routed from the overlay under the press) -----
+    def press(self, overlay, ev):
+        self.touch()
+        if ev.button == 3:
+            Gtk.main_quit()
+            return
+        for it in reversed(self.items_on(overlay.mon)):
+            if it["x"] <= ev.x <= it["x"] + it["w"] and \
+               it["y"] <= ev.y <= it["y"] + it["h"]:
+                corner = (ev.x > it["x"] + it["w"] - HANDLE and
+                          ev.y > it["y"] + it["h"] - HANDLE)
+                self.grab = [it, "resize" if corner else "move",
+                             ev.x - it["x"], ev.y - it["y"]]
+                it["grab_x"], it["grab_y"] = it["x"], it["y"]
+                it["grab_mon"] = it["mon"]
+                return
+
+    def motion(self, overlay, ev):
+        if not self.grab:
+            return
+        self.touch()
+        it, mode, dx, dy = self.grab
+        if mode == "resize":
+            factor = max(0.5, min(2.5, (ev.x - it["x"]) / it["orig_w"]))
+            it["scale"] = factor
+            it["w"] = int(it["orig_w"] * factor)
+            it["h"] = int(it["orig_h"] * factor)
+        else:
+            # Wayland implicit grab: motion keeps coming to the press
+            # overlay even beyond its bounds — convert to global to allow
+            # cross-monitor drags (cards only)
+            omx, omy = self.geo[overlay.mon][0], self.geo[overlay.mon][1]
+            gx, gy = omx + ev.x, omy + ev.y
+            target = self.mon_at_global(gx, gy) or it["mon"]
+            if it["kind"] != "card":
+                target = it["mon"]           # conky/dock stay home
+            tmx, tmy = self.geo[target][0], self.geo[target][1]
+            lx, ly = gx - tmx - dx, gy - tmy - dy
+            mw, mh = self.mon_size(target)
+            it["mon"] = target
+            if it["kind"] == "card":
+                res_l, res_t, ww, wh = self.work_geo(target)
+                it["x"] = max(res_l, min(res_l + ww - it["w"], lx))
+                it["y"] = max(res_t, min(res_t + wh - it["h"], ly))
+                col, row = grid.cell_at(ww, wh, it["x"] - res_l,
+                                        it["y"] - res_t, self.c)
+                cs, rs = grid.span(ww, wh, it["w"], it["h"], self.c)
+                col, row = grid.clamp(ww, wh, col, row, cs, rs, self.c)
+                it["cell"] = (col, row)
+                it["collides"] = self.card_collides(it, col, row)
+                # cards are cell-authoritative: guides only CONFIRM when
+                # the snapped position happens to line up with a sibling
+                bx, by = self._alignment(it, 2)
+                self.guides = [g for g in (
+                    bx and ("v", bx[1], it["mon"]),
+                    by and ("h", by[1], it["mon"])) if g]
+            else:
+                # Canva-style magnetic alignment measured on the RAW drag
+                # position (the 12px grid would push it out of range) —
+                # an alignment match beats the coarse grid snap
+                raw_x = max(0, min(mw - it["w"], lx))
+                raw_y = max(0, min(mh - it["h"], ly))
+                it["x"], it["y"] = raw_x, raw_y
+                bx, by = self._alignment(it, self.GUIDE_SNAP)
+                it["x"] = raw_x + bx[0] if bx else round(raw_x / GRID) * GRID
+                it["y"] = raw_y + by[0] if by else round(raw_y / GRID) * GRID
+                it["x"] = int(max(0, min(mw - it["w"], round(it["x"]))))
+                it["y"] = int(max(0, min(mh - it["h"], round(it["y"]))))
+                bx, by = self._alignment(it, 1)   # post-snap: what aligned?
+                self.guides = [g for g in (
+                    bx and ("v", bx[1], it["mon"]),
+                    by and ("h", by[1], it["mon"])) if g]
+        self.redraw_all()
+
+    def release(self, *_):
+        if not self.grab:
+            return
+        it, mode, *_rest = self.grab
+        self.grab = None
+        self.guides = []
+        if mode == "move" and it["kind"] == "card" and "cell" in it:
+            if it.get("collides"):
+                # refused drop: spring back — and DON'T mark it moved, a
+                # reverted card must not get grid-ified at save time
+                it["mon"] = it.pop("grab_mon", it["mon"])
+                it["x"] = it.pop("grab_x", it["ox"])
+                it["y"] = it.pop("grab_y", it["oy"])
+                it.pop("cell", None)
+                it["collides"] = False
+                self.redraw_all()
+                return
+            res_l, res_t, ww, wh = self.work_geo(it["mon"])
+            gx, gy = grid.origin(ww, wh, *it["cell"], self.c)
+            it["x"], it["y"] = gx + res_l, gy + res_t
+        if (it["x"], it["y"], it["mon"]) != (it["ox"], it["oy"], it["omon"]) \
+                or "scale" in it:
+            self.dirty.add(it["name"])
+        self.redraw_all()
+
+    def key(self, _overlay, ev):
+        self.touch()
+        if ev.keyval == Gdk.KEY_Escape:
+            Gtk.main_quit()
+        elif ev.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+            self.save()
+
+    # ----- commit -----
+    def save(self):
+        if self.grab:          # Enter mid-drag: settle the drop first so
+            self.release()     # collision refusal can't be bypassed
+        changes = {}
+        conky_dirty = dock_dirty = card_dirty = False
+        for it in (i for i in self.items if i["name"] in self.dirty):
+            name, kind = it["name"], it["kind"]
+            mw, mh = self.mon_size(it["mon"])
+            if kind == "card":
+                card_dirty = True
+                if "scale" in it:
+                    cur = float(self.c.get(f"{name}_scale", 1) or 1)
+                    changes[f"{name}_scale"] = \
+                        f"{max(0.5, min(2.0, cur * it['scale'])):.2f}"
+                if "cell" not in it:
+                    continue   # resize-only: keep its position untouched —
+                               # snapping a never-moved card would shift it
+                _, _, ww, wh = self.work_geo(it["mon"])
+                col, row = it["cell"]
+                # re-clamp with the CURRENT (possibly resized) span so a
+                # scaled-up card can't hang off the grid
+                cs, rs = grid.span(ww, wh, it["w"], it["h"], self.c)
+                col, row = grid.clamp(ww, wh, col, row, cs, rs, self.c)
+                changes[f"{name}_mon"] = it["mon"]
+                changes[f"{name}_col"] = col
+                changes[f"{name}_row"] = row
+                continue
+            # legacy anchor derivation (conky gaps are workarea-relative)
+            x, y, w, h = it["x"], it["y"], it["w"], it["h"]
+            res_l, res_t, res_r, res_b = self.geo[it["mon"]][4]
+            cx, cy = x + w / 2, y + h / 2
+            col = "middle" if abs(cx - mw / 2) < 24 else \
+                ("left" if cx < mw / 2 else "right")
+            row = "middle" if (abs(cy - mh / 2) < 24 and col != "middle") \
+                else ("top" if cy < mh / 2 else "bottom")
+            if col == "middle" and row == "middle":
+                row = "top"
+            gx = {"left": x - res_l, "right": mw - res_r - (x + w),
+                  "middle": 0}[col]
+            gy = {"top": y - res_t, "bottom": mh - res_b - (y + h),
+                  "middle": 0}[row]
+            changes[f"{name}_pos"] = f"{row}_{col}"
+            changes[f"{name}_x"] = max(0, int(gx))
+            changes[f"{name}_y"] = max(0, int(gy))
+            if kind in ("apps", "dock"):
+                dock_dirty = True
+                if "scale" in it:
+                    cur = int(self.c.get(f"{name}_size", 44) or 44)
+                    changes[f"{name}_size"] = \
+                        max(24, min(96, int(cur * it["scale"])))
+            else:
+                conky_dirty = True
+                if "scale" in it:
+                    cur = int(self.c.get(f"{name}_size", 0) or
+                              base_font_size(name))
+                    changes[f"{name}_size"] = \
+                        max(6, min(40, int(cur * it["scale"])))
+        if changes:
+            _atomic_set(changes)
+            if card_dirty:
+                tool_ctl("hypr-cardhost", "reload")   # cards move live
+            if dock_dirty:
+                tool_ctl("hypr-appdock", "reload")
+            if conky_dirty:                # restart ONLY conky — bouncing
+                subprocess.Popen(          # cardhost/dock/pet for a conky
+                    [str(Path.home() /     # nudge is needless churn
+                          ".local/bin/desktop-widgets.sh"),
+                     "restart-conky"], start_new_session=True)
+            notify("Saved — 'hypr-arrange --undo' reverts")
+        Gtk.main_quit()
+
+
+class Overlay(LayerWindow):
+    """One monitor's edit-mode surface."""
+
+    def __init__(self, session, mon_name, gdk_mon):
+        # keyboard EXCLUSIVE, not on_demand: on_demand only grants keys
+        # after the surface is clicked, so on a workspace with a focused
+        # window Esc/Enter typed NEWLINES into that window instead of
+        # controlling the editor (user-confirmed). A modal editor that
+        # dims the whole desktop owns the keyboard, full stop.
+        super().__init__("arrange", layer="overlay",
+                         namespace=f"hypr-arrange-{mon_name}",
+                         keyboard="exclusive", fullscreen=True)
+        self.s, self.mon = session, mon_name
+        self.set_target_monitor(gdk_mon)
+        self.set_app_paintable(True)
+        self.mon_w, self.mon_h = session.mon_size(mon_name)
         self.area = Gtk.DrawingArea()
         self.area.set_size_request(self.mon_w, self.mon_h)
         self.area.add_events(Gdk.EventMask.BUTTON_PRESS_MASK
                              | Gdk.EventMask.BUTTON_RELEASE_MASK
                              | Gdk.EventMask.POINTER_MOTION_MASK)
         self.area.connect("draw", self.on_draw)
-        self.area.connect("button-press-event", self.on_press)
-        self.area.connect("button-release-event", self.on_release)
-        self.area.connect("motion-notify-event", self.on_motion)
+        self.area.connect("button-press-event",
+                          lambda _w, ev: self.s.press(self, ev) or True)
+        self.area.connect("button-release-event",
+                          lambda _w, ev: self.s.release() or True)
+        self.area.connect("motion-notify-event",
+                          lambda _w, ev: self.s.motion(self, ev) or True)
         self.add(self.area)
-        self.connect("key-press-event", self.on_key)
+        self.connect("key-press-event",
+                     lambda _w, ev: self.s.key(self, ev) or True)
         self.show_all()
-
-    # ----- geometry → widgets.conf -----
-    def save(self):
-        for it in (i for i in self.items if i["name"] in self.dirty):
-            name, x, y, w, h = it["name"], it["x"], it["y"], it["w"], it["h"]
-            cx = x + w / 2
-            # middle anchors zero the offset — use them ONLY when the
-            # frame is truly centered (±24px), else keep exact corners
-            if abs(cx - self.mon_w / 2) < 24:
-                col = "middle"
-            elif cx < self.mon_w / 2:
-                col = "left"
-            else:
-                col = "right"
-            cy = y + h / 2
-            if abs(cy - self.mon_h / 2) < 24 and col != "middle":
-                row = "middle"
-            elif cy < self.mon_h / 2:
-                row = "top"
-            else:
-                row = "bottom"
-            if col == "middle" and row == "middle":
-                row = "top"     # no middle_middle anchor exists
-            pos = f"{row}_{col}"
-            res_l, res_t, res_r, res_b = self.reserved
-            # conky gaps are WORKAREA-relative: subtract reserved insets
-            gx = {"left": x - res_l, "right": self.mon_w - res_r - (x + w),
-                  "middle": 0}[col]
-            gy = {"top": y - res_t, "bottom": self.mon_h - res_b - (y + h),
-                  "middle": 0}[row]
-            conf_set(f"{name}_pos", pos)
-            conf_set(f"{name}_x", max(0, int(gx)))
-            conf_set(f"{name}_y", max(0, int(gy)))
-            if "scale" in it:
-                c = conf()
-                if name == "apps":
-                    cur = int(c.get("apps_size", 44) or 44)
-                    conf_set("apps_size",
-                             max(24, min(96, int(cur * it["scale"]))))
-                else:
-                    cur = int(c.get(f"{name}_size", 0) or
-                              base_font_size(name))
-                    conf_set(f"{name}_size",
-                             max(6, min(40, int(cur * it["scale"]))))
-        subprocess.Popen([str(Path.home() / ".local/bin/desktop-widgets.sh"),
-                          "restart"], start_new_session=True)
-        Gtk.main_quit()
-
-    # ----- input -----
-    def item_at(self, x, y):
-        for it in reversed(self.items):
-            if it["x"] <= x <= it["x"] + it["w"] and \
-               it["y"] <= y <= it["y"] + it["h"]:
-                corner = (x > it["x"] + it["w"] - HANDLE and
-                          y > it["y"] + it["h"] - HANDLE)
-                return it, ("resize" if corner else "move")
-        return None, None
-
-    def on_press(self, _w, ev):
-        if ev.button == 3:
-            Gtk.main_quit()
-            return True
-        it, mode = self.item_at(ev.x, ev.y)
-        if it:
-            it.setdefault("orig_w", it["w"])
-            it.setdefault("orig_h", it["h"])
-            self.grab = [it, mode, ev.x - it["x"], ev.y - it["y"], it["w"]]
-        return True
-
-    def on_motion(self, _w, ev):
-        if not self.grab:
-            return True
-        it, mode, dx, dy, ow = self.grab
-        if mode == "move":
-            it["x"] = round((ev.x - dx) / GRID) * GRID
-            it["y"] = round((ev.y - dy) / GRID) * GRID
-            it["x"] = max(0, min(self.mon_w - it["w"], it["x"]))
-            it["y"] = max(0, min(self.mon_h - it["h"], it["y"]))
-        else:
-            factor = max(0.5, min(2.5, (ev.x - it["x"]) / it["orig_w"]))
-            it["scale"] = factor            # always relative to ORIGINAL size
-            it["w"] = int(it["orig_w"] * factor)
-            it["h"] = int(it["orig_h"] * factor)
-        self.dirty.add(it["name"])
-        self.area.queue_draw()
-        return True
-
-    def on_release(self, *_):
-        self.grab = None
-        return True
-
-    def on_key(self, _w, ev):
-        if ev.keyval == Gdk.KEY_Escape:
-            Gtk.main_quit()
-        elif ev.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
-            self.save()
-        return True
 
     # ----- drawing -----
     def on_draw(self, _w, cr):
-        bg = [int(self.pal["bg"][i:i + 2], 16) / 255 for i in (1, 3, 5)]
-        acc = [int(self.pal["accent2"][i:i + 2], 16) / 255 for i in (1, 3, 5)]
-        fg = [int(self.pal["fg"][i:i + 2], 16) / 255 for i in (1, 3, 5)]
+        pal = self.s.pal
+        bg, fg = rgb(pal["bg"]), rgb(pal["fg"])
+        acc, acc2 = rgb(pal["accent"]), rgb(pal["accent2"])
+        bad, sub = rgb(pal["bad"]), rgb(pal["sub"])
         cr.set_source_rgba(*bg, 0.45)               # dim the desktop
         cr.paint()
-        # pet strip marker (not arrangeable)
-        cr.set_source_rgba(*fg, 0.08)
+
+        # the placement grid (cards snap here) — drawn in WORKAREA space,
+        # offset by the reserved insets so it matches where cards render.
+        # Always-visible intersection DOTS make the grid discoverable;
+        # the full lattice brightens while a card is being dragged.
+        res_l, res_t, ww, wh = self.s.work_geo(self.mon)
+        cols, rows_, cw, ch = grid.geometry(ww, wh, self.s.c)
+        grid_top = res_t + grid.MARGIN
+        grid_bot = res_t + wh - grid.BOTTOM_RESERVE
+        grabbed_now = self.s.grab[0] if self.s.grab else None
+        card_drag = grabbed_now is not None and grabbed_now["kind"] == "card"
+        cr.set_line_width(1)
+        cr.set_source_rgba(*acc2, 0.35 if card_drag else 0.10)
+        for i in range(cols + 1):
+            x = res_l + grid.MARGIN + i * cw
+            cr.move_to(x, grid_top)
+            cr.line_to(x, grid_bot)
+        for j in range(rows_ + 1):
+            y = grid_top + j * ch
+            cr.move_to(res_l + grid.MARGIN, y)
+            cr.line_to(res_l + ww - grid.MARGIN, y)
+        cr.stroke()
+        cr.set_source_rgba(*acc2, 0.55)
+        for i in range(cols + 1):
+            for j in range(rows_ + 1):
+                cr.arc(res_l + grid.MARGIN + i * cw, grid_top + j * ch,
+                       1.6, 0, 6.2832)
+                cr.fill()
+
+        # pet strip / dock walkway marker (outside the grid)
+        cr.set_source_rgba(*fg, 0.06)
         cr.rectangle(0, self.mon_h - PET_STRIP_H, self.mon_w, PET_STRIP_H)
         cr.fill()
-        cr.select_font_face("JetBrainsMono Nerd Font")
-        for it in self.items:
+
+        # Canva-style alignment guides: dashed accent lines where the
+        # dragged widget's edge/center lines up with a sibling's
+        for ori, coord, mon in self.s.guides:
+            if mon != self.mon:
+                continue
+            cr.save()
+            cr.set_source_rgba(*acc, 0.85)
+            cr.set_line_width(1)
+            cr.set_dash([6, 4])
+            if ori == "v":
+                cr.move_to(coord + 0.5, 0)
+                cr.line_to(coord + 0.5, self.mon_h)
+            else:
+                cr.move_to(0, coord + 0.5)
+                cr.line_to(self.mon_w, coord + 0.5)
+            cr.stroke()
+            cr.restore()
+
+        grabbed = self.s.grab[0] if self.s.grab else None
+
+        # target cell highlight / collision tint for the dragged card
+        if (grabbed is not None and grabbed["mon"] == self.mon
+                and grabbed.get("cell") is not None
+                and grabbed["kind"] == "card"):
+            col, row = grabbed["cell"]
+            cs, rs = grid.span(ww, wh, grabbed["w"], grabbed["h"], self.s.c)
+            gx, gy = grid.origin(ww, wh, col, row, self.s.c)
+            cr.set_source_rgba(*(bad if grabbed.get("collides") else acc),
+                               0.22)
+            cr.rectangle(gx + res_l, gy + res_t, cs * cw, rs * ch)
+            cr.fill()
+
+        cr.select_font_face(FONT)
+        for it in self.s.items_on(self.mon):
             x, y, w, h = it["x"], it["y"], it["w"], it["h"]
-            r = 12
-            cr.new_path()
-            cr.arc(x + r, y + r, r, 3.14, 4.71)
-            cr.arc(x + w - r, y + r, r, 4.71, 6.28)
-            cr.arc(x + w - r, y + h - r, r, 0, 1.57)
-            cr.arc(x + r, y + h - r, r, 1.57, 3.14)
-            cr.close_path()
-            cr.set_source_rgba(*bg, 0.85)
+            hot = it["name"] in self.s.dirty
+            lifted = it is grabbed
+            if lifted:                              # lift shadow
+                cr.set_source_rgba(0, 0, 0, 0.35)
+                self.rounded(cr, x + 4, y + 6, w, h, 12)
+                cr.fill()
+            self.rounded(cr, x, y, w, h, 12)
+            cr.set_source_rgba(*bg, 0.92 if lifted else 0.85)
             cr.fill_preserve()
-            hot = it["name"] in self.dirty
-            cr.set_source_rgba(*(acc if hot else fg),
-                               0.9 if hot else 0.45)
+            edge = bad if (lifted and it.get("collides")) else \
+                (acc2 if hot else fg)
+            cr.set_source_rgba(*edge, 0.9 if (hot or lifted) else 0.45)
             cr.set_line_width(2)
             cr.stroke()
             cr.set_font_size(13)
             cr.set_source_rgba(*fg, 0.95)
             cr.move_to(x + 12, y + 22)
             cr.show_text(it["name"])
+            cr.set_font_size(10)
+            cr.set_source_rgba(*sub, 0.9)
+            cr.move_to(x + 12, y + 38)
+            tag = {"card": "card · snaps to grid", "conky": "widget",
+                   "dock": "dock", "apps": "dock"}[it["kind"]]
             if "scale" in it:
-                cr.set_source_rgba(*acc, 0.9)
-                cr.move_to(x + 12, y + 38)
-                cr.show_text(f"×{it['scale']:.2f}")
-            # resize handle
-            cr.set_source_rgba(*acc, 0.8)
+                tag += f" · ×{it['scale']:.2f}"
+            cr.show_text(tag)
+            cr.set_source_rgba(*acc2, 0.8)          # resize handle
             cr.rectangle(x + w - HANDLE, y + h - HANDLE, HANDLE, HANDLE)
             cr.fill()
+
         # help bar
-        msg = "drag = move · corner = resize · Enter = save · Esc = cancel"
-        cr.set_font_size(15)
+        msg = ("drag = move (cards snap to grid, cross-monitor ok) · "
+               "corner = resize · Enter = save · Esc = cancel")
+        cr.set_font_size(14)
         ext = cr.text_extents(msg)
         bx = (self.mon_w - ext.width) / 2
         cr.set_source_rgba(*bg, 0.9)
         cr.rectangle(bx - 16, 18, ext.width + 32, 34)
         cr.fill()
         cr.set_source_rgba(*fg, 1)
-        cr.move_to(bx, 41)
+        cr.move_to(bx, 40)
         cr.show_text(msg)
+
+    @staticmethod
+    def rounded(cr, x, y, w, h, r):
+        cr.new_path()
+        cr.arc(x + r, y + r, r, 3.14, 4.71)
+        cr.arc(x + w - r, y + r, r, 4.71, 6.28)
+        cr.arc(x + w - r, y + h - r, r, 0, 1.57)
+        cr.arc(x + r, y + h - r, r, 1.57, 3.14)
+        cr.close_path()
+
+
+def _sig_quit(*_):
+    """TERM/INT → resume the docks and exit NOW. Verified empirically:
+    Gtk.main_quit() from inside a GLib unix-signal source does not stop
+    Gtk.main() under this PyGObject — direct exit is the only reliable
+    path, and arrange has no state to flush (writes happen on save)."""
+    tool_ctl("hypr-appdock", "resume")
+    os._exit(130)
 
 
 def main():
-    signal.signal(signal.SIGINT, signal.SIG_DFL)
-    signal.signal(signal.SIGTERM, lambda *_: Gtk.main_quit())
-    Arranger()
-    Gtk.main()
+    # GLib-integrated signal handling: plain signal.signal handlers are
+    # deferred by the GLib poll and may never fire while the loop idles
+    GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGTERM, _sig_quit)
+    GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGINT, _sig_quit)
+    if "--undo" in sys.argv:
+        if conf_undo():
+            tool_ctl("hypr-cardhost", "reload")
+            tool_ctl("hypr-appdock", "reload")
+            subprocess.run([str(Path.home() /
+                                ".local/bin/desktop-widgets.sh"), "restart"])
+            notify("Layout reverted")
+        else:
+            print("nothing to undo", file=sys.stderr)
+        return
+    # single instance + TOGGLE: a second ALT+SHIFT+E closes the session
+    # that's already open (cancel, like Esc) instead of silently failing
+    import fcntl
+    lock_path = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) \
+        / "hypr-arrange.lock"
+    lockf = open(lock_path, "a+")
+    try:
+        fcntl.flock(lockf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        try:
+            lockf.seek(0)
+            pid = int(lockf.read().strip() or 0)
+            if pid:
+                os.kill(pid, signal.SIGTERM)   # running session quits clean
+        except (ValueError, OSError, ProcessLookupError):
+            pass
+        return
+    lockf.seek(0)
+    lockf.truncate()
+    lockf.write(str(os.getpid()))
+    lockf.flush()
+    session = Session()
+    if not session.ok:                   # nothing to show — leave nothing
+        tool_ctl("hypr-appdock", "resume")   # behind, docks included
+        return
+    # failsafe: an editor IDLE for 300s closes itself (activity resets it)
+    GLib.timeout_add_seconds(30, session.idle_check)
+    try:
+        Gtk.main()
+    finally:
+        tool_ctl("hypr-appdock", "resume")       # restore dock auto-hide
 
 
 if __name__ == "__main__":

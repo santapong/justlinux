@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
-"""Now Playing via MPRIS over D-Bus (no playerctl needed)."""
+"""Now Playing via MPRIS over D-Bus (no playerctl needed).
+--fields: key=value lines for hypr-cardhost."""
+import sys
+FIELDS = "--fields" in sys.argv
 FALLBACK = "${color3}󰝛 nothing playing${color}"
+if FIELDS:
+    FALLBACK = "icon=󰝛\ntitle=nothing playing\nartist=—\napp="
 try:
     from gi.repository import Gio, GLib
 
@@ -12,8 +17,12 @@ try:
                              Gio.DBusCallFlags.NONE, 1000, None)
 
     def esc(s):
+        # collapse newlines/tabs FIRST — an embedded newline in MPRIS
+        # metadata would corrupt the field-line grammar (and conky rows).
         # execpi re-parses output — a '$' in a track title is an injection
-        return str(s).replace("$", "$$")
+        # (fields mode has no such re-parse: keep titles verbatim)
+        s = " ".join(str(s).split())
+        return s if FIELDS else s.replace("$", "$$")
 
     names = call("org.freedesktop.DBus", "org.freedesktop.DBus", "ListNames",
                  path="/org/freedesktop/DBus").unpack()[0]
@@ -35,9 +44,15 @@ try:
             ic = "󰐊" if status == "Playing" else "󰏤"
             # org.mpris.MediaPlayer2.chromium.instance2 -> "chromium"
             app = esc(pl[len("org.mpris.MediaPlayer2."):].split(".")[0][:12])
-            out = (f"${{color1}}{ic}  ${{color2}}{title}${{color}}\n"
-                   f"${{color3}}{artist or '—'}${{color}}${{alignr}}"
-                   f"${{color3}}{app}${{color}}")
+            if FIELDS:
+                # fields values are single-line by grammar; titles are
+                # already truncated (no newlines survive esc/[:30])
+                out = (f"icon={ic}\ntitle={title}\n"
+                       f"artist={artist or '—'}\napp={app}")
+            else:
+                out = (f"${{color1}}{ic}  ${{color2}}{title}${{color}}\n"
+                       f"${{color3}}{artist or '—'}${{color}}${{alignr}}"
+                       f"${{color3}}{app}${{color}}")
             if status == "Playing":
                 break
         except Exception:

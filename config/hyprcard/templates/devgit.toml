@@ -1,0 +1,32 @@
+[template]
+name = "devgit"
+label = "Dev repos"
+icon = ""
+description = "Branch, dirty files, ahead/behind per repo"
+default_width = 300
+default_pos = "top_left"
+
+[params.repos]
+label = "Repo paths (comma separated)"
+type = "string"
+default = "~/hyprland-dots"
+
+[source]
+cmd = "~/.local/bin/widget-devgit.sh --fields --repos {repos}"
+interval = 60
+
+[[rows]]
+type = "title"
+text = "  DEV REPOS"
+
+[[rows]]
+type = "hr"
+
+[[rows]]
+type = "repeat"
+over = "repo"
+  [[rows.rows]]
+  type = "keyval"
+  key = "{repo.name}   {repo.branch}"
+  badge = "{repo.state}"
+  badge_slot = "{repo.slot}"

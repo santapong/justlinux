@@ -28,6 +28,9 @@ from textual.screen import ModalScreen
 from textual.widgets import (Button, ContentSwitcher, Footer, Label, ListItem,
                              ListView, Static, Switch)
 
+sys.path.insert(0, str(Path.home() / ".local/lib"))
+from hyprdesk.confwrite import conf_set as _conf_set   # atomic writer
+
 HOME = Path.home()
 CONF = HOME / ".config/hypr/hyprland.conf"
 HYPRPAPER = HOME / ".config/hypr/hyprpaper.conf"
@@ -92,8 +95,29 @@ def theme_list():
 
 
 def widget_list():
-    """Every conky conf in the widgets dir + the app dock — drop a new
-    .conf in ~/.config/conky/widgets/ and it appears here automatically."""
+    """Every card INSTANCE (widgets.conf inst_* keys, labels from the
+    hyprcard templates) + the app dock — drop a .toml in
+    ~/.config/hyprcard/templates/ and add instances via the picker.
+    Falls back to the conky .conf glob if no instances exist yet."""
+    try:
+        from hyprdesk import cardspec
+        from hyprdesk.theme import conf as _hconf
+        c = _hconf()
+        tmpls = cardspec.load_templates()
+        insts = cardspec.instances(c)
+        if insts:
+            out = []
+            for inst_id, tname in insts:
+                t = tmpls.get(tname)
+                label = t.label if isinstance(t, cardspec.Template) \
+                    else f"{tname} (broken template)"
+                if inst_id != tname:
+                    label = f"{label} · {inst_id}"
+                out.append((inst_id, label))
+            out.append(("apps", WIDGET_LABELS["apps"]))
+            return sorted(out, key=lambda kv: kv[1].lower())
+    except Exception:
+        pass
     names = sorted(p.stem for p in (HOME / ".config/conky/widgets").glob("*.conf")
                    if p.stem != "apps" and re.fullmatch(r"[A-Za-z][\w-]*", p.stem))
     names.append("apps")
@@ -118,20 +142,8 @@ def widgets_conf():
 
 
 def widgets_conf_set(key, val):
-    try:
-        lines = WIDGETS_CONF.read_text().splitlines()
-    except OSError:
-        lines = []
-    out, done = [], False
-    for line in lines:
-        if re.match(rf"^{key}\s*=", line):
-            out.append(f"{key}={val}")
-            done = True
-        else:
-            out.append(line)
-    if not done:
-        out.append(f"{key}={val}")
-    WIDGETS_CONF.write_text("\n".join(out) + "\n")
+    # atomic + lock-guarded — no longer races hypr-arrange / the card host
+    _conf_set({key: val})
 
 GAUGE_SLOTS = 12
 
@@ -500,8 +512,11 @@ class HyprSettings(App):
                                     id=f"sw_w_{key}")
                         with Horizontal(classes="row"):
                             yield Button("󰀻 Choose dock apps…", id="dock_pick")
-                        yield Static("Pick which apps sit on THIS workspace's "
-                                     "dock (each workspace has its own set).",
+                            yield Button("＋ Add widget…", id="wg_add")
+                        yield Static("Pick which apps sit on this monitor + "
+                                     "workspace's dock (each monitor has its "
+                                     "own sets; slide to the screen-bottom "
+                                     "edge to reveal a dock).",
                                      classes="hint")
                     with Card("Layout · where each widget sits"):
                         for key, label in widget_list():
@@ -705,23 +720,42 @@ class HyprSettings(App):
             return
         if bid.startswith("pos_"):
             key = bid.removeprefix("pos_")
+            # re-read before computing: hypr-arrange may have saved since
+            # this page was built — stepping from a stale cache would revert it
+            self.widgets = widgets_conf()
             cur = self.widgets.get(f"{key}_pos",
                                    DEFAULT_POS.get(key, ("top_left",))[0])
             nxt = POS_CYCLE[(POS_CYCLE.index(cur) + 1) % len(POS_CYCLE)] \
                 if cur in POS_CYCLE else POS_CYCLE[0]
-            widgets_conf_set(f"{key}_pos", nxt)
-            self.widgets = widgets_conf()
+            if f"{key}_col" in self.widgets:
+                # cycling the anchor un-grids the card — the saved cell
+                # would otherwise shadow the new pos into a silent no-op
+                _conf_set({f"{key}_pos": nxt},
+                          delete=[f"{key}_col", f"{key}_row"])
+                self.widgets = widgets_conf()
+            else:
+                self.widgets_layout_set(key, "pos", nxt)
             event.button.label = nxt.replace("_", " ")
             self.schedule_widget_restart()
             return
         if bid.startswith(("xm_", "xp_", "ym_", "yp_")):
             axis, sign = bid[0], (1 if bid[1] == "p" else -1)
             key = bid[3:]
-            ck = f"{key}_{axis}"
-            val = max(0, int(self.widgets.get(ck, "0") or 0) + sign * 12)
-            widgets_conf_set(ck, str(val))
-            self.widgets = widgets_conf()
-            self.query_one(f"#{axis}v_{key}", Static).update(str(val))
+            self.widgets = widgets_conf()      # fresh read (see pos_ above)
+            if f"{key}_col" in self.widgets:
+                # grid-placed card: legacy _x/_y is SHADOWED by the cell —
+                # nudge the cell instead of writing a silent no-op
+                gk = f"{key}_col" if axis == "x" else f"{key}_row"
+                val = max(0, int(self.widgets.get(gk, "0") or 0) + sign)
+                _conf_set({gk: str(val)})
+                self.widgets = widgets_conf()
+                self.query_one(f"#{axis}v_{key}", Static).update(
+                    f"cell {val}")
+            else:
+                ck = f"{key}_{axis}"
+                val = max(0, int(self.widgets.get(ck, "0") or 0) + sign * 12)
+                self.widgets_layout_set(key, axis, str(val))
+                self.query_one(f"#{axis}v_{key}", Static).update(str(val))
             self.schedule_widget_restart()
             return
         if bid.startswith(("inc_", "dec_")):
@@ -756,6 +790,8 @@ class HyprSettings(App):
             "p_suspend": lambda: launch("systemctl", "suspend"),
             "wg_restart": lambda: launch(
                 str(HOME / ".local/bin/desktop-widgets.sh"), "restart"),
+            "wg_add": lambda: launch(
+                str(HOME / ".local/bin/hypr-widgetpicker")),
             "dock_pick": lambda: launch(
                 str(HOME / ".local/bin/hypr-appdock"), "--picker"),
             "wg_arrange": lambda: launch(
@@ -775,6 +811,18 @@ class HyprSettings(App):
                              lambda ok, c=cmd: launch(*c) if ok else None)
 
     # ---------- actions ----------
+    def widgets_layout_set(self, key, suffix, val):
+        """Write a layout key; for 'apps' also write through to any existing
+        per-monitor dock_<MON>_* keys so the control keeps moving every dock
+        once monitors have their own placement (they shadow the legacy key)."""
+        changes = {f"{key}_{suffix}": val}
+        if key == "apps":
+            for k in widgets_conf():
+                if re.fullmatch(rf"dock_\w+_{suffix}", k):
+                    changes[k] = val
+        _conf_set(changes)
+        self.widgets = widgets_conf()
+
     def do_save(self):
         values, names = {}, {}
         for key in self.dirty:

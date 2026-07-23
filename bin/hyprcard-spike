@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+"""hyprcard-spike — GO/NO-GO probe for the ALT+drag bonus gesture.
+
+Question: with `bindm = ALT, mouse:272, movewindow` active in
+hyprland.conf, does an ALT+left-click ever REACH a bottom-layer card
+surface, and do pointer events carry the MOD1 modifier?
+
+Run it, then hold ALT and left-click the amber test card on your main
+monitor (also try a plain click for comparison). 60s window, Ctrl+C to
+stop early. Verdict is printed AND saved to
+$XDG_RUNTIME_DIR/hyprcard-spike.result:
+  GO      — ALT+click delivered (bonus quick-nudge gesture can ship)
+  PARTIAL — clicks arrive but never with ALT (compositor eats the combo)
+  NO-GO   — no click ever arrived
+"""
+import os
+import signal
+import sys
+import time
+from pathlib import Path
+
+import cairo
+import gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, Gdk, GLib
+
+sys.path.insert(0, str(Path.home() / ".local/lib"))
+from hyprdesk import colors
+from hyprdesk.layer import LayerWindow
+from hyprdesk.theme import rgb
+
+RESULT = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / \
+    "hyprcard-spike.result"
+state = {"plain": 0, "alt": 0}
+
+
+class Probe(LayerWindow):
+    def __init__(self):
+        super().__init__("spike", default_pos="top_middle", default_x=0,
+                         default_y=300, layer="bottom",
+                         namespace="hyprcard-spike")
+        self.pal = colors()
+        self.set_app_paintable(True)
+        self.area = Gtk.DrawingArea()
+        masks = (Gdk.EventMask.BUTTON_PRESS_MASK |
+                 Gdk.EventMask.BUTTON_RELEASE_MASK |
+                 Gdk.EventMask.POINTER_MOTION_MASK)
+        self.add_events(masks)
+        self.area.add_events(masks)
+        self.area.connect("draw", self.on_draw)
+        self.area.connect("button-press-event", self.on_press)
+        self.add(self.area)
+        self.set_size_request(340, 120)
+        self.show_all()
+        # full input region is the LayerWindow default — nothing to do
+
+    def on_press(self, _w, ev):
+        mods = []
+        for name, mask in (("ALT", Gdk.ModifierType.MOD1_MASK),
+                           ("SHIFT", Gdk.ModifierType.SHIFT_MASK),
+                           ("CTRL", Gdk.ModifierType.CONTROL_MASK)):
+            if ev.state & mask:
+                mods.append(name)
+        kind = "alt" if "ALT" in mods else "plain"
+        state[kind] += 1
+        print(f"click received: button={ev.button} "
+              f"mods={'+'.join(mods) or 'none'} state={int(ev.state):#x}",
+              flush=True)
+        self.area.queue_draw()
+        return True
+
+    def on_draw(self, _w, cr):
+        pal = self.pal
+        cr.set_source_rgba(*rgb(pal["accent2"]), 0.92)
+        r = 12
+        w, h = 340, 120
+        cr.new_path()
+        cr.arc(w - r, r, r, -1.5708, 0)
+        cr.arc(w - r, h - r, r, 0, 1.5708)
+        cr.arc(r, h - r, r, 1.5708, 3.1416)
+        cr.arc(r, r, r, 3.1416, 4.7124)
+        cr.close_path()
+        cr.fill()
+        cr.set_source_rgba(*rgb(pal["bg"]), 1)
+        cr.select_font_face("JetBrainsMono Nerd Font",
+                            cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+        cr.set_font_size(14)
+        cr.move_to(16, 34)
+        cr.show_text("ALT+DRAG SPIKE")
+        cr.set_font_size(11)
+        cr.move_to(16, 58)
+        cr.show_text("hold ALT and left-click me · then plain-click")
+        cr.move_to(16, 82)
+        cr.show_text(f"plain clicks: {state['plain']}   "
+                     f"ALT clicks: {state['alt']}")
+        return True
+
+
+def finish(*_):
+    if state["alt"]:
+        verdict = "GO"
+        msg = ("GO — ALT+click reaches layer surfaces WITH the modifier; "
+               "the quick-nudge bonus gesture can ship.")
+    elif state["plain"]:
+        verdict = "PARTIAL"
+        msg = ("PARTIAL — clicks arrive but never with ALT: the compositor "
+               "(bindm movewindow) consumes the combo. Edit mode stays the "
+               "only path; no ALT+SHIFT compromise gesture (per D2).")
+    else:
+        verdict = "NO-GO"
+        msg = "NO-GO — no click reached the card at all."
+    RESULT.write_text(f"{verdict}\n{msg}\n{time.strftime('%F %T')}\n")
+    print(f"\n{msg}\nresult saved: {RESULT}", flush=True)
+    Gtk.main_quit()
+    os._exit(0)
+
+
+def main():
+    GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGINT, finish)
+    GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGTERM, finish)
+    GLib.timeout_add_seconds(60, finish)
+    Probe()
+    print("probe up for 60s — hold ALT and click the amber card "
+          "(then plain-click it too)", flush=True)
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,722 @@
+#!/usr/bin/env python3
+"""hypr-cardhost — the desktop widget host: one process, N glass cards.
+
+Each enabled instance in widgets.conf (`inst_<id>=<template>`) becomes a
+CardWindow — a bottom-layer glass surface rendered from a TOML template
+(~/.config/hyprcard/templates/) by the shared hyprdesk/rows.py renderers.
+
+ · placement: `<id>_mon` + `<id>_col`/`<id>_row` (phone-style grid cells);
+   legacy `<id>_pos`/_x/_y keys still place a card that has no cell yet
+ · data: builtin sources (clock / stats / netgraph) or an async script
+   command per template — a failing source renders an error card and a
+   fetch older than 2× its interval gets a "(stale)" badge; a card can
+   never kill its siblings
+ · input: EMPTY input regions — cards never eat desktop clicks; moving
+   them is the grid edit mode's job (hypr-arrange)
+ · ctl:  hypr-cardhost --ctl ping|reload|reload-theme
+   (reload = re-read widgets.conf + templates; reload-theme = live recolor)
+"""
+import fcntl
+import json
+import os
+import shlex
+import signal
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import cairo
+import gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, Gdk, GLib
+
+sys.path.insert(0, str(Path.home() / ".local/lib"))
+from hyprdesk import conf, colors
+from hyprdesk.layer import LayerWindow, LLS, gptr, EDGE
+from hyprdesk import cardspec, grid, rows
+from hyprdesk.monitors import gdk_monitor_map
+
+CTL_SOCK = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "hyprcard.sock"
+SCRIPT_TIMEOUT_S = 15
+SERIES_LEN = 60
+
+
+def hypr_json(cmd):
+    try:
+        out = subprocess.run(["hyprctl", "-j", cmd], capture_output=True,
+                             text=True, timeout=2).stdout
+        return json.loads(out)
+    except Exception:
+        return []
+
+
+def default_monitor_name():
+    """Deterministic home for cards without a saved <id>_mon: the monitor
+    hosting workspace 1 (the main head), else the top-left-most monitor.
+    NEVER the focused one — Hyprland culls empty workspaces, and a
+    focus-dependent fallback teleports cards on every reload."""
+    for w in hypr_json("workspaces"):
+        if isinstance(w, dict) and w.get("id") == 1:
+            return w.get("monitor")
+    mons = [m for m in hypr_json("monitors") if isinstance(m, dict)]
+    if mons:
+        return min(mons, key=lambda m: (m.get("y", 0), m.get("x", 0)))\
+            .get("name")
+    return None
+
+
+def monitor_reserved():
+    """{connector: (l, t, r, b)} reserved insets (waybar etc.)."""
+    out = {}
+    for m in hypr_json("monitors"):
+        if isinstance(m, dict):
+            out[m.get("name")] = tuple(m.get("reserved") or (0, 0, 0, 0))
+    return out
+
+
+# ---------------- async command helper ----------------
+
+class AsyncCmd:
+    """Run argv without blocking the GTK loop; cb(text|None) when done."""
+
+    def __init__(self, argv, cb, timeout=SCRIPT_TIMEOUT_S):
+        self.cb, self.buf = cb, b""
+        self.watch = self.killer = None
+        try:
+            self.proc = subprocess.Popen(
+                argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                start_new_session=True)
+        except OSError:
+            GLib.idle_add(cb, None)
+            return
+        os.set_blocking(self.proc.stdout.fileno(), False)
+        self.watch = GLib.io_add_watch(
+            self.proc.stdout.fileno(), GLib.IO_IN | GLib.IO_HUP, self.on_io)
+        self.killer = GLib.timeout_add_seconds(timeout, self.on_timeout)
+
+    def on_io(self, fd, cond):
+        try:
+            chunk = self.proc.stdout.read()
+        except (OSError, ValueError):     # ValueError: fd closed under us
+            chunk = None
+        if chunk:
+            self.buf += chunk
+            return True
+        self.watch = None                 # returning False removes the watch
+        self.finish(self.buf.decode(errors="replace")
+                    if self.proc.poll() is None or self.proc.returncode == 0
+                    else None)
+        return False
+
+    def on_timeout(self):
+        self.killer = None
+        try:                              # child is a session leader — kill
+            os.killpg(self.proc.pid, signal.SIGKILL)   # its whole group
+        except (OSError, ProcessLookupError):
+            pass
+        self.finish(None)
+        return False
+
+    def finish(self, text):
+        # remove BOTH sources — a stale io watch on a closed fd busy-spins
+        # the main loop and later fires on an unrelated reused fd
+        if self.watch is not None:
+            GLib.source_remove(self.watch)
+            self.watch = None
+        if self.killer is not None:
+            GLib.source_remove(self.killer)
+            self.killer = None
+        if self.cb:
+            cb, self.cb = self.cb, None      # exactly once
+            try:
+                self.proc.stdout.close()
+            except OSError:
+                pass
+            # reap without blocking: child_watch fires when it truly exits
+            GLib.child_watch_add(self.proc.pid,
+                                 lambda pid, status: self.proc.poll())
+            cb(text)
+
+
+# ---------------- builtin sources ----------------
+
+def human_bytes(n, suffix="B"):
+    for unit in ("", "Ki", "Mi", "Gi", "Ti"):
+        if abs(n) < 1024:
+            return f"{n:.1f}{unit}{suffix}" if unit else f"{n:.0f}{suffix}"
+        n /= 1024
+    return f"{n:.1f}Pi{suffix}"
+
+
+def pick_iface():
+    """First interface with a default route, else first non-lo that's up."""
+    try:
+        for line in Path("/proc/net/route").read_text().splitlines()[1:]:
+            f = line.split()
+            if len(f) > 1 and f[1] == "00000000":
+                return f[0]
+    except OSError:
+        pass
+    try:
+        for p in sorted(Path("/sys/class/net").iterdir()):
+            if p.name != "lo" and (p / "operstate").read_text().strip() == "up":
+                return p.name
+    except OSError:
+        pass
+    return "wlan0"
+
+
+def net_counters(iface):
+    try:
+        for line in Path("/proc/net/dev").read_text().splitlines():
+            if line.strip().startswith(iface + ":"):
+                f = line.split()
+                return int(f[1]), int(f[9])      # rx, tx bytes
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def coretemp_path():
+    try:
+        for p in sorted(Path("/sys/class/hwmon").iterdir()):
+            try:
+                if (p / "name").read_text().strip() == "coretemp":
+                    return p / "temp1_input"
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return None
+
+
+class StatsSource:
+    """cpu / mem / disk / net / top fields from /proc + ps (async)."""
+
+    def __init__(self):
+        self.prev_cpu = None
+        self.prev_net = None
+        self.prev_t = None
+        self.temp = coretemp_path()
+        self.iface = pick_iface()
+        self.top = [("—", "0"), ("—", "0")]
+
+    def _cpu_pct(self):
+        try:
+            f = Path("/proc/stat").read_text().splitlines()[0].split()[1:]
+            vals = [int(x) for x in f[:8]]
+        except (OSError, ValueError, IndexError):
+            return 0.0
+        idle = vals[3] + vals[4]
+        total = sum(vals)
+        pct = 0.0
+        if self.prev_cpu:
+            dt = total - self.prev_cpu[0]
+            di = idle - self.prev_cpu[1]
+            pct = 100.0 * (dt - di) / dt if dt > 0 else 0.0
+        self.prev_cpu = (total, idle)
+        return pct
+
+    def fetch(self, done):
+        fields = {}
+        fields["cpu"] = f"{self._cpu_pct():.0f}"
+        try:
+            fields["cputemp"] = \
+                f"{int(self.temp.read_text()) // 1000}" if self.temp else "—"
+        except (OSError, ValueError):
+            fields["cputemp"] = "—"
+        try:
+            mi = {}
+            for line in Path("/proc/meminfo").read_text().splitlines():
+                k, v = line.split(":", 1)
+                mi[k] = int(v.split()[0]) * 1024
+            used = mi["MemTotal"] - mi.get("MemAvailable", 0)
+            fields["mem_pct"] = f"{100 * used / mi['MemTotal']:.0f}"
+            fields["mem_used"] = human_bytes(used, "")
+            fields["mem_max"] = human_bytes(mi["MemTotal"], "")
+        except (OSError, KeyError, ValueError):
+            fields.update(mem_pct="0", mem_used="—", mem_max="—")
+        try:
+            st = os.statvfs("/")
+            total = st.f_blocks * st.f_frsize
+            free = st.f_bavail * st.f_frsize
+            fields["disk_pct"] = f"{100 * (total - free) / total:.0f}"
+            fields["disk_used"] = human_bytes(total - free, "")
+            fields["disk_size"] = human_bytes(total, "")
+        except OSError:
+            fields.update(disk_pct="0", disk_used="—", disk_size="—")
+        now = time.monotonic()
+        cnt = net_counters(self.iface)
+        if cnt and self.prev_net and self.prev_t:
+            dt = max(0.001, now - self.prev_t)
+            fields["net_down"] = human_bytes((cnt[0] - self.prev_net[0]) / dt,
+                                             "B/s")
+            fields["net_up"] = human_bytes((cnt[1] - self.prev_net[1]) / dt,
+                                           "B/s")
+        else:
+            fields["net_down"] = fields["net_up"] = "—"
+        if cnt:
+            self.prev_net, self.prev_t = cnt, now
+        fields["iface"] = self.iface
+        fields["top1_name"], fields["top1_cpu"] = self.top[0]
+        fields["top2_name"], fields["top2_cpu"] = self.top[1]
+
+        def got_top(text):
+            if text:
+                procs = []
+                for line in text.splitlines()[1:]:
+                    # comm may contain spaces ("Web Content") — split from
+                    # the RIGHT, pcpu is always the last column
+                    parts = line.strip().rsplit(None, 1)
+                    if len(parts) == 2:
+                        procs.append((parts[0][:14], parts[1]))
+                    if len(procs) == 2:
+                        break
+                if procs:
+                    self.top = (procs + [("—", "0")])[:2]
+            done(fields)
+        AsyncCmd(["ps", "-eo", "comm,pcpu", "--sort=-pcpu"], got_top,
+                 timeout=4)
+
+
+class NetgraphSource:
+    """down/up rate fields + ring-buffer series for graph rows."""
+
+    def __init__(self):
+        self.iface = pick_iface()
+        self.prev = None
+        self.prev_t = None
+        self.series = {"down": [], "up": []}
+
+    def fetch(self, done):
+        now = time.monotonic()
+        cnt = net_counters(self.iface)
+        down = up = 0.0
+        if cnt and self.prev and self.prev_t:
+            dt = max(0.001, now - self.prev_t)
+            down = (cnt[0] - self.prev[0]) / dt
+            up = (cnt[1] - self.prev[1]) / dt
+        if cnt:
+            self.prev, self.prev_t = cnt, now
+        for key, v in (("down", down), ("up", up)):
+            s = self.series[key]
+            s.append(v)
+            del s[:-SERIES_LEN]
+        done({"iface": self.iface, "down": human_bytes(down, "B/s"),
+              "up": human_bytes(up, "B/s")})
+
+
+# ---------------- card window ----------------
+
+class CardWindow(LayerWindow):
+    def __init__(self, host, inst_id, template, gdk_mon, mon_name, c):
+        super().__init__(inst_id, default_pos=template.default_pos,
+                         default_x=24, default_y=44, layer="bottom",
+                         namespace=f"hypr-card-{inst_id}")
+        self.host, self.id, self.template = host, inst_id, template
+        self.mon_name = mon_name
+        self.geo = gdk_mon.get_geometry()
+        try:
+            self.scale = max(0.5, min(2.0, float(c.get(f"{inst_id}_scale", 1))))
+        except (TypeError, ValueError):
+            self.scale = 1.0
+        self.params = cardspec.instance_params(c, inst_id, template)
+        self.fields = dict(template.preview_fields)
+        self.series = {}
+        self.last_ok = None
+        self.error = None
+        self.content_w = int(template.width * self.scale)
+
+        # grid placement overrides legacy anchors when a cell is saved.
+        # The grid lives in WORKAREA coordinates — layer margins already
+        # are workarea-relative, so origins map straight onto margins,
+        # but cell sizes must come from the workarea, not the monitor
+        col, row = c.get(f"{inst_id}_col"), c.get(f"{inst_id}_row")
+        if col is not None and row is not None:
+            try:
+                res = host.reserved.get(mon_name, (0, 0, 0, 0))
+                work_w = self.geo.width - res[0] - res[2]
+                work_h = self.geo.height - res[1] - res[3]
+                x, y = grid.origin(work_w, work_h, int(col), int(row), c)
+                self.place_at(x, y)
+            except (TypeError, ValueError):
+                pass
+        self.set_target_monitor(gdk_mon)
+
+        self.area = Gtk.DrawingArea()
+        self.area.connect("draw", self.on_draw)
+        self.add(self.area)
+        self.resize_to_content()
+        self.connect("map-event", self.on_map)
+        self.show_all()
+
+    def place_at(self, x, y):
+        """Anchor top-left with pixel margins (grid mode)."""
+        p = gptr(self)
+        for edge in ("top", "left"):
+            LLS.gtk_layer_set_anchor(p, EDGE[edge], True)
+        for edge in ("right", "bottom"):
+            LLS.gtk_layer_set_anchor(p, EDGE[edge], False)
+        LLS.gtk_layer_set_margin(p, EDGE["left"], int(x))
+        LLS.gtk_layer_set_margin(p, EDGE["top"], int(y))
+
+    def ctx(self):
+        return {"pal": self.host.pal, "params": self.params,
+                "fields": self.fields, "series": self.series,
+                "width": self.content_w, "scale": self.scale}
+
+    def resize_to_content(self):
+        try:
+            h = rows.measure(self.template.rows, self.ctx())
+        except Exception:
+            h = 40
+        self.card_h = int(round(h)) + 2 * rows.PAD
+        self.card_w = self.content_w + 2 * rows.PAD
+        self.area.set_size_request(self.card_w, self.card_h)
+        self.set_size_request(self.card_w, self.card_h)
+
+    def on_map(self, *_):
+        # display-only surface: NEVER eat desktop clicks
+        gdk_win = self.get_window()
+        if gdk_win:
+            gdk_win.input_shape_combine_region(cairo.Region(), 0, 0)
+        return False
+
+    def on_draw(self, _w, cr):
+        try:
+            if self.error:
+                self.draw_error(cr)
+                return True
+            rows.render_card(cr, self.template.rows, self.ctx())
+            if self.is_stale():
+                cr.save()
+                rows._text(cr, self.ctx(), self.card_w - rows.PAD,
+                           self.card_h - 6, "(stale)", "sub", 9, right=True)
+                cr.restore()
+        except Exception as e:                    # a bad card never kills
+            self.error = str(e)                   # its siblings
+            self.draw_error(cr)
+        return True
+
+    def draw_error(self, cr):
+        ctx = self.ctx()
+        rows.draw_glass(cr, self.card_w, max(self.card_h, 64), self.host.pal)
+        rows._text(cr, ctx, rows.PAD, 26, f"⚠ {self.id}", "bad", 12,
+                   bold=True)
+        rows._text(cr, ctx, rows.PAD, 46, str(self.error)[:60], "sub", 10,
+                   max_w=self.content_w)
+
+    def is_stale(self):
+        if not self.template.source_cmd or self.last_ok is None:
+            return False
+        return time.monotonic() - self.last_ok > 2 * self.template.interval
+
+    # ----- data updates -----
+    def update_fields(self, fields):
+        if fields is None:
+            # preview/sample fields must NOT mask a failing source — no
+            # successful real fetch yet ⇒ error card, however pretty the
+            # sample data looks
+            if self.last_ok is None:
+                self.error = "source failed"
+        else:
+            self.error = None
+            if fields:
+                # REPLACE, don't merge: every source emits its complete
+                # field set per run, and merging leaves ghost repeat rows
+                # (ln.2, coin.1, …) rendering stale data as fresh forever
+                # when a group count shrinks
+                self.fields = dict(self.template.preview_fields)
+                self.fields.update(fields)
+            # empty dict = "just redraw" (none-ticker) — keep fields
+            self.last_ok = time.monotonic()
+        old_h = self.card_h
+        self.resize_to_content()
+        if self.card_h != old_h:
+            self.resize(self.card_w, self.card_h)
+        self.area.queue_draw()
+
+
+# ---------------- host ----------------
+
+class Host:
+    def __init__(self):
+        self.pal = colors()
+        self.cards = {}                   # inst_id -> CardWindow
+        self.tickers = []                 # GLib source ids
+        self.stats = StatsSource()
+        self.net = NetgraphSource()
+        self._respawn_src = None
+        self._clock_min = ""
+        self.spawn_all()
+        self.serve_ctl()
+        display = Gdk.Display.get_default()
+        display.connect("monitor-added", lambda *_: self.respawn_soon())
+        display.connect("monitor-removed", lambda *_: self.respawn_soon())
+        self.first_run_toast()
+
+    def first_run_toast(self):
+        """Hidden gestures get taught exactly once."""
+        marker = Path.home() / ".local/state/hyprcard/first-run-done"
+        if marker.exists():
+            return
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text("")
+            subprocess.Popen(
+                ["notify-send", "-a", "hyprcard", "Desktop widgets",
+                 "Press ALT+SHIFT+E to arrange — drag cards, they snap "
+                 "to a grid. Add more via Settings → Widgets."],
+                start_new_session=True)
+        except OSError:
+            pass
+
+    # ----- lifecycle -----
+    def spawn_all(self):
+        c = conf()
+        templates = cardspec.load_templates()
+        self.reserved = monitor_reserved()
+        monmap = gdk_monitor_map(Gdk.Display.get_default())
+        by_name = {name: (gdk, name) for gdk, name, _ in monmap}
+        primary = by_name.get(default_monitor_name()) \
+            or ((monmap[0][0], monmap[0][1]) if monmap else None)
+        for inst_id, tname in cardspec.instances(c):
+            if c.get(inst_id, "on") == "off" or inst_id in self.cards:
+                continue
+            t = templates.get(tname)
+            gdk_mon, mon_name = by_name.get(
+                c.get(f"{inst_id}_mon", ""),
+                (primary[0], primary[1]) if primary else (None, ""))
+            if gdk_mon is None:
+                continue
+            # per-card guard: ONE bad instance (broken template, mangled
+            # conf values) must never keep the rest of the fleet down
+            try:
+                if isinstance(t, cardspec.Template):
+                    card = CardWindow(self, inst_id, t, gdk_mon, mon_name, c)
+                else:                      # missing/broken template →
+                    card = self.error_card(  # error card, not silence
+                        inst_id, f"template {tname!r}: "
+                        f"{t if t else 'not found'}", gdk_mon, mon_name, c)
+            except Exception as e:
+                try:
+                    card = self.error_card(inst_id, str(e), gdk_mon,
+                                           mon_name, c)
+                except Exception:
+                    print(f"hypr-cardhost: skipping {inst_id}: {e}",
+                          file=sys.stderr, flush=True)
+                    continue
+            self.cards[inst_id] = card
+        self.start_tickers()
+
+    def error_card(self, inst_id, msg, gdk_mon, mon_name, c):
+        t = cardspec.Template(inst_id, {
+            "template": {"name": inst_id, "label": inst_id},
+            "rows": [{"type": "title", "text": f"⚠ {inst_id}"},
+                     {"type": "text", "text": str(msg)[:70], "ink": "sub"}],
+        })
+        return CardWindow(self, inst_id, t, gdk_mon, mon_name, c)
+
+    def teardown(self):
+        for src in self.tickers:
+            GLib.source_remove(src)
+        self.tickers = []
+        for card in self.cards.values():
+            card.destroy()
+        self.cards = {}
+
+    def respawn_soon(self):
+        if self._respawn_src is None:
+            self._respawn_src = GLib.timeout_add(500, self._respawn_once)
+
+    def _respawn_once(self):
+        self._respawn_src = None
+        self.teardown()
+        self.spawn_all()
+        return False
+
+    # ----- data tickers (one per source kind, feeding all its cards) -----
+    def cards_by_source(self):
+        srcs = {"clock": [], "stats": [], "netgraph": [], "cmd": [],
+                "none": []}
+        for card in self.cards.values():
+            t = card.template
+            if t.source_cmd:
+                srcs["cmd"].append(card)
+            else:
+                srcs.get(t.source_builtin, srcs["none"]).append(card)
+        return srcs
+
+    def start_tickers(self):
+        srcs = self.cards_by_source()
+        if srcs["clock"] or any(
+                r.get("type") == "clock" for c in self.cards.values()
+                for r in c.template.rows):
+            self.tickers.append(GLib.timeout_add_seconds(1, self.tick_clock))
+        if srcs["stats"]:
+            self.tick_stats()
+            self.tickers.append(GLib.timeout_add_seconds(
+                min(c.template.interval for c in srcs["stats"]),
+                self.tick_stats))
+        if srcs["netgraph"]:
+            self.tick_net()
+            self.tickers.append(GLib.timeout_add_seconds(
+                min(c.template.interval for c in srcs["netgraph"]),
+                self.tick_net))
+        for card in srcs["cmd"]:
+            self.tick_cmd(card)
+            self.tickers.append(GLib.timeout_add_seconds(
+                card.template.interval,
+                lambda c=card: self.tick_cmd(c) or True))
+        for card in srcs["none"]:
+            # notesfile re-reads its file; calgrid must roll over at
+            # month boundaries — both need a periodic redraw
+            if any(r.get("type") in ("notesfile", "calgrid")
+                   for r in card.template.rows):
+                self.tickers.append(GLib.timeout_add_seconds(
+                    card.template.interval,
+                    lambda c=card: c.update_fields({}) or True))
+
+    def tick_clock(self):
+        cur = time.strftime("%H:%M")
+        if cur != self._clock_min:
+            self._clock_min = cur
+            for card in self.cards.values():
+                if any(r.get("type") == "clock" for r in card.template.rows):
+                    card.area.queue_draw()
+            # midnight: today's pill (and month grid on the 1st) must roll
+            # over NOW, not at the hourly none-ticker's arbitrary phase
+            today = time.strftime("%Y-%m-%d")
+            if getattr(self, "_date", None) not in (None, today):
+                for card in self.cards.values():
+                    if any(r.get("type") == "calgrid"
+                           for r in card.template.rows):
+                        card.update_fields({})
+            self._date = today
+        return True
+
+    def tick_stats(self):
+        targets = self.cards_by_source()["stats"]
+
+        def done(fields):
+            for card in targets:
+                card.update_fields(dict(fields))
+        if targets:
+            self.stats.fetch(done)
+        return True
+
+    def tick_net(self):
+        targets = self.cards_by_source()["netgraph"]
+
+        def done(fields):
+            for card in targets:
+                card.series = self.net.series
+                card.update_fields(dict(fields))
+        if targets:
+            self.net.fetch(done)
+        return True
+
+    def tick_cmd(self, card):
+        cmd = cardspec.subst(card.template.source_cmd, card.params)
+        try:
+            argv = shlex.split(os.path.expanduser(cmd))
+        except ValueError:
+            card.update_fields(None)
+            return
+        # empty output counts as FAILURE, not success-with-no-data —
+        # otherwise a broken param (bad coin id) renders a blank card
+        # that looks permanently fresh
+        AsyncCmd(argv, lambda text: card.update_fields(
+            (cardspec.parse_fields(text) or None)
+            if text is not None else None))
+
+    # ----- ctl socket (same hardened pattern as the dock) -----
+    def serve_ctl(self):
+        try:
+            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            probe.settimeout(0.5)
+            probe.connect(str(CTL_SOCK))
+            probe.close()
+            print("hypr-cardhost: another instance owns the ctl socket",
+                  file=sys.stderr, flush=True)
+            return
+        except OSError:
+            pass
+        try:
+            CTL_SOCK.unlink()
+        except OSError:
+            pass
+        try:
+            self.ctl = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.ctl.bind(str(CTL_SOCK))
+            self.ctl.listen(4)
+            self.ctl.setblocking(False)
+            GLib.io_add_watch(self.ctl.fileno(), GLib.IO_IN, self.on_ctl)
+        except OSError:
+            pass
+
+    def on_ctl(self, _fd, _cond):
+        try:
+            client, _ = self.ctl.accept()
+        except OSError:
+            return True
+        client.setblocking(False)
+        GLib.io_add_watch(client.fileno(), GLib.IO_IN | GLib.IO_HUP,
+                          self.on_ctl_client, client)
+        return True
+
+    def on_ctl_client(self, _fd, _cond, client):
+        try:
+            cmd = client.recv(256).decode(errors="replace").strip()
+            if cmd == "reload":
+                self.respawn_soon()
+            elif cmd == "reload-theme":
+                self.pal = colors()
+                for card in self.cards.values():
+                    card.area.queue_draw()
+            client.sendall(b"ok\n")
+        except OSError:
+            pass
+        finally:
+            try:
+                client.close()
+            except OSError:
+                pass
+        return False
+
+
+def ctl_send(cmd):
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(2)
+        s.connect(str(CTL_SOCK))
+        s.sendall(cmd.encode())
+        reply = s.recv(64).decode(errors="replace").strip()
+        s.close()
+        print(reply or "no reply")
+        return 0 if reply == "ok" else 1
+    except OSError as e:
+        print(f"cardhost not reachable: {e}", file=sys.stderr)
+        return 1
+
+
+def main():
+    if "--ctl" in sys.argv:
+        i = sys.argv.index("--ctl")
+        sys.exit(ctl_send(sys.argv[i + 1] if len(sys.argv) > i + 1
+                          else "ping"))
+    # GLib-integrated signal handling; exit directly — Gtk.main_quit()
+    # from a unix-signal source does not stop Gtk.main() (verified), and
+    # the host has no state to flush (conf writes happen at edit time)
+    def sig_quit(*_):
+        os._exit(130)
+    GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGTERM, sig_quit)
+    GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGINT, sig_quit)
+    Host()
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

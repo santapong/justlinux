@@ -1,0 +1,14 @@
+[template]
+name = "calendar"
+label = "Calendar"
+icon = "󰃭"
+description = "Month grid with today highlighted"
+default_width = 260
+default_pos = "top_left"
+
+[source]
+builtin = "none"
+interval = 3600
+
+[[rows]]
+type = "calgrid"

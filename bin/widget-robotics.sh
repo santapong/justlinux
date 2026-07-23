@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
 """Robotics / embedded bench widget.
 Serial boards with FREE/holder badges, docker health-first radiator, and
-SocketCAN controller states. No extra packages — sysfs + CLI only."""
-import json, os, subprocess, time
+SocketCAN controller states. No extra packages — sysfs + CLI only.
+
+Default: conky markup (legacy twin). --fields: generic line rows
+(ln.N.key / ln.N.val / ln.N.slot) for hypr-cardhost. The bench state is
+computed ONCE as tuples so the two output modes can never drift."""
+import json, os, subprocess, sys, time
 from pathlib import Path
 
-CACHE = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "widget-robotics.cache"
-if CACHE.exists() and time.time() - CACHE.stat().st_mtime < 10:
+FIELDS = "--fields" in sys.argv
+RUN = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp"))
+CACHE = RUN / ("widget-robotics.fields" if FIELDS
+               else "widget-robotics.cache")
+# fields TTL < host interval (10) — equal TTL halves the refresh rate
+_TTL = 8 if FIELDS else 10
+if CACHE.exists() and time.time() - CACHE.stat().st_mtime < _TTL:
     print(CACHE.read_text(), end=""); raise SystemExit
-
-
-def esc(s):
-    return str(s).replace("$", "$$")
 
 
 def port_holder(dev):
@@ -38,7 +43,10 @@ def port_holder(dev):
     return None
 
 
-rows = ["${color1}󰚩  ROBOTICS BENCH${color}", "${color3}${hr}${color}"]
+lines = []          # (key, val, slot[, markup_key]) — the optional 4th
+                    # element preserves the twin's exact per-segment inks
+                    # in markup mode (rollback parity); fields mode
+                    # ignores it
 
 # --- serial boards ---
 byid = Path("/dev/serial/by-id")
@@ -46,39 +54,42 @@ ports = sorted(byid.iterdir()) if byid.is_dir() else []
 if ports:
     for p in ports[:4]:
         dev = os.path.realpath(p)
-        pretty = esc(p.name.replace("usb-", "").split("-if")[0][:22])
+        pretty = p.name.replace("usb-", "").split("-if")[0][:22]
         holder = port_holder(dev)
-        badge = (f"${{color5}}◉ {esc(holder)}${{color}}" if holder
-                 else "${color4}○ free${color}")
-        rows.append(f"${{color2}}{Path(dev).name}${{color}} "
-                    f"${{color3}}{pretty}${{color}}${{alignr}}{badge}")
+        mk = (f"${{color2}}{Path(dev).name}${{color}} "
+              f"${{color3}}{pretty}${{color}}")     # twin: fg dev + sub desc
+        if holder:
+            lines.append((f"{Path(dev).name} · {pretty}",
+                          f"◉ {holder}", "bad", mk))
+        else:
+            lines.append((f"{Path(dev).name} · {pretty}", "○ free", "good",
+                          mk))
 else:
-    rows.append("${color3}󰌘 no serial boards plugged in${color}")
+    lines.append(("󰌘 no serial boards plugged in", "", "sub"))
 
 # --- docker: exceptions first, healthy collapsed ---
 try:
     r = subprocess.run(["docker", "ps", "-a", "--format",
                         "{{.Names}}\t{{.State}}\t{{.Status}}"],
                        capture_output=True, text=True, timeout=4)
-    lines = [l.split("\t") for l in r.stdout.splitlines() if l.strip()] \
+    dockers = [l.split("\t") for l in r.stdout.splitlines() if l.strip()] \
         if r.returncode == 0 else None
 except Exception:
-    lines = None
-if lines is None:
-    rows.append("${color3}󰡨 docker daemon stopped${color}")
+    dockers = None
+if dockers is None:
+    lines.append(("󰡨 docker daemon stopped", "", "sub"))
 else:
-    bad = [l for l in lines if "unhealthy" in l[2].lower()
+    bad = [l for l in dockers if "unhealthy" in l[2].lower()
            or l[1].lower() == "restarting"]
-    up = [l for l in lines if l[1].lower() == "running" and l not in bad]
+    up = [l for l in dockers if l[1].lower() == "running" and l not in bad]
     for name, _state, status in bad[:3]:
-        rows.append(f"${{color5}}󰡨 {esc(name)[:16]}${{color}}${{alignr}}"
-                    f"${{color5}}{esc(status)[:14]}${{color}}")
+        lines.append((f"󰡨 {name[:16]}", status[:14], "bad",
+                      f"${{color5}}󰡨 {name[:16]}${{color}}"))  # twin: bad key
     if up or not bad:
-        exited = len(lines) - len(up) - len(bad)
+        exited = len(dockers) - len(up) - len(bad)
         summary = f"{len(up)} up" + (f" · {exited} stopped" if exited else "")
-        tone = "color4" if up else "color3"
-        rows.append(f"${{color3}}󰡨 docker${{color}}${{alignr}}"
-                    f"${{{tone}}}{summary or 'idle'}${{color}}")
+        lines.append(("󰡨 docker", summary or "idle",
+                      "good" if up else "sub"))
 
 # --- CAN controller states ---
 try:
@@ -95,12 +106,37 @@ for c in cans[:3]:
     info = (c.get("linkinfo") or {}).get("info_data") or {}
     state = info.get("state", c.get("operstate", "?"))
     bitrate = (info.get("bittiming") or {}).get("bitrate")
-    tone = {"ERROR-ACTIVE": "color4", "ERROR-PASSIVE": "color1",
-            "BUS-OFF": "color5"}.get(state, "color3")
+    slot = {"ERROR-ACTIVE": "good", "ERROR-PASSIVE": "accent2",
+            "BUS-OFF": "bad"}.get(state, "sub")
     extra = f" {bitrate // 1000}k" if bitrate else ""
-    rows.append(f"${{color3}}󰇺 {esc(c.get('ifname', 'can?'))}{extra}"
-                f"${{color}}${{alignr}}${{{tone}}}{esc(state)}${{color}}")
+    lines.append((f"󰇺 {c.get('ifname', 'can?')}{extra}", str(state), slot))
 
-text = "\n".join(rows)
+# --- emit ---
+if FIELDS:
+    out = []
+    for i, ln in enumerate(lines):
+        key, val, slot = ln[0], ln[1], ln[2]
+        out += [f"ln.{i}.key={key}", f"ln.{i}.val={val}",
+                f"ln.{i}.slot={slot}"]
+    text = "\n".join(out)
+else:
+    COLOR = {"good": "color4", "bad": "color5", "sub": "color3",
+             "accent2": "color1"}
+
+    def esc(s):
+        return str(s).replace("$", "$$")
+
+    rows = ["${color1}󰚩  ROBOTICS BENCH${color}", "${color3}${hr}${color}"]
+    for ln in lines:
+        key, val, slot = ln[0], ln[1], ln[2]
+        mk = ln[3] if len(ln) > 3 else None
+        c = COLOR[slot]
+        left = mk if mk else f"${{color3}}{esc(key)}${{color}}"
+        if val:
+            rows.append(f"{left}${{alignr}}${{{c}}}{esc(val)}${{color}}")
+        else:
+            rows.append(f"${{{c}}}{esc(key)}${{color}}" if not mk else left)
+    text = "\n".join(rows)
+
 CACHE.write_text(text)
 print(text)

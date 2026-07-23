@@ -1,9 +1,58 @@
 #!/usr/bin/env python3
-"""Weather (wttr.in, no API key) as conky markup. Cache 15 min."""
-import json, os, time, urllib.request
+"""Weather (wttr.in, no API key). Default: conky markup (legacy twin).
+--fields: key=value lines for hypr-cardhost. Cache 15 min either way;
+in fields mode a fetch failure exits non-zero so the host handles the
+error/stale state itself."""
+import json, os, sys, time, urllib.request
 from pathlib import Path
 
-CACHE = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "widget-weather.cache"
+RUN = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp"))
+CACHE = RUN / "widget-weather.cache"
+FIELDS = "--fields" in sys.argv
+
+if FIELDS:
+    FCACHE = RUN / "widget-weather.fields"
+    if FCACHE.exists() and time.time() - FCACHE.stat().st_mtime < 900:
+        print(FCACHE.read_text(), end=""); raise SystemExit
+    ICONS = {"Sunny": "󰖙", "Clear": "󰖔", "Partly cloudy": "󰖕",
+             "Cloudy": "󰖐", "Overcast": "󰖐", "Mist": "󰖑", "Fog": "󰖑",
+             "Rain": "󰖗", "Light rain": "󰖗", "Heavy rain": "󰖖",
+             "Thunder": "󰖓", "Snow": "󰖘"}
+
+    def _icon(desc):
+        for k, v in ICONS.items():
+            if k.lower() in desc.lower():
+                return v
+        return "󰖕"
+    try:
+        with urllib.request.urlopen("https://wttr.in/?format=j1",
+                                    timeout=6) as r:
+            d = json.loads(r.read())
+        cur = d["current_condition"][0]
+        desc = str(cur["weatherDesc"][0]["value"])[:22]
+        lines = [
+            f"icon={_icon(desc)}",
+            f"area={str(d['nearest_area'][0]['areaName'][0]['value'])[:16]}",
+            f"temp={cur['temp_C']}",
+            f"desc={desc}",
+            f"feels={cur['FeelsLikeC']}",
+        ]
+        for i, (name, day) in enumerate(zip(("today", "tomorrow",
+                                             "day after"),
+                                            d["weather"][:3])):
+            lines += [f"day.{i}.name={name}",
+                      f"day.{i}.min={day['mintempC']}",
+                      f"day.{i}.max={day['maxtempC']}",
+                      f"day.{i}.rain={day['hourly'][4]['chanceofrain']}"]
+        text = "\n".join(lines)
+        FCACHE.write_text(text)
+        print(text)
+        raise SystemExit
+    except SystemExit:
+        raise
+    except Exception:
+        sys.exit(1)          # host keeps last fields + shows (stale)
+
 if CACHE.exists() and time.time() - CACHE.stat().st_mtime < 900:
     print(CACHE.read_text(), end=""); raise SystemExit
 

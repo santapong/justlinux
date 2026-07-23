@@ -7,10 +7,21 @@ from pathlib import Path
 sys.path.insert(0, str(Path.home() / ".local/lib"))
 from hyprdesk import conf_get
 
-USER = conf_get("github_user", "santapong")
+FIELDS = "--fields" in sys.argv
+if "--user" in sys.argv:
+    _i = sys.argv.index("--user")
+    USER = sys.argv[_i + 1] if len(sys.argv) > _i + 1 else "santapong"
+else:
+    USER = conf_get("github_user", "santapong")
 WEEKS = 16
-CACHE = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "widget-github.cache"
-if CACHE.exists() and time.time() - CACHE.stat().st_mtime < 3600:
+import hashlib
+_tag = hashlib.md5(USER.encode()).hexdigest()[:8]
+RUN = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp"))
+CACHE = RUN / (f"widget-github-{_tag}.fields" if FIELDS
+               else "widget-github.cache")
+# fields TTL < host interval (3600) — equal TTL halves the refresh rate
+_TTL = 3300 if FIELDS else 3600
+if CACHE.exists() and time.time() - CACHE.stat().st_mtime < _TTL:
     print(CACHE.read_text(), end=""); raise SystemExit
 
 SHADE = {0: "${color3}·${color}", 1: "${color3}▪${color}",
@@ -33,6 +44,15 @@ try:
     m = re.search(r'([\d,]+)\s+contributions', html)
     count = m.group(1) if m else "?"
     days = cells[-WEEKS * 7:]
+    if FIELDS:
+        text = "\n".join([
+            f"user={USER}",
+            f"count={count}",
+            "levels=" + ",".join(str(min(4, int(lv))) for _d, lv in days),
+        ])
+        CACHE.write_text(text)
+        print(text)
+        raise SystemExit
     disp = USER if len(USER) <= 16 else USER[:15] + "…"
     rows = [f"${{color1}}  {disp}${{color}}${{alignr}}"
             f"${{color2}}{count} this year${{color}}",
@@ -43,7 +63,11 @@ try:
         rows.append(line.rstrip())
     text = "\n".join(rows)
     CACHE.write_text(text)
+except SystemExit:
+    raise
 except Exception:
+    if FIELDS:
+        sys.exit(1)          # host keeps last fields + shows (stale)
     text = (CACHE.read_text() + "\n${color3}(stale)${color}") \
         if CACHE.exists() else "${color3} github unreachable${color}"
 print(text)

@@ -1,0 +1,27 @@
+[template]
+name = "robotics"
+label = "Robotics bench"
+icon = "󰚩"
+description = "Serial boards, docker health, CAN states"
+default_width = 300
+default_pos = "top_middle"
+
+[source]
+cmd = "~/.local/bin/widget-robotics.sh --fields"
+interval = 10
+
+[[rows]]
+type = "title"
+text = "󰚩  ROBOTICS BENCH"
+
+[[rows]]
+type = "hr"
+
+[[rows]]
+type = "repeat"
+over = "ln"
+  [[rows.rows]]
+  type = "keyval"
+  key = "{ln.key}"
+  badge = "{ln.val}"
+  badge_slot = "{ln.slot}"

@@ -8,8 +8,10 @@ import json, os, time, urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+import sys
+FIELDS = "--fields" in sys.argv
 RUN = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp"))
-CACHE = RUN / "claude-usage.cache"
+CACHE = RUN / ("claude-usage.fields" if FIELDS else "claude-usage.cache")
 STALE = RUN / "claude-usage.last"          # survives API failures
 TTL = 300
 BAR = 18
@@ -51,6 +53,27 @@ def fetch():
 
 try:
     data = fetch()
+    if FIELDS:
+        lines, n = [], 0
+        for lim in data.get("limits", []):
+            pct = lim.get("percent") or 0
+            reset = when(lim.get("resets_at"), lim.get("kind"))
+            if lim.get("kind") == "session":
+                label = "Session (5 h)"
+            elif lim.get("kind") == "weekly_all":
+                label = "Weekly · all"
+            elif lim.get("kind") == "weekly_scoped":
+                model = ((lim.get("scope") or {}).get("model") or {})
+                label = f"Weekly · {(model.get('display_name') or 'model')[:14]}"
+            else:
+                continue
+            lines += [f"lim.{n}.label={label}", f"lim.{n}.pct={pct:.0f}",
+                      f"lim.{n}.reset={reset}"]
+            n += 1
+        text = "\n".join(lines)
+        CACHE.write_text(text)
+        print(text)
+        raise SystemExit
     rows = []
     for lim in data.get("limits", []):
         pct = lim.get("percent") or 0
@@ -71,7 +94,11 @@ try:
         [f"${{color1}}󱚝  CLAUDE PLAN USAGE${{color}}",
          "${color3}${hr}${color}"] + rows)
     STALE.write_text(text)
+except SystemExit:
+    raise
 except Exception:
+    if FIELDS:
+        sys.exit(1)          # host keeps last fields + shows (stale)
     if STALE.exists():
         text = STALE.read_text() + "\n${color3}(offline — last known)${color}"
     else:

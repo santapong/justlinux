@@ -1,0 +1,47 @@
+[template]
+name = "stats"
+label = "System stats"
+icon = ""
+description = "CPU, RAM, disk, network, top processes"
+default_width = 300
+default_pos = "middle_right"
+
+[source]
+builtin = "stats"
+interval = 5
+
+[[rows]]
+type = "bar"
+label = " CPU"
+value = "{cpu}"
+text = "{cpu}% · {cputemp}°C"
+
+[[rows]]
+type = "bar"
+label = " RAM"
+value = "{mem_pct}"
+text = "{mem_used} / {mem_max}"
+
+[[rows]]
+type = "bar"
+label = " DISK /"
+value = "{disk_pct}"
+text = "{disk_used} / {disk_size}"
+
+[[rows]]
+type = "keyval"
+key = "󰖩 {iface}"
+value = "{net_down} ↓  {net_up} ↑"
+
+[[rows]]
+type = "hr"
+
+[[rows]]
+type = "keyval"
+key = "top · {top1_name}"
+value = "{top1_cpu}%"
+
+[[rows]]
+type = "keyval"
+key = "      {top2_name}"
+value = "{top2_cpu}%"
