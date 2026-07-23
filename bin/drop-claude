@@ -1,0 +1,9 @@
+#!/bin/sh
+# Dropdown Claude (ALT+SHIFT+U): a kitty running the Claude Code CLI on the
+# special:claude workspace — the AI sibling of drop-term. Appears over
+# everything, hides when toggled, keeps its session between toggles.
+if ! hyprctl clients -j | grep -q '"dropclaude"'; then
+    hyprctl dispatch exec "[workspace special:claude silent] kitty --class dropclaude -e claude" >/dev/null
+    sleep 0.4
+fi
+hyprctl dispatch togglespecialworkspace claude >/dev/null
