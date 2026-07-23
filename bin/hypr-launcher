@@ -439,6 +439,153 @@ def focus_window(entry):
         hyprctl("dispatch", "focuswindow", addr)
 
 
+# ---------------- claude sessions ----------------
+CLAUDE_PROJECTS = Path.home() / ".claude/projects"
+
+
+def _claude_session_meta(path):
+    """(cwd, preview) read from the transcript's own lines — the encoded
+    project dir name is ambiguous, the jsonl `cwd` field is not."""
+    cwd, preview = "", ""
+    try:
+        with open(path, errors="replace") as f:
+            for i, line in enumerate(f):
+                if i > 40 or (cwd and preview):
+                    break
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                if not cwd and isinstance(d.get("cwd"), str):
+                    cwd = d["cwd"]
+                if not preview and d.get("type") == "user":
+                    m = (d.get("message") or {}).get("content", "")
+                    if isinstance(m, list):
+                        m = " ".join(p.get("text", "") for p in m
+                                     if isinstance(p, dict))
+                    m = " ".join(str(m).split())
+                    if m and not m.startswith("<"):
+                        preview = m[:48]
+    except OSError:
+        pass
+    return cwd, preview
+
+
+def _claude_procs():
+    """[(pid, cwd, interactive)] for live claude CLI processes; a pts
+    stdin means an interactive terminal session, else a background job."""
+    out = []
+    try:
+        pids = subprocess.run(["pgrep", "-x", "claude"], capture_output=True,
+                              text=True).stdout.split()
+    except Exception:
+        pids = []
+    for p in pids:
+        try:
+            cwd = os.readlink(f"/proc/{p}/cwd")
+            tty = os.readlink(f"/proc/{p}/fd/0")
+            out.append((int(p), cwd, tty.startswith("/dev/pts")))
+        except OSError:
+            continue
+    return out
+
+
+def _window_of_pid(pid, clients):
+    """Climb the parent chain until we hit a Hyprland client (the
+    terminal window hosting this process)."""
+    by_pid = {c.get("pid"): c for c in clients if isinstance(c, dict)}
+    for _ in range(8):
+        if pid in by_pid:
+            return by_pid[pid].get("address", "")
+        try:
+            with open(f"/proc/{pid}/stat") as f:
+                pid = int(f.read().split()[3])
+        except (OSError, ValueError, IndexError):
+            return ""
+        if pid <= 1:
+            return ""
+    return ""
+
+
+def _ago(ts):
+    d = max(0, int(time.time() - ts))
+    if d < 3600:
+        return f"{d // 60}m ago"
+    if d < 86400:
+        return f"{d // 3600}h ago"
+    return f"{d // 86400}d ago"
+
+
+def claude_entries():
+    """Running claude sessions (focusable), background jobs (read-only),
+    then the 25 most recent resumable transcripts."""
+    if DRY:
+        return [{"label": "~/hyprland-dots", "icon": "󰚩", "kind": "run",
+                 "addr": "0xfake", "cwd": "~",
+                 "detail": "🟢 running — Enter focuses its terminal"},
+                {"label": "~/RoboLLM", "icon": "󰚩", "kind": "past",
+                 "sid": "fake", "cwd": "~",
+                 "detail": "2h ago — hand_follow grip detection"}]
+    try:
+        clients = json.loads(subprocess.run(["hyprctl", "clients", "-j"],
+                             capture_output=True, text=True).stdout)
+    except Exception:
+        clients = []
+    home = str(Path.home())
+
+    def nice(p):
+        return (p or "?").replace(home, "~") or "~"
+
+    rows = []
+    for pid, cwd, interactive in _claude_procs():
+        if interactive:
+            rows.append({"label": nice(cwd), "icon": "󰚩", "kind": "run",
+                         "addr": _window_of_pid(pid, clients), "cwd": cwd,
+                         "detail": "🟢 running — Enter focuses its terminal"})
+        else:
+            rows.append({"label": nice(cwd), "icon": "󰚩", "kind": "bg",
+                         "cwd": cwd,
+                         "detail": "󰑮 background job — view on claude.ai"})
+    files = []
+    try:
+        for proj in CLAUDE_PROJECTS.iterdir():
+            # workflow/subagent transcripts are not resumable conversations
+            if not proj.is_dir() or "-subagents-" in proj.name:
+                continue
+            for f in proj.glob("*.jsonl"):
+                try:
+                    files.append((f.stat().st_mtime, f))
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    for mtime, f in sorted(files, key=lambda t: t[0], reverse=True)[:25]:
+        cwd, preview = _claude_session_meta(f)
+        if not preview:
+            continue                     # empty/aborted session: skip
+        rows.append({"label": nice(cwd), "icon": "󰚩", "kind": "past",
+                     "sid": f.stem, "cwd": cwd or home,
+                     "detail": f"{_ago(mtime)} — {preview}"})
+    return rows
+
+
+def open_claude_entry(entry):
+    kind = entry.get("kind")
+    if kind == "run" and entry.get("addr"):
+        hyprctl("dispatch", "focuswindow", f"address:{entry['addr']}")
+    elif kind == "past":
+        run_detached("kitty", "--class", "hyprclaude", "-d", entry["cwd"],
+                     "-e", "claude", "--resume", entry["sid"])
+    else:
+        subprocess.run(["notify-send", "Claude", "Background job — it has no "
+                        "terminal here; watch it on claude.ai / the desktop app"])
+
+
+def new_claude_in(entry):
+    cwd = entry.get("cwd") or str(Path.home())
+    run_detached("kitty", "--class", "hyprclaude", "-d", cwd, "-e", "claude")
+
+
 # ---------------- wallpaper ----------------
 def current_wallpapers():
     """[(monitor_or_empty, full_path), ...] from hyprpaper.conf"""
@@ -651,6 +798,8 @@ class HyprLauncher(App):
         Binding("up", "move_row(-1)", "Up", show=False),
         Binding("left", "move(-1)", "Left", show=False),
         Binding("right", "move(1)", "Right", show=False),
+        # letters go to the filter box — only chords are safe here
+        Binding("ctrl+n", "new_session", "New session", show=False),
     ]
     CSS = f"""
     Screen {{ background: ansi_default; color: {C['text']}; }}
@@ -732,7 +881,8 @@ class HyprLauncher(App):
         titles = {"apps": ("󰀻", "Apps — double-click or Enter to open"),
                   "windows": ("󰖯", "Windows — click or type to filter"),
                   "wallpaper": ("󰸉", "Wallpaper"),
-                  "menu": ("󰍜", "Tools — double-click or Enter to run")}
+                  "menu": ("󰍜", "Tools — double-click or Enter to run"),
+                  "claude": ("󰚩", "Claude sessions — 🟢 running · 🕒 resume")}
         icon, title = titles[self.mode]
         yield Static(f"[bold {C['accent']}]{icon}  {title}[/]", id="hdr")
         if self.mode in ("apps", "menu"):
@@ -741,9 +891,11 @@ class HyprLauncher(App):
             with VerticalScroll(id="scroll") as vs:
                 vs.can_focus = False  # keep focus on the filter; arrows drive the grid
                 yield Vertical(id="gridwrap")
-        elif self.mode == "windows":
-            yield FilterInput(placeholder="filter…  (↑↓ move · Enter focus · Esc close)",
-                              id="filter")
+        elif self.mode in ("windows", "claude"):
+            ph = ("filter…  (↑↓ move · Enter focus · Esc close)"
+                  if self.mode == "windows" else
+                  "filter…  (Enter open/resume · Ctrl+N new here · Esc close)")
+            yield FilterInput(placeholder=ph, id="filter")
             yield ListView(id="results")
         else:
             yield Static("", id="wp-where", classes="hint")
@@ -762,8 +914,9 @@ class HyprLauncher(App):
             self.entries = desktop_entries() if self.mode == "apps" else tool_entries()
             self.call_later(self.refilter, "")
             self.query_one("#filter", Input).focus()
-        elif self.mode == "windows":
-            self.entries = window_entries()
+        elif self.mode in ("windows", "claude"):
+            self.entries = (window_entries() if self.mode == "windows"
+                            else claude_entries())
             self.call_later(self.refilter_list, "")
             self.query_one("#filter", Input).focus()
         else:
@@ -978,11 +1131,11 @@ class HyprLauncher(App):
 
     # ---------- navigation ----------
     def action_move(self, step: int):
-        if self.mode != "windows" and self.tiles:
+        if self.mode not in ("windows", "claude") and self.tiles:
             self.select(self.sel + step)
 
     def action_move_row(self, step: int):
-        if self.mode == "windows":
+        if self.mode in ("windows", "claude"):
             try:
                 lv = self.query_one("#results", ListView)
             except Exception:
@@ -993,18 +1146,30 @@ class HyprLauncher(App):
             self.select(self.sel + step * self.cols)
 
     def action_activate(self):
-        if self.mode == "windows":
+        if self.mode in ("windows", "claude"):
             lv = self.query_one("#results", ListView)
             item = lv.highlighted_child or (lv.children[0] if lv.children else None)
             if isinstance(item, Item):
-                focus_window(item.obj)
+                (focus_window if self.mode == "windows"
+                 else open_claude_entry)(item.obj)
                 self.exit()
         else:
             self.activate(self.sel)
 
+    def action_new_session(self):
+        # claude mode only: Ctrl+N starts a fresh session in the
+        # highlighted entry's project directory
+        if self.mode != "claude":
+            return
+        lv = self.query_one("#results", ListView)
+        item = lv.highlighted_child or (lv.children[0] if lv.children else None)
+        new_claude_in(item.obj if isinstance(item, Item) else {})
+        self.exit()
+
     def on_list_view_selected(self, event: ListView.Selected):
-        if self.mode == "windows" and isinstance(event.item, Item):
-            focus_window(event.item.obj)
+        if self.mode in ("windows", "claude") and isinstance(event.item, Item):
+            (focus_window if self.mode == "windows"
+             else open_claude_entry)(event.item.obj)
             self.exit()
 
     def on_section_header_toggled(self, msg: SectionHeader.Toggled):
@@ -1109,6 +1274,6 @@ class HyprLauncher(App):
 
 if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else "apps"
-    if mode not in ("apps", "windows", "wallpaper", "menu"):
+    if mode not in ("apps", "windows", "wallpaper", "menu", "claude"):
         mode = "apps"
     HyprLauncher(mode).run()

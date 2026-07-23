@@ -19,6 +19,7 @@ auto-themed from the wallpaper by wallust.
 | smart top bar | `ALT+B` pins | waybar auto-hide, owned by `hypr-appdock` (`bar_smart=on`): hover the top screen edge to fade the bar in (250ms), leave to fade out; `ALT+B` pins it open / releases it; toggle from the Tools hub. (`waybar-autohide.sh` is the retired standalone predecessor) |
 | `screenshot.sh` | `ALT+SHIFT+S` | Region/screen/all screenshots → file + clipboard + notification |
 | `drop-claude` | `ALT+SHIFT+U` | Dropdown **Claude Code** terminal (guake-style, keeps its session) — the AI sibling of `ALT+U` drop-term |
+| `hypr-launcher claude` | `ALT+CTRL+U` | **Claude session picker** — 🟢 running sessions (Enter focuses their terminal), background jobs, and your recent conversations with previews (Enter resumes in a glass float, `Ctrl+N` = new session in that project) |
 | `claude-select.sh` | `ALT+SHIFT+N` | Act on the selected text with Claude: explain / fix / rewrite / summarize / translate (Thai ⇄ English) / custom — result in a glass float, `c` copies |
 | `claude-vision.sh` | `ALT+SHIFT+I` | Select a region → Claude **looks** at it (diagnoses errors, explains diagrams/UI) — the reasoning sibling of `ALT+I` OCR |
 | `focus-mode.sh` | `ALT+SHIFT+F` | Deep-work session: notifications muted, countdown card on the desktop, auto-ends via systemd timer and reports what queued up |
@@ -77,6 +78,7 @@ Then log into Hyprland (SDDM session). Notes:
 | double-click a titlebar | maximize toggle (hyprbars; keeps waybar + gaps) |
 | `ALT+T` / `ALT+K` | reminder / keybind cheatsheet |
 | `ALT+SHIFT+U` / `ALT+SHIFT+N` / `ALT+SHIFT+I` | Claude: dropdown / selection actions / region vision |
+| `ALT+CTRL+U` | Claude session picker (running + resume) |
 | `ALT+SHIFT+F` / `ALT+SHIFT+Y` | focus session / audio visualizer |
 | `ALT+SHIFT+S` / `PRINT` | region screenshot |
 | `ALT+1-0`, `ALT+SHIFT+1-0` | workspace switch / move |

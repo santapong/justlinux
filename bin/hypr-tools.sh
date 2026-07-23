@@ -451,6 +451,7 @@ main_menu() {
         "󰀻  Apps — launcher                         ALT+R" \
         "󰉋  Apps — file manager                     ALT+E" \
         "󰖯  Apps — window switcher                  ALT+W" \
+        "󰚩  Claude — sessions (running + resume)    ALT+CTRL+U" \
         "󰸉  Wallpaper — pick image / folder / monitor" \
         "󰒝  Wallpaper — random                      ALT+SHIFT+W" \
         "⏰  Reminder — set new                      ALT+T" \
@@ -476,6 +477,7 @@ main_menu() {
         *"Apps — launcher"*)     launcher apps ;;
         *"file manager"*)        thunar & ;;
         *"window switcher"*)     launcher windows ;;
+        *"Claude — sessions"*)   launcher claude ;;
         *"Wallpaper — pick"*)    launcher wallpaper ;;
         *"Wallpaper — random"*)  wallpaper.sh ;;
         *"Reminder — set"*)      new_reminder ;;
@@ -538,6 +540,7 @@ launcher() {
         windows)   title="Hypr Windows" ;;
         wallpaper) title="Hypr Wallpaper" ;;
         menu)      title="Hypr Tools" ;;
+        claude)    title="Hypr Claude" ;;
         *)         title="Hypr Apps" ;;
     esac
     local addr
@@ -562,6 +565,7 @@ case "${1:-menu}" in
     power-menu)  power_menu ;;             # old rofi power menu, still available
     apps)        launcher apps ;;
     windows)     launcher windows ;;
+    claude-sessions) launcher claude ;;
     reorder)     reorder_modules ;;
     autohide)    toggle_autohide ;;
     wallpaper)   launcher wallpaper ;;
