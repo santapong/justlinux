@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 560" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <!-- C4 dynamic diagram: smart-bar reveal / hide cycle (bar_smart). -->
+
+  <text x="24" y="34" font-size="16" font-weight="700" fill="#888888">Dynamic — smart-bar reveal / hide cycle (bar_smart)</text>
+
+  <!-- Lifeline headers -->
+  <rect x="40" y="70" width="190" height="50" rx="6" fill="#85bbf0" stroke="#78a8d8"/>
+  <text x="135" y="91" font-size="12.5" font-weight="600" fill="#0b2a4a" text-anchor="middle">EdgeStrip (top)</text>
+  <text x="135" y="106" font-size="10" font-style="italic" fill="#23486e" text-anchor="middle">[hypr-appdock]</text>
+
+  <rect x="280" y="70" width="190" height="50" rx="6" fill="#85bbf0" stroke="#78a8d8"/>
+  <text x="375" y="91" font-size="12.5" font-weight="600" fill="#0b2a4a" text-anchor="middle">Smart-bar controller</text>
+  <text x="375" y="106" font-size="10" font-style="italic" fill="#23486e" text-anchor="middle">[hypr-appdock Manager.bar_*]</text>
+
+  <rect x="520" y="70" width="190" height="50" rx="6" fill="#8a8a8a" stroke="#7a7a7a"/>
+  <text x="615" y="91" font-size="12.5" font-weight="600" fill="#ffffff" text-anchor="middle">Hyprland</text>
+  <text x="615" y="106" font-size="10" font-style="italic" fill="#e2e2e2" text-anchor="middle">[compositor — hyprctl -j]</text>
+
+  <rect x="760" y="70" width="190" height="50" rx="6" fill="#8a8a8a" stroke="#7a7a7a"/>
+  <text x="855" y="91" font-size="12.5" font-weight="600" fill="#ffffff" text-anchor="middle">waybar</text>
+  <text x="855" y="106" font-size="10" font-style="italic" fill="#e2e2e2" text-anchor="middle">[status bar]</text>
+
+  <!-- Lifelines -->
+  <g stroke="#888888" stroke-width="1" stroke-dasharray="4,4">
+    <line x1="135" y1="120" x2="135" y2="440"/>
+    <line x1="375" y1="120" x2="375" y2="440"/>
+    <line x1="615" y1="120" x2="615" y2="440"/>
+    <line x1="855" y1="120" x2="855" y2="440"/>
+  </g>
+
+  <!-- Messages -->
+  <g stroke="#888888" stroke-width="1.5" fill="none">
+    <line x1="135" y1="170" x2="367" y2="170"/>
+    <line x1="375" y1="215" x2="607" y2="215"/>
+    <line x1="375" y1="260" x2="847" y2="260"/>
+    <line x1="375" y1="320" x2="607" y2="320"/>
+    <line x1="375" y1="400" x2="847" y2="400"/>
+  </g>
+  <g fill="#888888">
+    <polygon points="360,165 360,175 369,170"/>
+    <polygon points="600,210 600,220 609,215"/>
+    <polygon points="840,255 840,265 849,260"/>
+    <polygon points="600,315 600,325 609,320"/>
+    <polygon points="840,395 840,405 849,400"/>
+  </g>
+  <g font-size="11" fill="#888888" text-anchor="middle">
+    <text x="251" y="160">1 · pointer dwells 180ms → reveal_bar(mon)</text>
+    <text x="491" y="205">2 · probe: monitor true-fullscreen? bar level &lt; 2 (hidden)?</text>
+    <text x="611" y="250">3 · pkill -USR1 → .hidden removed: 250ms fade-in, bottom → top layer</text>
+    <text x="491" y="310">4 · every 400ms while revealed: cursorpos vs bar boxes</text>
+    <text x="491" y="336" font-style="italic">stays up while hovered · ALT+B-pinned · arrange session</text>
+    <text x="611" y="390">5 · pointer left the band → SIGUSR1: fade-out, top → bottom layer</text>
+  </g>
+
+  <!-- Notes -->
+  <rect x="60" y="460" width="860" height="70" rx="6" fill="none" stroke="#888888" stroke-width="1" stroke-dasharray="5,4"/>
+  <g font-size="11" fill="#888888">
+    <text x="80" y="482">Hidden state: opacity 0 (style.css .hidden) + `layerrule ignore_alpha 0.2` ⇒ the invisible bar is click-through on the bare desktop.</text>
+    <text x="80" y="500">A respawned waybar comes back visible — the 5s hide-sanity pass re-tucks it. SIGTERM/SIGINT on the dock restores the bar first,</text>
+    <text x="80" y="518">so a dead controller never strands the panel hidden. waybar runs `"exclusive": false` — reveals overlay windows, nothing re-tiles.</text>
+  </g>
+</svg>

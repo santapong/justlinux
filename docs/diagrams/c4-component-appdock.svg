@@ -1,0 +1,172 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 760" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <!-- C4 Level 3: Components — hypr-appdock (docks + smart bar). -->
+
+  <text x="24" y="34" font-size="16" font-weight="700" fill="#888888">Components — hypr-appdock (C4 level 3)</text>
+
+  <!-- Container boundary -->
+  <rect x="24" y="56" width="640" height="660" rx="8" fill="none" stroke="#888888" stroke-width="1.2" stroke-dasharray="7,5"/>
+  <text x="40" y="76" font-size="12" font-style="italic" fill="#888888">hypr-appdock [Container: Python/GTK3]</text>
+
+  <!-- Manager -->
+  <rect x="60" y="100" width="250" height="120" rx="6" fill="#85bbf0" stroke="#78a8d8"/>
+  <g text-anchor="middle">
+    <text x="185" y="120" font-size="12.5" font-weight="600" fill="#0b2a4a">Manager</text>
+    <text x="185" y="134" font-size="10" font-style="italic" fill="#23486e">[Component]</text>
+    <text x="185" y="152" font-size="11" fill="#16395c">Owns catalogue, pins, docks, strips.</text>
+    <text x="185" y="166" font-size="11" fill="#16395c">socket2 event watch (debounced),</text>
+    <text x="185" y="180" font-size="11" fill="#16395c">monitor-hotplug respawn, 5s hide</text>
+    <text x="185" y="194" font-size="11" fill="#16395c">sanity, 2s pins watch; reads</text>
+    <text x="185" y="208" font-size="11" fill="#16395c">widgets.conf via hyprdesk.conf()</text>
+  </g>
+
+  <!-- Smart-bar controller -->
+  <rect x="60" y="270" width="250" height="140" rx="6" fill="#85bbf0" stroke="#78a8d8"/>
+  <g text-anchor="middle">
+    <text x="185" y="290" font-size="12.5" font-weight="600" fill="#0b2a4a">Smart-bar controller</text>
+    <text x="185" y="304" font-size="10" font-style="italic" fill="#23486e">[Component — Manager.bar_*]</text>
+    <text x="185" y="322" font-size="11" fill="#16395c">Probes shown/hidden from hyprctl</text>
+    <text x="185" y="336" font-size="11" fill="#16395c">layers level (pid&gt;0 only); SIGUSR1</text>
+    <text x="185" y="350" font-size="11" fill="#16395c">toggle; 400ms cursor-band poll only</text>
+    <text x="185" y="364" font-size="11" fill="#16395c">while revealed; ALT+B pin; skips</text>
+    <text x="185" y="378" font-size="11" fill="#16395c">true-fullscreen monitors; restores</text>
+    <text x="185" y="392" font-size="11" fill="#16395c">the bar on SIGTERM/SIGINT</text>
+  </g>
+
+  <!-- ctl socket server -->
+  <rect x="60" y="450" width="250" height="90" rx="6" fill="#85bbf0" stroke="#78a8d8"/>
+  <g text-anchor="middle">
+    <text x="185" y="470" font-size="12.5" font-weight="600" fill="#0b2a4a">ctl socket server</text>
+    <text x="185" y="484" font-size="10" font-style="italic" fill="#23486e">[Component — unix socket]</text>
+    <text x="185" y="502" font-size="11" fill="#16395c">reload · reload-theme · show-all /</text>
+    <text x="185" y="516" font-size="11" fill="#16395c">resume (arrange) · bar-pin;</text>
+    <text x="185" y="530" font-size="11" fill="#16395c">liveness probe blocks duplicates</text>
+  </g>
+
+  <!-- pins module -->
+  <rect x="60" y="600" width="250" height="90" rx="6" fill="#85bbf0" stroke="#78a8d8"/>
+  <g text-anchor="middle">
+    <text x="185" y="620" font-size="12.5" font-weight="600" fill="#0b2a4a">pins store module</text>
+    <text x="185" y="634" font-size="10" font-style="italic" fill="#23486e">[Component — pins.json v2]</text>
+    <text x="185" y="652" font-size="11" fill="#16395c">pins_update(): flock'd read-modify-</text>
+    <text x="185" y="666" font-size="11" fill="#16395c">write; corrupt file moved aside,</text>
+    <text x="185" y="680" font-size="11" fill="#16395c">never rebuilt from the empty default</text>
+  </g>
+
+  <!-- Dock -->
+  <rect x="380" y="100" width="240" height="110" rx="6" fill="#85bbf0" stroke="#78a8d8"/>
+  <g text-anchor="middle">
+    <text x="500" y="120" font-size="12.5" font-weight="600" fill="#0b2a4a">Dock (× monitor)</text>
+    <text x="500" y="134" font-size="10" font-style="italic" fill="#23486e">[Component — bottom edge]</text>
+    <text x="500" y="152" font-size="11" fill="#16395c">Pinned app icons per workspace;</text>
+    <text x="500" y="166" font-size="11" fill="#16395c">right-click unpins; ＋ opens Picker;</text>
+    <text x="500" y="180" font-size="11" fill="#16395c">auto-hide; suppressed only by TRUE</text>
+    <text x="500" y="194" font-size="11" fill="#16395c">fullscreen (mode 2), not maximize</text>
+  </g>
+
+  <!-- EdgeStrip bottom -->
+  <rect x="380" y="250" width="240" height="90" rx="6" fill="#85bbf0" stroke="#78a8d8"/>
+  <g text-anchor="middle">
+    <text x="500" y="270" font-size="12.5" font-weight="600" fill="#0b2a4a">EdgeStrip (bottom, × monitor)</text>
+    <text x="500" y="284" font-size="10" font-style="italic" fill="#23486e">[Component — invisible 4px strip]</text>
+    <text x="500" y="302" font-size="11" fill="#16395c">Pointer dwell 180ms (monitor</text>
+    <text x="500" y="316" font-size="11" fill="#16395c">crossings pass in &lt;50ms) reveals</text>
+    <text x="500" y="330" font-size="11" fill="#16395c">that monitor's dock</text>
+  </g>
+
+  <!-- EdgeStrip top -->
+  <rect x="380" y="380" width="240" height="90" rx="6" fill="#85bbf0" stroke="#78a8d8"/>
+  <g text-anchor="middle">
+    <text x="500" y="400" font-size="12.5" font-weight="600" fill="#0b2a4a">EdgeStrip (top, × monitor)</text>
+    <text x="500" y="414" font-size="10" font-style="italic" fill="#23486e">[Component — bar_smart only]</text>
+    <text x="500" y="432" font-size="11" fill="#16395c">Same dwell strip on the top edge;</text>
+    <text x="500" y="446" font-size="11" fill="#16395c">spans every output even where the</text>
+    <text x="500" y="460" font-size="11" fill="#16395c">dock itself is disabled</text>
+  </g>
+
+  <!-- Picker -->
+  <rect x="380" y="510" width="240" height="90" rx="6" fill="#85bbf0" stroke="#78a8d8"/>
+  <g text-anchor="middle">
+    <text x="500" y="530" font-size="12.5" font-weight="600" fill="#0b2a4a">Picker</text>
+    <text x="500" y="544" font-size="10" font-style="italic" fill="#23486e">[Component — GTK window]</text>
+    <text x="500" y="562" font-size="11" fill="#16395c">Searchable checklist of installed</text>
+    <text x="500" y="576" font-size="11" fill="#16395c">apps, scoped to (monitor, workspace)</text>
+  </g>
+
+  <!-- External: Hyprland -->
+  <rect x="700" y="100" width="270" height="110" rx="6" fill="#8a8a8a" stroke="#7a7a7a"/>
+  <g text-anchor="middle">
+    <text x="835" y="122" font-size="12.5" font-weight="600" fill="#ffffff">Hyprland 0.55</text>
+    <text x="835" y="136" font-size="10" font-style="italic" fill="#e2e2e2">[Wayland compositor]</text>
+    <text x="835" y="154" font-size="11" fill="#f0f0f0">hyprctl -j layers · cursorpos ·</text>
+    <text x="835" y="168" font-size="11" fill="#f0f0f0">monitors · clients · workspaces;</text>
+    <text x="835" y="182" font-size="11" fill="#f0f0f0">socket2 event stream</text>
+  </g>
+
+  <!-- External: waybar -->
+  <rect x="700" y="260" width="270" height="90" rx="6" fill="#8a8a8a" stroke="#7a7a7a"/>
+  <g text-anchor="middle">
+    <text x="835" y="282" font-size="12.5" font-weight="600" fill="#ffffff">waybar 0.15</text>
+    <text x="835" y="296" font-size="10" font-style="italic" fill="#e2e2e2">[status bar]</text>
+    <text x="835" y="314" font-size="11" fill="#f0f0f0">SIGUSR1: shown (top layer) ↔</text>
+    <text x="835" y="328" font-size="11" fill="#f0f0f0">hidden (bottom layer, .hidden fade)</text>
+  </g>
+
+  <!-- Other containers: CLI callers -->
+  <rect x="700" y="410" width="270" height="110" rx="6" fill="#438dd5" stroke="#3b7cc0"/>
+  <g text-anchor="middle">
+    <text x="835" y="432" font-size="12.5" font-weight="600" fill="#ffffff">CLI callers</text>
+    <text x="835" y="446" font-size="10" font-style="italic" fill="#d8e8f8">[Containers in this system]</text>
+    <text x="835" y="464" font-size="11" fill="#eaf2fa">bar-toggle.sh (ALT+B) → bar-pin;</text>
+    <text x="835" y="478" font-size="11" fill="#eaf2fa">hypr-arrange → show-all / resume;</text>
+    <text x="835" y="492" font-size="11" fill="#eaf2fa">Tools hub / widgetpicker → reload</text>
+  </g>
+
+  <!-- Relationships -->
+  <g stroke="#888888" stroke-width="1.5" fill="none">
+    <path d="M 310 120 L 378 120"/>
+    <path d="M 378 280 L 344 280 L 344 170 L 314 170"/>
+    <path d="M 185 220 L 185 266"/>
+    <path d="M 378 425 L 344 425 L 344 340 L 314 340"/>
+    <path d="M 185 448 L 185 414"/>
+    <path d="M 280 100 L 280 84 L 835 84 L 835 96"/>
+    <path d="M 310 355 L 650 355 L 650 305 L 696 305"/>
+    <path d="M 620 180 L 640 180 L 640 555 L 622 555"/>
+    <path d="M 380 560 L 344 560 L 344 645 L 314 645"/>
+    <path d="M 700 490 L 314 490"/>
+  </g>
+  <g fill="#888888">
+    <polygon points="371,115 371,125 380,120"/>
+    <polygon points="321,165 321,175 312,170"/>
+    <polygon points="180,259 190,259 185,268"/>
+    <polygon points="321,335 321,345 312,340"/>
+    <polygon points="180,421 190,421 185,412"/>
+    <polygon points="830,91 840,91 835,100"/>
+    <polygon points="691,300 691,310 698,305"/>
+    <polygon points="631,550 631,560 622,555"/>
+    <polygon points="321,640 321,650 312,645"/>
+    <polygon points="321,485 321,495 312,490"/>
+  </g>
+  <g font-size="11" fill="#888888">
+    <text x="345" y="136" text-anchor="middle">spawns,</text>
+    <text x="345" y="150" text-anchor="middle">visibility</text>
+    <text x="344" y="296" text-anchor="middle">reveal /</text>
+    <text x="344" y="310" text-anchor="middle">hide</text>
+    <text x="196" y="246" text-anchor="start">arms watch (startup · sanity · reload)</text>
+    <text x="346" y="417" text-anchor="middle">reveal_bar</text>
+    <text x="196" y="436" text-anchor="start">bar-pin pins / releases</text>
+    <text x="520" y="78" text-anchor="middle">socket2 events · monitor states · hyprctl -j (layers · cursorpos)</text>
+    <text x="480" y="349" text-anchor="middle">SIGUSR1 toggle</text>
+    <text x="648" y="540" text-anchor="start">＋ opens</text>
+    <text x="648" y="554" text-anchor="start">Picker</text>
+    <text x="352" y="632" text-anchor="start">pins_update()</text>
+    <text x="505" y="484" text-anchor="middle">--ctl verbs (unix socket)</text>
+  </g>
+
+  <!-- Legend -->
+  <rect x="24" y="736" width="14" height="14" fill="#85bbf0"/>
+  <text x="44" y="747" font-size="11" fill="#888888">component</text>
+  <rect x="140" y="736" width="14" height="14" fill="#438dd5"/>
+  <text x="160" y="747" font-size="11" fill="#888888">other container</text>
+  <rect x="290" y="736" width="14" height="14" fill="#8a8a8a"/>
+  <text x="310" y="747" font-size="11" fill="#888888">external</text>
+</svg>

@@ -1,0 +1,202 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 820" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <!-- C4 Level 2: Containers — justlinux desktop fleet. -->
+
+  <text x="24" y="34" font-size="16" font-weight="700" fill="#888888">Containers — justlinux Desktop Fleet (C4 level 2)</text>
+
+  <!-- System boundary -->
+  <rect x="24" y="56" width="780" height="710" rx="8" fill="none" stroke="#888888" stroke-width="1.2" stroke-dasharray="7,5"/>
+  <text x="40" y="78" font-size="12" font-style="italic" fill="#888888">justlinux Desktop Fleet [Software System]</text>
+
+  <!-- Row A: editors / panels -->
+  <rect x="50" y="90" width="220" height="100" rx="6" fill="#438dd5" stroke="#3b7cc0"/>
+  <g text-anchor="middle">
+    <text x="160" y="110" font-size="12.5" font-weight="600" fill="#ffffff">hypr-settings · hypr-launcher</text>
+    <text x="160" y="124" font-size="10" font-style="italic" fill="#d8e8f8">[Containers: Textual TUI, kitty float]</text>
+    <text x="160" y="142" font-size="11" fill="#eaf2fa">Settings panel (ALT+X), app grid</text>
+    <text x="160" y="156" font-size="11" fill="#eaf2fa">(ALT+R), window overview (ALT+W/H),</text>
+    <text x="160" y="170" font-size="11" fill="#eaf2fa">wallpaper picker, Tools hub (ALT+D)</text>
+  </g>
+
+  <rect x="300" y="90" width="220" height="100" rx="6" fill="#438dd5" stroke="#3b7cc0"/>
+  <g text-anchor="middle">
+    <text x="410" y="110" font-size="12.5" font-weight="600" fill="#ffffff">hypr-tools.sh</text>
+    <text x="410" y="124" font-size="10" font-style="italic" fill="#d8e8f8">[Container: bash dispatcher]</text>
+    <text x="410" y="142" font-size="11" fill="#eaf2fa">Glue for every panel action:</text>
+    <text x="410" y="156" font-size="11" fill="#eaf2fa">reminders, workspace stash, smart-bar</text>
+    <text x="410" y="170" font-size="11" fill="#eaf2fa">toggle, bar reorder, keybind sheet</text>
+  </g>
+
+  <rect x="550" y="90" width="220" height="100" rx="6" fill="#438dd5" stroke="#3b7cc0"/>
+  <g text-anchor="middle">
+    <text x="660" y="110" font-size="12.5" font-weight="600" fill="#ffffff">hypr-arrange</text>
+    <text x="660" y="124" font-size="10" font-style="italic" fill="#d8e8f8">[Container: Python/GTK3 overlay]</text>
+    <text x="660" y="142" font-size="11" fill="#eaf2fa">ALT+SHIFT+E grid edit mode: drag</text>
+    <text x="660" y="156" font-size="11" fill="#eaf2fa">cards with cell snap, cross-monitor,</text>
+    <text x="660" y="170" font-size="11" fill="#eaf2fa">alignment guides, Enter saves, --undo</text>
+  </g>
+
+  <!-- Row B: picker / conf store / lib -->
+  <rect x="50" y="250" width="220" height="100" rx="6" fill="#438dd5" stroke="#3b7cc0"/>
+  <g text-anchor="middle">
+    <text x="160" y="270" font-size="12.5" font-weight="600" fill="#ffffff">hypr-widgetpicker</text>
+    <text x="160" y="284" font-size="10" font-style="italic" fill="#d8e8f8">[Container: Python/GTK3]</text>
+    <text x="160" y="302" font-size="11" fill="#eaf2fa">Template gallery with live previews;</text>
+    <text x="160" y="316" font-size="11" fill="#eaf2fa">add / remove / parameterize card</text>
+    <text x="160" y="330" font-size="11" fill="#eaf2fa">instances per monitor</text>
+  </g>
+
+  <path d="M 300 262 A 110 12 0 0 1 520 262 L 520 348 A 110 12 0 0 1 300 348 Z" fill="#438dd5" stroke="#3b7cc0"/>
+  <ellipse cx="410" cy="262" rx="110" ry="12" fill="#438dd5" stroke="#3b7cc0"/>
+  <g text-anchor="middle">
+    <text x="410" y="288" font-size="12.5" font-weight="600" fill="#ffffff">widgets.conf</text>
+    <text x="410" y="302" font-size="10" font-style="italic" fill="#d8e8f8">[Data store: key=value file]</text>
+    <text x="410" y="320" font-size="11" fill="#eaf2fa">Single source of truth: instances, grid</text>
+    <text x="410" y="334" font-size="11" fill="#eaf2fa">cells, params, bar_smart, dock toggles</text>
+  </g>
+
+  <rect x="550" y="250" width="220" height="110" rx="6" fill="#438dd5" stroke="#3b7cc0"/>
+  <g text-anchor="middle">
+    <text x="660" y="270" font-size="12.5" font-weight="600" fill="#ffffff">hyprdesk</text>
+    <text x="660" y="284" font-size="10" font-style="italic" fill="#d8e8f8">[Container: Python library]</text>
+    <text x="660" y="302" font-size="11" fill="#eaf2fa">conf · theme · layer (ctypes gtk-layer-</text>
+    <text x="660" y="316" font-size="11" fill="#eaf2fa">shell) · grid · rows · cardspec ·</text>
+    <text x="660" y="330" font-size="11" fill="#eaf2fa">monitors · confwrite (atomic flock)</text>
+  </g>
+
+  <!-- Row C: hosts / pins -->
+  <rect x="50" y="430" width="220" height="110" rx="6" fill="#438dd5" stroke="#3b7cc0"/>
+  <g text-anchor="middle">
+    <text x="160" y="450" font-size="12.5" font-weight="600" fill="#ffffff">hypr-cardhost</text>
+    <text x="160" y="464" font-size="10" font-style="italic" fill="#d8e8f8">[Container: Python/GTK3]</text>
+    <text x="160" y="482" font-size="11" fill="#eaf2fa">Renders all 12 glass cards from TOML</text>
+    <text x="160" y="496" font-size="11" fill="#eaf2fa">templates in one process; async data</text>
+    <text x="160" y="510" font-size="11" fill="#eaf2fa">sources, error/stale cards, live</text>
+    <text x="160" y="524" font-size="11" fill="#eaf2fa">retheme via --ctl</text>
+  </g>
+
+  <rect x="300" y="430" width="220" height="110" rx="6" fill="#438dd5" stroke="#3b7cc0"/>
+  <g text-anchor="middle">
+    <text x="410" y="450" font-size="12.5" font-weight="600" fill="#ffffff">hypr-appdock</text>
+    <text x="410" y="464" font-size="10" font-style="italic" fill="#d8e8f8">[Container: Python/GTK3]</text>
+    <text x="410" y="482" font-size="11" fill="#eaf2fa">Per-monitor bottom docks + the smart</text>
+    <text x="410" y="496" font-size="11" fill="#eaf2fa">top bar: edge strips, dwell reveal,</text>
+    <text x="410" y="510" font-size="11" fill="#eaf2fa">waybar SIGUSR1 control, ALT+B pin,</text>
+    <text x="410" y="524" font-size="11" fill="#eaf2fa">ctl socket (reload/show-all/bar-pin)</text>
+  </g>
+
+  <path d="M 550 452 A 110 12 0 0 1 770 452 L 770 518 A 110 12 0 0 1 550 518 Z" fill="#438dd5" stroke="#3b7cc0"/>
+  <ellipse cx="660" cy="452" rx="110" ry="12" fill="#438dd5" stroke="#3b7cc0"/>
+  <g text-anchor="middle">
+    <text x="660" y="478" font-size="12.5" font-weight="600" fill="#ffffff">pins.json</text>
+    <text x="660" y="492" font-size="10" font-style="italic" fill="#d8e8f8">[Data store: JSON v2]</text>
+    <text x="660" y="510" font-size="11" fill="#eaf2fa">Per-monitor, per-workspace dock pins</text>
+  </g>
+
+  <!-- Row D: fetchers / supervisor -->
+  <rect x="50" y="610" width="220" height="100" rx="6" fill="#438dd5" stroke="#3b7cc0"/>
+  <g text-anchor="middle">
+    <text x="160" y="630" font-size="12.5" font-weight="600" fill="#ffffff">widget-*.sh fetchers</text>
+    <text x="160" y="644" font-size="10" font-style="italic" fill="#d8e8f8">[Containers: bash]</text>
+    <text x="160" y="662" font-size="11" fill="#eaf2fa">github · trading · weather · security ·</text>
+    <text x="160" y="676" font-size="11" fill="#eaf2fa">devgit · robotics · nowplaying —</text>
+    <text x="160" y="690" font-size="11" fill="#eaf2fa">emit --fields key=value</text>
+  </g>
+
+  <rect x="300" y="610" width="220" height="100" rx="6" fill="#438dd5" stroke="#3b7cc0"/>
+  <g text-anchor="middle">
+    <text x="410" y="630" font-size="12.5" font-weight="600" fill="#ffffff">desktop-widgets.sh</text>
+    <text x="410" y="644" font-size="10" font-style="italic" fill="#d8e8f8">[Container: bash, exec-once]</text>
+    <text x="410" y="662" font-size="11" fill="#eaf2fa">Autostart supervisor: spawns and</text>
+    <text x="410" y="676" font-size="11" fill="#eaf2fa">restarts the fleet at login;</text>
+    <text x="410" y="690" font-size="11" fill="#eaf2fa">conky twins as rollback path</text>
+  </g>
+
+  <!-- Externals -->
+  <rect x="830" y="90" width="240" height="110" rx="6" fill="#8a8a8a" stroke="#7a7a7a"/>
+  <g text-anchor="middle">
+    <text x="950" y="112" font-size="12.5" font-weight="600" fill="#ffffff">Hyprland 0.55</text>
+    <text x="950" y="126" font-size="10" font-style="italic" fill="#e2e2e2">[Wayland compositor]</text>
+    <text x="950" y="144" font-size="11" fill="#f0f0f0">layer-shell surfaces, hyprctl -j,</text>
+    <text x="950" y="158" font-size="11" fill="#f0f0f0">socket2 event stream, layerrules</text>
+  </g>
+
+  <rect x="830" y="250" width="240" height="100" rx="6" fill="#8a8a8a" stroke="#7a7a7a"/>
+  <g text-anchor="middle">
+    <text x="950" y="272" font-size="12.5" font-weight="600" fill="#ffffff">waybar 0.15</text>
+    <text x="950" y="286" font-size="10" font-style="italic" fill="#e2e2e2">[status bar]</text>
+    <text x="950" y="304" font-size="11" fill="#f0f0f0">non-exclusive top panel;</text>
+    <text x="950" y="318" font-size="11" fill="#f0f0f0">.hidden class = 250ms fade</text>
+  </g>
+
+  <rect x="830" y="400" width="240" height="100" rx="6" fill="#8a8a8a" stroke="#7a7a7a"/>
+  <g text-anchor="middle">
+    <text x="950" y="422" font-size="12.5" font-weight="600" fill="#ffffff">wallust</text>
+    <text x="950" y="436" font-size="10" font-style="italic" fill="#e2e2e2">[wallpaper → palette]</text>
+    <text x="950" y="454" font-size="11" fill="#f0f0f0">generates colors consumed by</text>
+    <text x="950" y="468" font-size="11" fill="#f0f0f0">hyprdesk.theme + waybar CSS</text>
+  </g>
+
+  <rect x="830" y="550" width="240" height="110" rx="6" fill="#8a8a8a" stroke="#7a7a7a"/>
+  <g text-anchor="middle">
+    <text x="950" y="572" font-size="12.5" font-weight="600" fill="#ffffff">External data APIs</text>
+    <text x="950" y="586" font-size="10" font-style="italic" fill="#e2e2e2">[github.com · coingecko ·</text>
+    <text x="950" y="600" font-size="10" font-style="italic" fill="#e2e2e2">wttr.in · api.anthropic.com]</text>
+    <text x="950" y="618" font-size="11" fill="#f0f0f0">polled with caching;</text>
+    <text x="950" y="632" font-size="11" fill="#f0f0f0">failures render stale cards</text>
+  </g>
+
+  <!-- Relationships -->
+  <g stroke="#888888" stroke-width="1.5" fill="none">
+    <!-- editors -> widgets.conf -->
+    <path d="M 160 190 L 160 240 L 360 240 L 360 246"/>
+    <path d="M 660 190 L 660 240 L 460 240 L 460 246"/>
+    <path d="M 270 300 L 296 300"/>
+    <!-- widgets.conf -> hosts -->
+    <path d="M 410 360 L 410 426"/>
+    <path d="M 330 356 L 330 396 L 160 396 L 160 426"/>
+    <!-- fetchers -> cardhost -->
+    <path d="M 160 610 L 160 546"/>
+    <!-- supervisor -> fleet -->
+    <path d="M 410 610 L 410 546"/>
+    <!-- appdock <-> pins -->
+    <path d="M 520 485 L 546 485"/>
+    <!-- appdock -> waybar (gutter x=815) -->
+    <path d="M 500 430 L 500 412 L 815 412 L 815 300 L 826 300"/>
+    <!-- hosts -> Hyprland (gutter x=815) -->
+    <path d="M 480 430 L 480 380 L 815 380 L 815 145 L 826 145"/>
+    <!-- wallust -> hyprdesk -->
+    <path d="M 830 420 L 700 420 L 700 364"/>
+    <!-- fetchers -> APIs (below everything) -->
+    <path d="M 160 710 L 160 740 L 950 740 L 950 664"/>
+  </g>
+  <g fill="#888888">
+    <polygon points="355,239 365,239 360,248"/>
+    <polygon points="455,239 465,239 460,248"/>
+    <polygon points="289,295 289,305 298,300"/>
+    <polygon points="405,419 415,419 410,428"/>
+    <polygon points="155,419 165,419 160,428"/>
+    <polygon points="155,553 165,553 160,544"/>
+    <polygon points="405,553 415,553 410,544"/>
+    <polygon points="539,480 539,490 548,485"/>
+    <polygon points="819,295 819,305 828,300"/>
+    <polygon points="819,140 819,150 828,145"/>
+    <polygon points="695,371 705,371 700,362"/>
+    <polygon points="945,671 955,671 950,662"/>
+  </g>
+  <g text-anchor="middle" font-size="11" fill="#888888">
+    <text x="410" y="228">atomic writes via hyprdesk.confwrite</text>
+    <text x="248" y="388">read at start + --ctl reload</text>
+    <text x="172" y="580" text-anchor="start">--fields key=value</text>
+    <text x="422" y="580" text-anchor="start">spawns / restarts</text>
+    <text x="660" y="404">smart bar: SIGUSR1 fade in/out</text>
+    <text x="648" y="372">layer-shell · hyprctl · socket2 events</text>
+    <text x="766" y="440">palette</text>
+    <text x="560" y="732">HTTPS polls</text>
+  </g>
+
+  <!-- Legend -->
+  <rect x="24" y="786" width="14" height="14" fill="#438dd5"/>
+  <text x="44" y="797" font-size="11" fill="#888888">container (process / file)</text>
+  <rect x="190" y="786" width="14" height="14" fill="#8a8a8a"/>
+  <text x="210" y="797" font-size="11" fill="#888888">external</text>
+</svg>

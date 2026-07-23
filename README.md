@@ -11,13 +11,20 @@ auto-themed from the wallpaper by wallust.
 |---|---|---|
 | `hypr-settings` | `ALT+X` | Settings panel — sidebar + cards. Live gaps/border/rounding steppers with gauges, blur/shadow/animation switches, Save writes back to `hyprland.conf`, bar controls, wallpaper, firewall/ClamAV status, power page with confirm dialogs |
 | `hypr-launcher apps` | `ALT+R` | App launcher — **icon grid** (real icons via kitty graphics protocol), collapsible categories, ★ favorites (right-click to star), recent apps, 10-per-row |
-| `hypr-launcher windows` | `ALT+W` | Window switcher — filterable list |
+| `hypr-launcher windows` | `ALT+W` / `ALT+H` | Window overview — every workspace's windows in one filterable list; hidden/stashed windows (`special:*`) are labeled and sorted first, Enter restores them to the active workspace |
 | `hypr-launcher wallpaper` | via Tools | Wallpaper picker — monitor tiles show each screen's current wallpaper, thumbnail grid, **live preview on the real desktop** while you browse, Esc restores |
 | `hypr-launcher menu` | `ALT+D` | Tools hub — every desktop tool as a tile with live status ("ufw is ON") and keybind hints |
 | `hypr-tools.sh` | — | The glue: dispatcher for all of the above + reminders (systemd timers), workspace stash, per-window hide/unhide, bar reorder, keybind cheatsheet |
 | `wallpaper.sh` | `ALT+SHIFT+W` | Random/pick wallpaper + wallust recolor of the whole desktop (hypr borders, waybar, rofi, swaync — live) |
-| `waybar-autohide.sh` | `ALT+B` pins | Auto-hide daemon — zero-fork Python, reads cursor from Hyprland's socket |
+| smart top bar | `ALT+B` pins | waybar auto-hide, owned by `hypr-appdock` (`bar_smart=on`): hover the top screen edge to fade the bar in (250ms), leave to fade out; `ALT+B` pins it open / releases it; toggle from the Tools hub. (`waybar-autohide.sh` is the retired standalone predecessor) |
 | `screenshot.sh` | `ALT+SHIFT+S` | Region/screen/all screenshots → file + clipboard + notification |
+
+## Architecture
+
+C4-model diagrams (Context → Containers → Components → Dynamic) live in
+[`docs/architecture.md`](docs/architecture.md) — start there to see how the
+card host, docks, smart bar, TUI panels and the single `widgets.conf`
+source of truth fit together.
 
 ## Requirements
 
@@ -59,7 +66,9 @@ Then log into Hyprland (SDDM session). Notes:
 | `ALT+ESC` | power page (lock/logout/reboot/shutdown) |
 | `ALT+A` / `ALT+SHIFT+A` / `ALT+CTRL+A` | stash workspace / hide window / unhide |
 | `ALT+S` / `ALT+CTRL+S` | scratchpad toggle / send to scratchpad |
-| `ALT+B` | show-hide bar (pins during auto-hide) |
+| `ALT+B` | pin the smart bar open / release it |
+| `ALT+H` | window overview (all workspaces + restore hidden) |
+| double-click a titlebar | maximize toggle (hyprbars; keeps waybar + gaps) |
 | `ALT+T` / `ALT+K` | reminder / keybind cheatsheet |
 | `ALT+SHIFT+S` / `PRINT` | region screenshot |
 | `ALT+1-0`, `ALT+SHIFT+1-0` | workspace switch / move |
@@ -70,8 +79,8 @@ Everything was built and verified with automated tests (Textual pilot harness,
 
 ## Desktop widget cards (hyprcard)
 
-All 13 desktop widgets (clock, stats, calendar, notes, netgraph, weather,
-github, trading, nowplaying, security, devgit, robotics, claude usage) are
+All 12 desktop widgets (clock, stats, calendar, netgraph, weather, github,
+trading, nowplaying, security, devgit, robotics, claude usage) are
 glass cards rendered by **one process** — `bin/hypr-cardhost` — from
 declarative TOML templates in `config/hyprcard/templates/`. The old
 per-widget conky fleet is retired.
@@ -81,7 +90,7 @@ per-widget conky fleet is retired.
 | `bin/hypr-cardhost` | the card host: async data sources, grid placement, error/stale cards, live retheme (`--ctl ping\|reload\|reload-theme`) |
 | `bin/hypr-arrange` | **ALT+SHIFT+E** — grid edit mode: drag cards (cell snap, cross-monitor, magnetic alignment guides), Enter saves, Esc cancels, press again to close, `--undo` reverts the last save |
 | `bin/hypr-widgetpicker` | template gallery with live previews, params, per-monitor add + manage (also: Settings → Widgets → *＋ Add widget…*) |
-| `bin/hypr-appdock` | one auto-hiding dock per monitor (touch the bottom screen edge to reveal), per-monitor pins |
+| `bin/hypr-appdock` | one auto-hiding dock per monitor (touch the bottom screen edge to reveal), per-monitor pins — plus the **smart top bar**: `bar_smart=on` makes waybar itself auto-hide with top-edge dwell reveal, `ALT+B` pin, and a fade animation |
 | `lib/hyprdesk/` | shared modules: `rows.py` renderers, `cardspec.py` templates, `grid.py` cells, `confwrite.py` atomic config writer, `monitors.py`, `layer.py`, `theme.py` |
 | `bin/widget-*.sh` | data fetchers — `--fields` emits `key=value` for the host; no flag emits legacy conky markup (rollback) |
 
