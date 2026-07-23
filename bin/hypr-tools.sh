@@ -451,7 +451,8 @@ main_menu() {
         "󰀻  Apps — launcher                         ALT+R" \
         "󰉋  Apps — file manager                     ALT+E" \
         "󰖯  Apps — window switcher                  ALT+W" \
-        "󰚩  Claude — sessions (running + resume)    ALT+CTRL+U" \
+        "󰚩  Claude — Studio (tabs + session tree)   ALT+CTRL+U" \
+        "󰚩  Claude — quick session picker" \
         "󰸉  Wallpaper — pick image / folder / monitor" \
         "󰒝  Wallpaper — random                      ALT+SHIFT+W" \
         "⏰  Reminder — set new                      ALT+T" \
@@ -477,7 +478,8 @@ main_menu() {
         *"Apps — launcher"*)     launcher apps ;;
         *"file manager"*)        thunar & ;;
         *"window switcher"*)     launcher windows ;;
-        *"Claude — sessions"*)   launcher claude ;;
+        *"Claude — Studio"*)     "$HOME/.local/bin/hypr-claude-studio" ;;
+        *"quick session picker"*) launcher claude ;;
         *"Wallpaper — pick"*)    launcher wallpaper ;;
         *"Wallpaper — random"*)  wallpaper.sh ;;
         *"Reminder — set"*)      new_reminder ;;

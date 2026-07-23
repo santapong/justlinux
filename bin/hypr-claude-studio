@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+"""hypr-claude-studio — a VS-Code-style workspace for Claude Code sessions.
+
+One kitty window running a tmux session:
+  · TOP: the tmux status bar shows every open session as a TAB
+    (mouse-clickable, like open files in VS Code)
+  · TAB 0 "sessions": an expandable tree of conversations — 🟢 running,
+    then projects → their resumable transcripts
+  · Enter opens a session as its own tab (`claude --resume`); if it is
+    already open its tab is focused instead; n = new session in the
+    highlighted project; r = refresh
+
+Modes: (default) focus-or-spawn the studio · --sidebar (inside tmux)
+"""
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path.home() / ".local/lib"))
+
+ME = os.path.realpath(__file__)
+TMUX_SESSION = "claude-studio"
+KITTY_CLASS = "hyprclaudestudio"
+
+
+def tmux(*args, out=False):
+    # own socket + no user config: the studio must never inherit or
+    # restyle the user's real tmux server (plugins, resurrect, theme)
+    r = subprocess.run(["tmux", "-L", TMUX_SESSION, *args],
+                       capture_output=True, text=True)
+    return r.stdout if out else r.returncode == 0
+
+
+# ---------------- default mode: focus or spawn ----------------
+
+def launch():
+    try:
+        clients = json.loads(subprocess.run(
+            ["hyprctl", "clients", "-j"], capture_output=True,
+            text=True).stdout)
+    except Exception:
+        clients = []
+    for c in clients:
+        if isinstance(c, dict) and c.get("class") == KITTY_CLASS:
+            subprocess.run(["hyprctl", "dispatch", "focuswindow",
+                            f"address:{c['address']}"])
+            return
+    subprocess.Popen(
+        ["kitty", "--class", KITTY_CLASS, "-o", "background_opacity=0.93",
+         "--title", "Claude Studio", "-e", "tmux", "-f", "/dev/null",
+         "-L", TMUX_SESSION, "new-session", "-A",
+         "-s", TMUX_SESSION, "-n", "sessions",
+         f"python3 {ME} --sidebar"],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+# ---------------- sidebar (tab 0, inside tmux) ----------------
+
+def style_tmux():
+    """Idempotent: dress the studio's tab bar in the fleet theme."""
+    from hyprdesk import colors
+    pal = colors()
+    bg, fg = pal["bg"], pal["fg"]
+    acc, sub = pal["accent"], pal["sub"]
+    for args in (
+        ("set", "-g", "status-position", "top"),
+        ("set", "-g", "mouse", "on"),
+        ("set", "-g", "status-interval", "5"),
+        ("set", "-g", "status-style", f"bg={bg},fg={sub}"),
+        ("set", "-g", "status-left",
+         f"#[fg={acc},bold] 󰚩 Claude Studio #[default] "),
+        ("set", "-g", "status-left-length", "22"),
+        ("set", "-g", "status-right", f"#[fg={sub}] #S "),
+        ("set", "-g", "window-status-format", " #I #W "),
+        ("set", "-g", "window-status-current-format",
+         f"#[bg={acc},fg={bg},bold] #I #W #[default]"),
+        ("set", "-g", "window-status-separator", ""),
+    ):
+        tmux(*args)
+
+
+def open_session_tab(entry):
+    """Open (or focus) a tab running this transcript's conversation."""
+    sid, cwd = entry["sid"], entry["cwd"]
+    for line in tmux("list-panes", "-s", "-F",
+                     "#{window_index}|#{pane_start_command}",
+                     out=True).splitlines():
+        idx, _, cmd = line.partition("|")
+        if sid in cmd:
+            tmux("select-window", "-t", idx)
+            return
+    name = os.path.basename(cwd.rstrip("/")) or "~"
+    tmux("new-window", "-t", f"{TMUX_SESSION}:", "-n", name, "-c", cwd,
+         f"claude --resume {sid}")
+
+
+def new_session_tab(cwd):
+    name = os.path.basename(cwd.rstrip("/")) or "~"
+    tmux("new-window", "-t", f"{TMUX_SESSION}:", "-n", name, "-c", cwd,
+         "claude")
+
+
+def sidebar():
+    from textual.app import App, ComposeResult
+    from textual.binding import Binding
+    from textual.widgets import Footer, Static, Tree
+    from hyprdesk import colors
+    from hyprdesk.claudesessions import session_rows
+
+    pal = colors()
+    style_tmux()
+
+    class Studio(App):
+        ENABLE_COMMAND_PALETTE = False
+        BINDINGS = [
+            Binding("enter", "open", "Open tab", show=True),
+            Binding("n", "new", "New session here", show=True),
+            Binding("r", "refresh", "Refresh", show=True),
+            Binding("q", "quit_studio", "Close studio", show=True),
+        ]
+        CSS = f"""
+        Screen {{ background: ansi_default; color: {pal['fg']}; }}
+        #hint {{ color: {pal['sub']}; padding: 0 2; height: 1; }}
+        Tree {{ background: transparent; padding: 0 1; }}
+        Tree > .tree--cursor {{ background: {pal['accent']} 30%; }}
+        Tree > .tree--guides {{ color: {pal['sub']}; }}
+        """
+
+        def compose(self) -> ComposeResult:
+            yield Static(
+                f"[bold {pal['accent']}]󰚩 Sessions[/] — Enter opens a tab"
+                " · tabs live in the bar above", id="hint")
+            yield Tree("sessions", id="tree")
+            yield Footer()
+
+        def on_mount(self):
+            self.reload_tree()
+            self.query_one(Tree).focus()
+
+        def reload_tree(self):
+            tree = self.query_one(Tree)
+            tree.clear()
+            tree.show_root = False
+            rows = session_rows()
+            running = [r for r in rows if r["kind"] in ("run", "bg")]
+            past = [r for r in rows if r["kind"] == "past"]
+            if running:
+                sec = tree.root.add(
+                    f"[bold]🟢 Running ({len(running)})[/]", expand=True)
+                for r in running:
+                    icon = "🟢" if r["kind"] == "run" else "󰑮"
+                    sec.add_leaf(f"{icon} {r['label']}", data=r)
+            projects = {}
+            for r in past:
+                projects.setdefault(r["label"], []).append(r)
+            sec = tree.root.add(
+                f"[bold]󰉋 Projects ({len(projects)})[/]", expand=True)
+            for label, items in sorted(projects.items()):
+                node = sec.add(f"󰉋 {label}  [dim]{len(items)}[/]",
+                               data={"kind": "project",
+                                     "cwd": items[0]["cwd"]})
+                for it in items:
+                    node.add_leaf(f"🕒 {it['detail']}", data=it)
+
+        def _current(self):
+            node = self.query_one(Tree).cursor_node
+            return (node.data if node and node.data else None)
+
+        def on_tree_node_selected(self, event):
+            data = event.node.data
+            if not data or data.get("kind") == "project":
+                return
+            self.open_entry(data)
+
+        def action_open(self):
+            data = self._current()
+            if data and data.get("kind") != "project":
+                self.open_entry(data)
+
+        def open_entry(self, data):
+            kind = data.get("kind")
+            if kind == "past":
+                open_session_tab(data)
+            elif kind == "run" and data.get("addr"):
+                subprocess.run(["hyprctl", "dispatch", "focuswindow",
+                                f"address:{data['addr']}"])
+            elif kind == "bg":
+                self.notify("Background job — it has no terminal here",
+                            severity="warning")
+
+        def action_new(self):
+            data = self._current() or {}
+            new_session_tab(data.get("cwd") or str(Path.home()))
+
+        def action_refresh(self):
+            self.reload_tree()
+
+        def action_quit_studio(self):
+            tmux("kill-session", "-t", TMUX_SESSION)
+
+    Studio().run()
+
+
+if __name__ == "__main__":
+    if "--sidebar" in sys.argv:
+        sidebar()
+    else:
+        launch()

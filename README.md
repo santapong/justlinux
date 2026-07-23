@@ -19,7 +19,9 @@ auto-themed from the wallpaper by wallust.
 | smart top bar | `ALT+B` pins | waybar auto-hide, owned by `hypr-appdock` (`bar_smart=on`): hover the top screen edge to fade the bar in (250ms), leave to fade out; `ALT+B` pins it open / releases it; toggle from the Tools hub. (`waybar-autohide.sh` is the retired standalone predecessor) |
 | `screenshot.sh` | `ALT+SHIFT+S` | Region/screen/all screenshots → file + clipboard + notification |
 | `drop-claude` | `ALT+SHIFT+U` | Dropdown **Claude Code** terminal (guake-style, keeps its session) — the AI sibling of `ALT+U` drop-term |
-| `hypr-launcher claude` | `ALT+CTRL+U` | **Claude session picker** — 🟢 running sessions (Enter focuses their terminal), background jobs, and your recent conversations with previews (Enter resumes in a glass float, `Ctrl+N` = new session in that project) |
+| `hypr-claude-studio` | `ALT+CTRL+U` | **Claude Studio** — a VS-Code-style workspace: expandable session tree (🟢 running · projects → conversations) in tab 0, every opened session is its own **tab in the top bar** (mouse-clickable, isolated tmux socket), `n` = new session in the highlighted project |
+| `hypr-launcher claude` | Tools hub | Quick session picker — the flat filterable list version of the same data |
+| `hypr-claude-office` | `ALT+CTRL+O` | **The 2D Claude office** — one pixel-art desk per live Claude session: the mini-Clawd *types* (glowing laptop) while its session burns CPU, shows thought-dots while waiting, sleeps after 2 min idle; the scene appears only while Claude works |
 | `claude-select.sh` | `ALT+SHIFT+N` | Act on the selected text with Claude: explain / fix / rewrite / summarize / translate (Thai ⇄ English) / custom — result in a glass float, `c` copies |
 | `claude-vision.sh` | `ALT+SHIFT+I` | Select a region → Claude **looks** at it (diagnoses errors, explains diagrams/UI) — the reasoning sibling of `ALT+I` OCR |
 | `focus-mode.sh` | `ALT+SHIFT+F` | Deep-work session: notifications muted, countdown card on the desktop, auto-ends via systemd timer and reports what queued up |
@@ -78,7 +80,7 @@ Then log into Hyprland (SDDM session). Notes:
 | double-click a titlebar | maximize toggle (hyprbars; keeps waybar + gaps) |
 | `ALT+T` / `ALT+K` | reminder / keybind cheatsheet |
 | `ALT+SHIFT+U` / `ALT+SHIFT+N` / `ALT+SHIFT+I` | Claude: dropdown / selection actions / region vision |
-| `ALT+CTRL+U` | Claude session picker (running + resume) |
+| `ALT+CTRL+U` / `ALT+CTRL+O` | Claude Studio (tabbed workspace) / 2D Claude office |
 | `ALT+SHIFT+F` / `ALT+SHIFT+Y` | focus session / audio visualizer |
 | `ALT+SHIFT+S` / `PRINT` | region screenshot |
 | `ALT+1-0`, `ALT+SHIFT+1-0` | workspace switch / move |
