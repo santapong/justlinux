@@ -67,3 +67,34 @@ Then log into Hyprland (SDDM session). Notes:
 
 Everything was built and verified with automated tests (Textual pilot harness,
 `HYPRSETTINGS_DRYRUN=1`).
+
+## Desktop widget cards (hyprcard)
+
+All 13 desktop widgets (clock, stats, calendar, notes, netgraph, weather,
+github, trading, nowplaying, security, devgit, robotics, claude usage) are
+glass cards rendered by **one process** — `bin/hypr-cardhost` — from
+declarative TOML templates in `config/hyprcard/templates/`. The old
+per-widget conky fleet is retired.
+
+| Piece | Role |
+|---|---|
+| `bin/hypr-cardhost` | the card host: async data sources, grid placement, error/stale cards, live retheme (`--ctl ping\|reload\|reload-theme`) |
+| `bin/hypr-arrange` | **ALT+SHIFT+E** — grid edit mode: drag cards (cell snap, cross-monitor, magnetic alignment guides), Enter saves, Esc cancels, press again to close, `--undo` reverts the last save |
+| `bin/hypr-widgetpicker` | template gallery with live previews, params, per-monitor add + manage (also: Settings → Widgets → *＋ Add widget…*) |
+| `bin/hypr-appdock` | one auto-hiding dock per monitor (touch the bottom screen edge to reveal), per-monitor pins |
+| `lib/hyprdesk/` | shared modules: `rows.py` renderers, `cardspec.py` templates, `grid.py` cells, `confwrite.py` atomic config writer, `monitors.py`, `layer.py`, `theme.py` |
+| `bin/widget-*.sh` | data fetchers — `--fields` emits `key=value` for the host; no flag emits legacy conky markup (rollback) |
+
+**Settings** live in `config/conky/widgets.conf` (single source of truth —
+the path is legacy, the file is NOT conky-specific): `inst_<id>=<template>`
+registers an instance, `<id>=on|off` toggles it, `<id>_mon/_col/_row`
+place it on the grid, `<id>_p_<param>=…` parameterizes it (e.g.
+`trading_p_coins=bitcoin,ethereum`). New widget = drop a `.toml` template
++ add an `inst_` line (or use the picker).
+
+**Rollback**: the conky twin configs (`config/conky/widgets/*.conf`,
+`card.lua`) ship until final acceptance; `desktop-widgets.sh` runs any
+widget whose stem has **no** `inst_` twin in widgets.conf, so reverting a
+single widget = delete its `inst_<name>` line and restart. Full revert =
+`git checkout` the pre-hyprcard commit of `bin/` + `config/` (widgets.conf
+keeps user placement either way).

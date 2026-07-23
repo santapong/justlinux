@@ -23,5 +23,6 @@ over = "lim"
   [[rows.rows]]
   type = "bar"
   label = "{lim.label}"
+  label_ink = "sub"
   value = "{lim.pct}"
   text = "{lim.pct}% · {lim.reset}"

@@ -458,20 +458,27 @@ class Host:
         self.first_run_toast()
 
     def first_run_toast(self):
-        """Hidden gestures get taught exactly once."""
+        """Hidden gestures get taught exactly once. Delayed 10s: at
+        session startup the notification daemon may not be up yet, and
+        the marker is written only after the send is dispatched — a
+        failed delivery retries on the next host start."""
         marker = Path.home() / ".local/state/hyprcard/first-run-done"
         if marker.exists():
             return
-        try:
-            marker.parent.mkdir(parents=True, exist_ok=True)
-            marker.write_text("")
-            subprocess.Popen(
-                ["notify-send", "-a", "hyprcard", "Desktop widgets",
-                 "Press ALT+SHIFT+E to arrange — drag cards, they snap "
-                 "to a grid. Add more via Settings → Widgets."],
-                start_new_session=True)
-        except OSError:
-            pass
+
+        def send():
+            try:
+                subprocess.Popen(
+                    ["notify-send", "-a", "hyprcard", "Desktop widgets",
+                     "Press ALT+SHIFT+E to arrange — drag cards, they "
+                     "snap to a grid. Add more via Settings → Widgets."],
+                    start_new_session=True)
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.write_text("")
+            except OSError:
+                pass
+            return False
+        GLib.timeout_add_seconds(10, send)
 
     # ----- lifecycle -----
     def spawn_all(self):

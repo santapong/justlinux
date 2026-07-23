@@ -6,7 +6,9 @@ lands on the desktop.
 
 Ink discipline (validated — don't re-derive by eye):
   accent2 → titles/section icons · fg → key values · sub → secondary
-  good/bad → STATUS ONLY · muted → surfaces (bar tracks), never text.
+  good/bad → STATUS ONLY · muted → surfaces (bar tracks), never text ·
+  accent → DATA FILLS only (bar fills, graph/sparkline strokes) — the
+  wallpaper's primary accent marks measured data, never labels.
 
 Every renderer is ``func(cr, spec, ctx, y) -> height`` and must also
 work with measure-only calls (same signature, cr from a 1×1 surface,
@@ -123,8 +125,20 @@ def row_keyval(cr, spec, ctx, y):
         val = subst(spec.get("value", ""), ctx["params"], ctx["fields"])
         badge = subst(spec.get("badge", ""), ctx["params"], ctx["fields"]) \
             if spec.get("badge") else ""
-        used = _text(cr, ctx, 0, base, key, "sub", 11,
-                     max_w=ctx["width"] * 0.55)
+        # key_ink lifts a primary identifier to fg (repo names etc.);
+        # key2 appends a secondary segment in sub (branch names etc.)
+        key_ink = spec.get("key_ink", "sub")
+        if key_ink not in ("sub", "fg", "accent2"):
+            key_ink = "sub"
+        used = _text(cr, ctx, 0, base, key, key_ink, 11,
+                     max_w=ctx["width"] * 0.4 if spec.get("key2")
+                     else ctx["width"] * 0.55)
+        key2 = subst(spec.get("key2", ""), ctx["params"], ctx["fields"]) \
+            if spec.get("key2") else ""
+        if key2:
+            used += _s(ctx, 8) + _text(
+                cr, ctx, used + _s(ctx, 8), base, key2, "sub", 10,
+                max_w=ctx["width"] * 0.55 - used)
         x = ctx["width"]
         if badge:
             # template may pin the status ink (badge_slot = "{fw_slot}")
@@ -152,8 +166,13 @@ def row_bar(cr, spec, ctx, y):
         pct = max(0.0, min(100.0, vals[0] if vals else 0.0))
         if label:
             base = y + _s(ctx, 14)
+            # label_ink: stats-style section labels stay accent2 (their
+            # twin used color1), quieter fleets (claude) choose sub
+            lslot = spec.get("label_ink", "accent2")
+            if lslot not in ("accent2", "sub", "fg"):
+                lslot = "accent2"
             _text(cr, ctx, 0, base,
-                  subst(label, ctx["params"], ctx["fields"]), "accent2", 11)
+                  subst(label, ctx["params"], ctx["fields"]), lslot, 11)
             text = subst(spec.get("text", ""), ctx["params"], ctx["fields"]) \
                 if spec.get("text") else f"{pct:.0f}%"
             _text(cr, ctx, ctx["width"], base, text, "fg", 11, right=True)
@@ -244,7 +263,8 @@ def row_clock(cr, spec, ctx, y):
 def row_calgrid(cr, spec, ctx, y):
     line = _s(ctx, 17)
     now = time.localtime()
-    cal = calendar.Calendar(firstweekday=0)
+    # Sunday-first like the retired conky twin (cal(1) convention)
+    cal = calendar.Calendar(firstweekday=6)
     weeks = cal.monthdayscalendar(now.tm_year, now.tm_mon)
     # exact: month header + day names + this month's real week count
     # (4–6) — a fixed 9-line allocation left a blank band at the bottom
@@ -261,7 +281,7 @@ def row_calgrid(cr, spec, ctx, y):
         y += line
         base = y + _s(ctx, 13)
         _font(cr, ctx, 10, bold=True)
-        for i, d in enumerate(("Mo", "Tu", "We", "Th", "Fr", "Sa", "Su")):
+        for i, d in enumerate(("Su", "Mo", "Tu", "We", "Th", "Fr", "Sa")):
             _ink(cr, ctx, "sub")
             ext = cr.text_extents(d)
             cr.move_to(i * col_w + (col_w - ext.x_advance) / 2, base)

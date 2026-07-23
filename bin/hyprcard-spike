@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
 """hyprcard-spike — GO/NO-GO probe for the ALT+drag bonus gesture.
 
-Question: with `bindm = ALT, mouse:272, movewindow` active in
-hyprland.conf, does an ALT+left-click ever REACH a bottom-layer card
-surface, and do pointer events carry the MOD1 modifier?
+The question: with `bindm = ALT, mouse:272, movewindow` active, does an
+ALT+left-click get DELIVERED to a bottom-layer card surface at all — or
+does the compositor consume it? (That's the whole gate: the real nudge
+implementation learns ALT-is-held from a non-consuming keybind, NOT from
+pointer-event modifier bits, which never reach keyboard_mode=none
+surfaces — so delivery is the only thing this probe must measure.)
 
-Run it, then hold ALT and left-click the amber test card on your main
-monitor (also try a plain click for comparison). 60s window, Ctrl+C to
-stop early. Verdict is printed AND saved to
-$XDG_RUNTIME_DIR/hyprcard-spike.result:
-  GO      — ALT+click delivered (bonus quick-nudge gesture can ship)
-  PARTIAL — clicks arrive but never with ALT (compositor eats the combo)
-  NO-GO   — no click ever arrived
+Protocol (the card walks you through it):
+  step 1 — plain left-click the amber card once   (baseline: clicks work)
+  step 2 — HOLD ALT and left-click it 3 times     (the actual question)
+
+Verdicts, printed and saved to $XDG_RUNTIME_DIR/hyprcard-spike.result:
+  GO       — clicks arrived during step 2: ALT+click reaches the surface
+  NO-GO    — step 1 clicks arrived but step 2 clicks never did: the
+             movewindow bindm consumes the combo (edit mode stays the
+             only path, per decision D2 — no compromise gesture)
+  BROKEN   — not even the plain click arrived
+  UNTESTED — 90s passed without the protocol being completed
 """
 import os
 import signal
@@ -31,7 +38,7 @@ from hyprdesk.theme import rgb
 
 RESULT = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / \
     "hyprcard-spike.result"
-state = {"plain": 0, "alt": 0}
+state = {"step": 1, "plain": 0, "alt": 0, "mod1_seen": 0}
 
 
 class Probe(LayerWindow):
@@ -43,37 +50,36 @@ class Probe(LayerWindow):
         self.set_app_paintable(True)
         self.area = Gtk.DrawingArea()
         masks = (Gdk.EventMask.BUTTON_PRESS_MASK |
-                 Gdk.EventMask.BUTTON_RELEASE_MASK |
-                 Gdk.EventMask.POINTER_MOTION_MASK)
+                 Gdk.EventMask.BUTTON_RELEASE_MASK)
         self.add_events(masks)
         self.area.add_events(masks)
         self.area.connect("draw", self.on_draw)
         self.area.connect("button-press-event", self.on_press)
         self.add(self.area)
-        self.set_size_request(340, 120)
+        self.set_size_request(360, 130)
         self.show_all()
-        # full input region is the LayerWindow default — nothing to do
 
     def on_press(self, _w, ev):
-        mods = []
-        for name, mask in (("ALT", Gdk.ModifierType.MOD1_MASK),
-                           ("SHIFT", Gdk.ModifierType.SHIFT_MASK),
-                           ("CTRL", Gdk.ModifierType.CONTROL_MASK)):
-            if ev.state & mask:
-                mods.append(name)
-        kind = "alt" if "ALT" in mods else "plain"
-        state[kind] += 1
-        print(f"click received: button={ev.button} "
-              f"mods={'+'.join(mods) or 'none'} state={int(ev.state):#x}",
-              flush=True)
+        if ev.button != 1:
+            return True
+        if ev.state & Gdk.ModifierType.MOD1_MASK:
+            state["mod1_seen"] += 1     # bonus data; never expected
+        if state["step"] == 1:
+            state["plain"] += 1
+            state["step"] = 2
+            print("step 1 ok — now HOLD ALT and click 3×", flush=True)
+        else:
+            state["alt"] += 1
+            print(f"step 2 click {state['alt']}/3 delivered", flush=True)
+            if state["alt"] >= 3:
+                finish()
         self.area.queue_draw()
         return True
 
     def on_draw(self, _w, cr):
         pal = self.pal
         cr.set_source_rgba(*rgb(pal["accent2"]), 0.92)
-        r = 12
-        w, h = 340, 120
+        r, w, h = 12, 360, 130
         cr.new_path()
         cr.arc(w - r, r, r, -1.5708, 0)
         cr.arc(w - r, h - r, r, 0, 1.5708)
@@ -85,43 +91,61 @@ class Probe(LayerWindow):
         cr.select_font_face("JetBrainsMono Nerd Font",
                             cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
         cr.set_font_size(14)
-        cr.move_to(16, 34)
+        cr.move_to(16, 32)
         cr.show_text("ALT+DRAG SPIKE")
-        cr.set_font_size(11)
-        cr.move_to(16, 58)
-        cr.show_text("hold ALT and left-click me · then plain-click")
-        cr.move_to(16, 82)
-        cr.show_text(f"plain clicks: {state['plain']}   "
-                     f"ALT clicks: {state['alt']}")
+        cr.set_font_size(12)
+        cr.move_to(16, 60)
+        if state["step"] == 1:
+            cr.show_text("STEP 1: plain left-click me once")
+        else:
+            cr.show_text("STEP 2: HOLD ALT and click me 3×")
+        cr.set_font_size(10)
+        cr.move_to(16, 88)
+        cr.show_text(f"plain: {state['plain']}   with-ALT delivered: "
+                     f"{state['alt']}/3")
+        cr.move_to(16, 108)
+        cr.show_text("(if ALT-clicks do nothing here, the compositor "
+                     "eats them)")
         return True
 
 
 def finish(*_):
     if state["alt"]:
-        verdict = "GO"
-        msg = ("GO — ALT+click reaches layer surfaces WITH the modifier; "
-               "the quick-nudge bonus gesture can ship.")
+        verdict, msg = "GO", (
+            "GO — ALT+left-click is DELIVERED to bottom-layer surfaces "
+            "despite the movewindow bindm; the quick-nudge gesture can "
+            "ship (arming via non-consuming binds, as designed).")
+        if state["mod1_seen"]:
+            msg += " (bonus: MOD1 even appears in pointer state)"
     elif state["plain"]:
-        verdict = "PARTIAL"
-        msg = ("PARTIAL — clicks arrive but never with ALT: the compositor "
-               "(bindm movewindow) consumes the combo. Edit mode stays the "
-               "only path; no ALT+SHIFT compromise gesture (per D2).")
+        verdict, msg = "NO-GO", (
+            "NO-GO — plain clicks arrive but ALT+clicks never do: the "
+            "compositor consumes the combo. Edit mode (ALT+SHIFT+E) "
+            "remains the way; no compromise gesture per decision D2.")
+    elif state["step"] == 1:
+        verdict, msg = "UNTESTED", (
+            "UNTESTED — the protocol wasn't completed in 90s. "
+            "Re-run hyprcard-spike when ready; no verdict recorded "
+            "as authoritative.")
     else:
-        verdict = "NO-GO"
-        msg = "NO-GO — no click reached the card at all."
+        verdict, msg = "BROKEN", \
+            "BROKEN — not even a plain click reached the probe."
     RESULT.write_text(f"{verdict}\n{msg}\n{time.strftime('%F %T')}\n")
     print(f"\n{msg}\nresult saved: {RESULT}", flush=True)
-    Gtk.main_quit()
     os._exit(0)
 
 
 def main():
+    try:
+        RESULT.unlink()        # a stale verdict must never masquerade
+    except OSError:
+        pass
     GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGINT, finish)
     GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGTERM, finish)
-    GLib.timeout_add_seconds(60, finish)
+    GLib.timeout_add_seconds(90, finish)
     Probe()
-    print("probe up for 60s — hold ALT and click the amber card "
-          "(then plain-click it too)", flush=True)
+    print("probe up (90s) — STEP 1: plain-click the amber card once",
+          flush=True)
     Gtk.main()
 
 

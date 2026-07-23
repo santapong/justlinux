@@ -54,7 +54,9 @@ if FIELDS:
             marks.append(f"↑{ahead}")
         if behind != "0":
             marks.append(f"↓{behind}")
-        slot = "bad" if behind != "0" else ("accent2" if marks else "good")
+        # good/bad are STATUS ONLY; a dirty-but-synced repo is prominent
+        # (fg), not colored — accent2 is title ink, never a status
+        slot = "bad" if behind != "0" else ("fg" if marks else "good")
         lines += [f"repo.{n}.name={repo.name[:14]}",
                   f"repo.{n}.branch={branch[:12]}",
                   f"repo.{n}.state={' '.join(marks) or '✓ clean'}",
