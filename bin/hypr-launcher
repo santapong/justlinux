@@ -396,18 +396,47 @@ def window_entries():
     out = []
     for c in clients:
         ws = c.get("workspace", {}).get("name", "?")
-        if ws == "special:hidden":  # hidden windows have their own restore flow
+        # the ALT+S scratchpad (special:magic) has its OWN toggle and must
+        # NOT be surfaced/drained here — "restoring" it would empty the
+        # scratchpad and break ALT+S. Only surface genuinely-lost windows:
+        # per-window hide (special:hidden) and workspace stash (special:stashN)
+        if ws == "special:magic":
             continue
+        stashed = ws.startswith("special:stash")
+        hidden = ws == "special:hidden" or stashed
         title = c.get("title") or c.get("class") or "?"
-        out.append({"label": title[:60],
-                    "detail": f"{c.get('class', '?')} · ws {ws}",
-                    "icon": "󰖯",
-                    "addr": c.get("address", "")})
-    return sorted(out, key=lambda x: x["detail"])
+        detail = f"{c.get('class', '?')} · ws {ws}"
+        if hidden:
+            kind = "stashed" if stashed else "hidden"
+            detail = f"{c.get('class', '?')} · 󰘓 {kind} — Enter to restore"
+        out.append({"label": title[:60], "detail": detail,
+                    "icon": "󰘓" if hidden else "󰖯",
+                    "addr": c.get("address", ""),
+                    "hidden": hidden})
+    # hidden/stashed windows first (they're the ones you're hunting for)
+    return sorted(out, key=lambda x: (not x.get("hidden"), x["detail"]))
+
+
+def active_workspace_id():
+    try:
+        return json.loads(subprocess.run(
+            ["hyprctl", "activeworkspace", "-j"],
+            capture_output=True, text=True).stdout).get("id", 1)
+    except Exception:
+        return 1
 
 
 def focus_window(entry):
-    hyprctl("dispatch", "focuswindow", f"address:{entry['addr']}")
+    addr = f"address:{entry['addr']}"
+    if entry.get("hidden"):
+        # restore a stashed/hidden window: pull it onto the current
+        # workspace and focus it (focuswindow alone won't unbury a
+        # special-workspace window)
+        hyprctl("dispatch", "movetoworkspace", f"{active_workspace_id()},{addr}")
+        hyprctl("dispatch", "focuswindow", addr)
+    else:
+        # a normal window on another workspace: focuswindow switches there
+        hyprctl("dispatch", "focuswindow", addr)
 
 
 # ---------------- wallpaper ----------------

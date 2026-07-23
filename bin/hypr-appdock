@@ -259,9 +259,19 @@ def hypr_json(cmd):
 
 
 def monitor_states():
-    """{connector: {"ws": id, "empty": bool, "fullscreen": bool}}."""
+    """{connector: {"ws": id, "empty": bool, "fullscreen": bool}}.
+
+    'fullscreen' means TRUE fullscreen (mode 2) only — a maximized window
+    (mode 1, which keeps waybar) must NOT suppress the docks, or
+    double-click-maximize would hide them un-revealably."""
     ws_info = {w["id"]: w for w in hypr_json("workspaces")
                if isinstance(w, dict)}
+    truefs = set()          # workspace ids with a mode-2 fullscreen client
+    for c in hypr_json("clients"):
+        if isinstance(c, dict) and c.get("fullscreen", 0) == 2:
+            wsid = (c.get("workspace") or {}).get("id")
+            if wsid is not None:
+                truefs.add(wsid)
     states = {}
     for m in hypr_json("monitors"):
         if not isinstance(m, dict):
@@ -271,7 +281,7 @@ def monitor_states():
         states[m.get("name")] = {
             "ws": ws,
             "empty": info.get("windows", 0) == 0,
-            "fullscreen": bool(info.get("hasfullscreen")),
+            "fullscreen": ws in truefs,
         }
     return states
 
@@ -342,12 +352,17 @@ class EdgeStrip(LayerWindow):
     """Invisible 4px strip on the screen-bottom edge: pointer touch
     reveals that monitor's auto-hidden dock (Fitts-cheap target)."""
 
-    def __init__(self, gdk_mon, san, on_reveal, on_leave=None):
-        super().__init__(f"dockedge_{san}", default_pos="bottom_middle",
+    def __init__(self, gdk_mon, san, on_reveal, on_leave=None,
+                 edge="bottom", reserved_top=0):
+        # gtk-layer-shell auto-offsets a top-anchored surface BELOW
+        # waybar's exclusive zone, so margin 0 already sits just under the
+        # bar — adding reserved_top here would double the gap
+        pos = "top_middle" if edge == "top" else "bottom_middle"
+        super().__init__(f"dockedge_{edge}_{san}", default_pos=pos,
                          default_x=0, default_y=0, layer="top",
-                         namespace=f"hypr-dockedge-{san}")
+                         namespace=f"hypr-dockedge-{edge}-{san}")
         self._on_leave = on_leave
-        self.anchor_all(("left", "right", "bottom"))
+        self.anchor_all(("left", "right", edge))
         geo = gdk_mon.get_geometry()
         # GTK allocation doesn't follow layer-shell stretch anchors —
         # size explicitly from the monitor geometry
@@ -413,15 +428,30 @@ class EdgeStrip(LayerWindow):
 class Dock(LayerWindow):
     """One monitor's dock."""
 
-    def __init__(self, mgr, gdk_mon, mon_name, san, layer):
+    def __init__(self, mgr, gdk_mon, mon_name, san, layer, edge="bottom",
+                 reserved_top=0):
         c = conf()
-        # per-monitor keys with legacy apps_* fallback
-        d_pos = c.get(f"dock_{san}_pos", c.get("apps_pos", "bottom_middle"))
-        d_x = int(c.get(f"dock_{san}_x", c.get("apps_x", 0)))
-        d_y = int(c.get(f"dock_{san}_y", c.get("apps_y", 12)))
-        super().__init__(f"dock_{san}", default_pos=d_pos, default_x=d_x,
-                         default_y=d_y, layer=layer,
-                         namespace=f"hypr-appdock-{san}")
+        self.edge = edge
+        self.strip = None                # set by the manager after spawn
+        if edge == "top":                # top dock sits just below waybar
+            # margin 6 only — the waybar offset is automatic (exclusive
+            # zone), so this is a small gap under the bar, not +reserved
+            d_pos, d_x = "top_middle", 0
+            d_y = 6
+            ns = f"hypr-appdock-top-{san}"
+            # distinct positioning key so it doesn't inherit the bottom
+            # dock's saved dock_<san>_pos/_x/_y (it mirrors the same PINS,
+            # not the same placement)
+            key = f"docktop_{san}"
+        else:
+            # per-monitor keys with legacy apps_* fallback
+            d_pos = c.get(f"dock_{san}_pos", c.get("apps_pos", "bottom_middle"))
+            d_x = int(c.get(f"dock_{san}_x", c.get("apps_x", 0)))
+            d_y = int(c.get(f"dock_{san}_y", c.get("apps_y", 12)))
+            ns = f"hypr-appdock-{san}"
+            key = f"dock_{san}"
+        super().__init__(key, default_pos=d_pos, default_x=d_x,
+                         default_y=d_y, layer=layer, namespace=ns)
         self.set_target_monitor(gdk_mon)
         self.mgr, self.mon, self.san = mgr, mon_name, san
         self.ws = 1
@@ -481,7 +511,9 @@ class Dock(LayerWindow):
             state = pins_update(mutate)
             if state is not None:
                 self.mgr.pins = state
-                self.rebuild()
+                # rebuild ALL docks on this monitor (top + bottom mirror
+                # the same pins) so the sibling doesn't show a stale icon
+                self.mgr.on_pins_changed()
             return True
         return False
 
@@ -523,10 +555,12 @@ class Manager:
         self.layer = c.get("dock_layer", "top")
         self.autohide = (self.layer == "top"
                          and c.get("dock_autohide", "on") == "on")
+        self.dock_top = c.get("dock_top", "off") == "on"   # extra top dock
         self.apps = all_apps()
         self.pins = load_pins()
-        self.docks = {}                  # connector -> Dock
-        self.strips = {}                 # connector -> EdgeStrip
+        self.docks = {}                  # connector -> bottom Dock
+        self.top_docks = {}              # connector -> top Dock (if dock_top)
+        self.strips = {}                 # connector -> bottom EdgeStrip
         self.states = {}                 # connector -> monitor_states() entry
         self.css = None
         self.suspend = False             # show-all mode (arrange overlay)
@@ -573,6 +607,16 @@ class Manager:
             screen, css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         self.css = css
 
+    def reserved_top(self, mon_name):
+        """Top reserved inset (waybar) for a monitor, px."""
+        for m in hypr_json("monitors"):
+            if isinstance(m, dict) and m.get("name") == mon_name:
+                return (m.get("reserved") or (0, 0, 0, 0))[1]
+        return 0
+
+    def _all_docks(self):
+        return list(self.docks.values()) + list(self.top_docks.values())
+
     # ----- spawn / teardown -----
     def spawn_all(self):
         c = conf()
@@ -580,25 +624,46 @@ class Manager:
             enabled = c.get(f"dock_{san}", c.get("apps", "on")) == "on"
             if not enabled or name in self.docks:
                 continue
-            dock = Dock(self, gdk_mon, name, san, self.layer)
+            dock = Dock(self, gdk_mon, name, san, self.layer, edge="bottom")
             self.docks[name] = dock
             if self.autohide:
                 strip = EdgeStrip(
                     gdk_mon, san,
-                    lambda n=name: self.reveal(n),
-                    lambda n=name: self.schedule_hide(self.docks[n]))
+                    lambda d=dock: self.reveal(d),
+                    lambda d=dock: self.schedule_hide(d),
+                    edge="bottom")
                 strip.show_all()
+                dock.strip = strip
                 self.strips[name] = strip
             else:
                 dock.show_all()
+            # optional top dock: mirrors the same pins, reveals from the
+            # top edge (just below waybar) on hover
+            if self.dock_top:
+                rtop = self.reserved_top(name)
+                top = Dock(self, gdk_mon, name, san, self.layer, edge="top",
+                           reserved_top=rtop)
+                self.top_docks[name] = top
+                if self.autohide:
+                    tstrip = EdgeStrip(
+                        gdk_mon, san,
+                        lambda d=top: self.reveal(d),
+                        lambda d=top: self.schedule_hide(d),
+                        edge="top", reserved_top=rtop)
+                    tstrip.show_all()
+                    top.strip = tstrip
+                else:
+                    top.show_all()
 
     def teardown(self):
-        for dock in self.docks.values():
+        for dock in self._all_docks():
             if dock.picker:
                 dock.picker.destroy()
-        for w in list(self.docks.values()) + list(self.strips.values()):
+            if dock.strip:
+                dock.strip.destroy()
+        for w in self._all_docks():
             w.destroy()
-        self.docks, self.strips = {}, {}
+        self.docks, self.top_docks, self.strips = {}, {}, {}
 
     def respawn_soon(self):
         # debounce monitor hotplug bursts: one pending respawn at a time
@@ -612,21 +677,23 @@ class Manager:
         self.layer = c.get("dock_layer", "top")
         self.autohide = (self.layer == "top"
                          and c.get("dock_autohide", "on") == "on")
+        # re-read the top-dock flag too, so `--ctl reload` can toggle it
+        # at runtime (was only read once at startup)
+        self.dock_top = c.get("dock_top", "off") == "on"
         self.spawn_all()
         self.refresh(initial=True)
         return False                     # one-shot
 
     # ----- auto-hide -----
-    def reveal(self, mon):
-        dock = self.docks.get(mon)
-        st = self.states.get(mon, {})
+    def reveal(self, dock):
+        st = self.states.get(dock.mon, {})
         if os.environ.get("HYPRDOCK_DEBUG"):
-            print(f"reveal({mon}): dock={bool(dock)} state={st}", flush=True)
+            print(f"reveal({dock.mon}/{dock.edge}): state={st}", flush=True)
         if dock and not st.get("fullscreen"):
             dock.show_all()
 
     def _hovered(self, dock):
-        strip = self.strips.get(dock.mon)
+        strip = dock.strip
         return dock.pointer_in or (strip is not None and strip.pointer_in)
 
     def schedule_hide(self, dock):
@@ -644,7 +711,7 @@ class Manager:
         # (a pointer resting on the reveal strip counts as hovering)
         if self.suspend:
             return True
-        for dock in self.docks.values():
+        for dock in self._all_docks():
             st = self.states.get(dock.mon, {})
             if (self.autohide and dock.get_visible()
                     and not self._hovered(dock) and not st.get("empty")):
@@ -653,10 +720,10 @@ class Manager:
 
     def apply_visibility(self):
         if not self.autohide or self.suspend:
-            for dock in self.docks.values():
+            for dock in self._all_docks():
                 dock.show_all()
             return
-        for dock in self.docks.values():
+        for dock in self._all_docks():
             st = self.states.get(dock.mon, {})
             if st.get("fullscreen"):
                 dock.hide()
@@ -686,8 +753,8 @@ class Manager:
                 and not (set(self.docks) & set(self.states))):
             self.respawn_soon()
             return
-        for mon, dock in self.docks.items():
-            st = self.states.get(mon)
+        for dock in self._all_docks():
+            st = self.states.get(dock.mon)
             if st:
                 dock.set_ws(st["ws"])
         # visibility depends on window counts/fullscreen, not just ws ids —
@@ -710,7 +777,7 @@ class Manager:
     def on_pins_changed(self):
         self.pins = load_pins()
         self._pins_mtime = self._pins_stat()
-        for dock in self.docks.values():
+        for dock in self._all_docks():
             dock.rebuild()
 
     def _pins_stat(self):
@@ -724,7 +791,7 @@ class Manager:
         if mt != self._pins_mtime:
             self._pins_mtime = mt
             self.pins = load_pins()
-            for dock in self.docks.values():
+            for dock in self._all_docks():
                 dock.rebuild()
         return True
 
@@ -807,7 +874,7 @@ class Manager:
             cmd = client.recv(256).decode(errors="replace").strip()
             if cmd == "reload-theme":
                 self.apply_theme()
-                for dock in self.docks.values():
+                for dock in self._all_docks():
                     dock.rebuild()
             elif cmd == "reload":
                 self.on_pins_changed()
