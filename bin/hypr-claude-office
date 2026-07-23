@@ -14,6 +14,7 @@ the desktop, behind windows — and hides itself when no Claude runs.
 Run again to toggle off. Autostarted by desktop-widgets.sh when
 widgets.conf has claude_office=on.
 """
+import json
 import math
 import os
 import signal
@@ -29,8 +30,9 @@ from gi.repository import Gtk, GLib
 sys.path.insert(0, str(Path.home() / ".local/lib"))
 from hyprdesk import colors, conf_get, rgb
 from hyprdesk.layer import LayerWindow
-from hyprdesk.claudesessions import (claude_procs, proc_cpu_ticks,
-                                     recent_transcripts, session_meta)
+from hyprdesk.claudesessions import (active_subagents, claude_procs,
+                                     proc_cpu_ticks, recent_transcripts,
+                                     session_meta, window_of_pid)
 
 SCALE = 3
 FPS_MS = 160
@@ -107,7 +109,7 @@ SCREEN_DARK = rgb("#14161c")
 DIM = tuple(c * 0.45 for c in rgb(PAL["sub"]))
 
 
-def draw_art(cr, art, x, y, extra=None):
+def draw_art(cr, art, x, y, extra=None, scale=SCALE):
     ink = dict(INK)
     if extra:
         ink.update(extra)
@@ -118,7 +120,7 @@ def draw_art(cr, art, x, y, extra=None):
             if not col:
                 continue
             cr.set_source_rgb(*col)
-            cr.rectangle(x + rx * SCALE, y + ry * SCALE, SCALE, SCALE)
+            cr.rectangle(x + rx * scale, y + ry * scale, scale, scale)
             cr.fill()
 
 
@@ -144,23 +146,52 @@ class Office(LayerWindow):
                     break
         except Exception:
             pass
-        self.workers = []            # [{pid,label,state,ticks,idle}]
+        self.workers = []            # [{pid,label,state,ticks,idle,addr}]
         self.frame = 0
         self.set_app_paintable(True)
         area = Gtk.DrawingArea()
         area.connect("draw", self.on_draw)
         self.add(area)
-        self.connect("map-event", self._clear_input)
+        # interactive desks: clicks land only on the desk columns, the
+        # rest of the surface stays click-through (pet/dock rule) —
+        # masks go on BOTH toplevel and covering child (GDK gotcha)
+        from gi.repository import Gdk as _Gdk
+        masks = _Gdk.EventMask.BUTTON_PRESS_MASK
+        self.add_events(masks)
+        area.add_events(masks)
+        self.connect("button-press-event", self.on_click)
+        self.connect("map-event", self._update_input)
         self._resize(1)
         GLib.timeout_add(FPS_MS, self._tick)
         GLib.timeout_add_seconds(POLL_S, self._poll)
         self._poll()
 
-    def _clear_input(self, *_):
+    def _update_input(self, *_):
         win = self.get_window()
-        if win:                      # display-only, never eats clicks
-            win.input_shape_combine_region(cairo.Region(), 0, 0)
+        if not win:
+            return False
+        region = cairo.Region()      # empty office: fully click-through
+        for i in range(len(self.workers)):
+            region.union(cairo.RectangleInt(
+                x=PAD + i * CELL_W, y=PAD,
+                width=CELL_W, height=self.h - PAD))
+        win.input_shape_combine_region(region, 0, 0)
         return False
+
+    # ----- interaction -----
+    def on_click(self, _w, event):
+        idx = int((event.x - PAD) // CELL_W)
+        if not (0 <= idx < len(self.workers)):
+            return False
+        wk = self.workers[idx]
+        if wk.get("addr"):           # jump to the session's terminal
+            subprocess.run(["hyprctl", "dispatch", "focuswindow",
+                            f"address:{wk['addr']}"])
+        else:
+            subprocess.run(["notify-send", "Claude office",
+                            f"{wk['label']}: background job — "
+                            "view it on claude.ai / the desktop app"])
+        return True
 
     def _resize(self, n):
         if n == 0:                       # compact "waiting for work" card
@@ -189,6 +220,13 @@ class Office(LayerWindow):
         prev = {w["pid"]: w for w in self.workers}
         taken = set()
         rows = []
+        agents = active_subagents()
+        try:
+            clients = json.loads(subprocess.run(
+                ["hyprctl", "-j", "clients"], capture_output=True,
+                text=True, timeout=2).stdout)
+        except Exception:
+            clients = []
         self._resolve_n = getattr(self, "_resolve_n", 0) + 1
         for pid, cwd, interactive in claude_procs():
             ticks = proc_cpu_ticks(pid)
@@ -216,6 +254,14 @@ class Office(LayerWindow):
                 w["idle"] = w.get("idle", 0) + POLL_S
                 w["state"] = ("sleep" if w["idle"] > SLEEP_AFTER
                               else "attention")   # finished — needs YOU
+            # workflow subagents attached to this session's transcript
+            from hyprdesk.claudesessions import _sid_key
+            sid_flat = _sid_key(Path(w["tx"]).stem) if w.get("tx") else ""
+            w["agents"] = agents.get(sid_flat, 0)
+            if w["agents"]:          # a swarm at the desk = it's working
+                w["state"], w["idle"] = "typing", 0.0
+            w["addr"] = (window_of_pid(pid, clients)
+                         if interactive else "")
             home = str(Path.home())
             base = ("~" if cwd.rstrip("/") == home
                     else os.path.basename(cwd.rstrip("/")) or "~")
@@ -228,7 +274,8 @@ class Office(LayerWindow):
         # always stay visible while enabled — an empty office renders a
         # sleeping Clawd, so toggling ON always has a visible result
         if not self.get_visible():
-            self.show_all()          # map-event re-clears the input region
+            self.show_all()
+        self._update_input()         # desk click targets follow the layout
         return True
 
     # ----- render -----
@@ -329,6 +376,18 @@ class Office(LayerWindow):
                     cr.set_source_rgb(*rgb(PAL["bg"]))
                     self._text(cr, bx + 1.4 * SCALE, by + 3.4 * SCALE,
                                "!", size=11)
+            # workflow swarm: mini workers hover beside the desk
+            n_agents = wk.get("agents", 0)
+            if n_agents:
+                for j in range(min(3, n_agents)):
+                    hop = 1 if (self.frame + j) % 2 else 0
+                    draw_art(cr, CLAWD_A if (self.frame + j) % 2
+                             else CLAWD_B,
+                             x0 + CELL_W - 20 - (j % 2) * 6,
+                             PAD + 14 + j * 12 - hop, scale=2)
+                cr.set_source_rgb(*rgb(PAL["accent"]))
+                self._text(cr, x0 + CELL_W - 22, PAD + 58,
+                           f"×{n_agents}", size=9)
             # label + state dot
             dot = {"typing": rgb(PAL["accent"]), "reading": rgb(PAL["sub"]),
                    "attention": rgb(PAL["accent2"]),

@@ -117,6 +117,50 @@ def recent_transcripts(limit=25):
     return sorted(files, key=lambda t: t[0], reverse=True)[:limit]
 
 
+def _sid_key(text):
+    """Normalize a session id (or a path fragment ending in one) to the
+    last 32 hex chars — uuid-sans-dashes, layout-independent."""
+    hexed = "".join(ch for ch in text.lower() if ch in "0123456789abcdef")
+    return hexed[-32:]
+
+
+def active_subagents(max_age=20):
+    """{sid_key(parent_session): active_agent_count}. Agent transcripts
+    appear in TWO layouts: nested (<proj>/<sid>/subagents/[workflows/
+    <wf>/]agent-*.jsonl — current) and flat encoded top-level dirs whose
+    name embeds '-subagents-' (older runs). An agent file modified in
+    the last max_age seconds counts as actively working."""
+    now = time.time()
+    out = {}
+
+    def bump(sid, f):
+        try:
+            if now - f.stat().st_mtime < max_age:
+                k = _sid_key(sid)
+                out[k] = out.get(k, 0) + 1
+        except OSError:
+            pass
+
+    try:
+        for proj in CLAUDE_PROJECTS.iterdir():
+            if not proj.is_dir():
+                continue
+            if "-subagents-" in proj.name:          # flat encoded layout
+                sid = proj.name.split("-subagents-")[0]
+                for f in proj.glob("agent-*.jsonl"):
+                    bump(sid, f)
+                continue
+            for sub in proj.glob("*/subagents"):    # nested layout
+                sid = sub.parent.name
+                for f in sub.glob("agent-*.jsonl"):
+                    bump(sid, f)
+                for f in sub.glob("*/*/agent-*.jsonl"):
+                    bump(sid, f)
+    except OSError:
+        pass
+    return out
+
+
 def session_rows(clients=None):
     """Flat entry list for pickers: running first, then bg jobs, then
     resumable transcripts. Same dict shape the launcher's Item expects."""
