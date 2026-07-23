@@ -1,0 +1,261 @@
+#!/usr/bin/env python3
+"""hypr-claude-office — a little 2D office where Claude works for you.
+
+One desk per live Claude Code session (interactive terminals AND
+background jobs). The worker is a mini Clawd (the fleet's orange
+starburst mascot):
+  · TYPING  — its session is burning CPU right now (spikes wiggle,
+              laptop screen flickers)
+  · WAITING — session alive but idle: thought-dots cycle overhead
+  · ASLEEP  — idle for 2+ minutes (zzz)
+The scene lives on the bottom layer like the widget cards — visible on
+the desktop, behind windows — and hides itself when no Claude runs.
+
+Run again to toggle off. Autostarted by desktop-widgets.sh when
+widgets.conf has claude_office=on.
+"""
+import math
+import os
+import signal
+import subprocess
+import sys
+from pathlib import Path
+
+import cairo
+import gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, GLib
+
+sys.path.insert(0, str(Path.home() / ".local/lib"))
+from hyprdesk import colors, conf_get, rgb
+from hyprdesk.layer import LayerWindow
+from hyprdesk.claudesessions import claude_procs, proc_cpu_ticks
+
+SCALE = 3
+FPS_MS = 160
+POLL_S = 2
+CELL_W = 26 * SCALE          # one desk + margin, art cells
+CELL_H = 30 * SCALE
+PAD = 14
+BUSY_TICKS = 3               # cpu ticks per poll ⇒ "typing"
+SLEEP_AFTER = 120            # s of idle ⇒ zzz
+
+# ---------- toggle: kill a running instance ----------
+ME = os.path.realpath(__file__)
+try:
+    out = subprocess.run(["pgrep", "-f", f"python3 {ME}"],
+                         capture_output=True, text=True).stdout.split()
+    others = [p for p in out if p and int(p) != os.getpid()]
+    if others:
+        for p in others:
+            os.kill(int(p), signal.SIGTERM)
+        sys.exit(0)
+except (ValueError, ProcessLookupError, PermissionError):
+    pass
+
+PAL = colors()
+
+# mini Clawd (9 wide) — faces the laptop; two frames wiggle the spikes
+CLAWD_A = [
+    "...O..O..",
+    "O..OOOO..",
+    ".OOOOOOO.",
+    "OOEOOOEOO",
+    ".OOOOOOO.",
+    "O..OOOO..",
+    "...O..O..",
+]
+CLAWD_B = [
+    "..O..O...",
+    "..OOOO..O",
+    ".OOOOOOO.",
+    "OOEOOOEOO",
+    ".OOOOOOO.",
+    "..OOOO..O",
+    "..O..O...",
+]
+CLAWD_SLEEP = [
+    ".........",
+    "..OOOOO..",
+    ".OODOODO.",
+    "..OOOOO..",
+    ".........",
+]
+# desk with a laptop (16 wide): S = screen, K = keyboard, D = desktop
+DESK = [
+    ".....SSSSS......",
+    ".....SSSSS......",
+    "....KKKKKKK.....",
+    "DDDDDDDDDDDDDDDD",
+    ".L............L.",
+    ".L............L.",
+]
+
+INK = {
+    "O": rgb("#D97757"), "D2": rgb("#8f4830"), "E": rgb("#1d1d1b"),
+    "D": rgb(PAL["muted"]), "L": rgb(PAL["muted"]),
+    "K": rgb(PAL["sub"]),
+}
+
+
+def draw_art(cr, art, x, y, extra=None):
+    ink = dict(INK)
+    if extra:
+        ink.update(extra)
+    for ry, row in enumerate(art):
+        for rx, ch in enumerate(row):
+            col = ink.get("D2" if (ch == "D" and art in
+                          (CLAWD_A, CLAWD_B, CLAWD_SLEEP)) else ch)
+            if not col:
+                continue
+            cr.set_source_rgb(*col)
+            cr.rectangle(x + rx * SCALE, y + ry * SCALE, SCALE, SCALE)
+            cr.fill()
+
+
+class Office(LayerWindow):
+    def __init__(self):
+        mon = conf_get("office_mon", "DP-1")
+        super().__init__("office", default_pos="bottom_left",
+                         default_x=24, default_y=24,
+                         layer="bottom", namespace="hypr-office")
+        try:
+            from hyprdesk.monitors import gdk_monitor_map
+            import gi as _gi
+            from gi.repository import Gdk
+            for gdk_mon, name, _san in gdk_monitor_map(
+                    Gdk.Display.get_default()):
+                if name == mon:
+                    self.set_target_monitor(gdk_mon)
+                    break
+        except Exception:
+            pass
+        self.workers = []            # [{pid,label,state,ticks,idle}]
+        self.frame = 0
+        self.set_app_paintable(True)
+        area = Gtk.DrawingArea()
+        area.connect("draw", self.on_draw)
+        self.add(area)
+        self.connect("map-event", self._clear_input)
+        self._resize(1)
+        GLib.timeout_add(FPS_MS, self._tick)
+        GLib.timeout_add_seconds(POLL_S, self._poll)
+        self._poll()
+
+    def _clear_input(self, *_):
+        win = self.get_window()
+        if win:                      # display-only, never eats clicks
+            win.input_shape_combine_region(cairo.Region(), 0, 0)
+        return False
+
+    def _resize(self, n):
+        self.w = PAD * 2 + max(1, n) * CELL_W
+        self.h = PAD + CELL_H + 18
+        self.set_size_request(self.w, self.h)
+
+    # ----- data -----
+    def _poll(self):
+        prev = {w["pid"]: w for w in self.workers}
+        rows = []
+        for pid, cwd, interactive in claude_procs():
+            ticks = proc_cpu_ticks(pid)
+            if ticks is None:
+                continue
+            w = prev.get(pid, {"pid": pid, "ticks": ticks, "idle": 0.0})
+            delta = ticks - w["ticks"]
+            w["ticks"] = ticks
+            if delta >= BUSY_TICKS:
+                w["state"], w["idle"] = "typing", 0.0
+            else:
+                w["idle"] = w.get("idle", 0) + POLL_S
+                w["state"] = ("sleep" if w["idle"] > SLEEP_AFTER
+                              else "waiting")
+            base = os.path.basename(cwd.rstrip("/")) or "~"
+            w["label"] = (base[:10] + ("" if interactive else " 󰑮"))
+            rows.append(w)
+        rows.sort(key=lambda w: w["pid"])
+        if len(rows) != len(self.workers):
+            self._resize(len(rows))
+        self.workers = rows
+        if rows and not self.get_visible():
+            self.show_all()          # map-event re-clears the input region
+        elif not rows and self.get_visible():
+            self.hide()              # nobody's working: office closes
+        return True
+
+    # ----- render -----
+    def _tick(self):
+        self.frame += 1
+        if self.get_visible():
+            self.queue_draw()
+        return True
+
+    def on_draw(self, _w, cr):
+        cr.set_operator(cairo.OPERATOR_SOURCE)
+        cr.set_source_rgba(0, 0, 0, 0)
+        cr.paint()
+        cr.set_operator(cairo.OPERATOR_OVER)
+        # glass floor card
+        r = 14
+        w, h = self.w, self.h
+        cr.new_path()
+        cr.arc(r, r, r, math.pi, 1.5 * math.pi)
+        cr.arc(w - r, r, r, 1.5 * math.pi, 2 * math.pi)
+        cr.arc(w - r, h - r, r, 0, 0.5 * math.pi)
+        cr.arc(r, h - r, r, 0.5 * math.pi, math.pi)
+        cr.close_path()
+        cr.set_source_rgba(*rgb(PAL["bg"]), 0.80)
+        cr.fill()
+        blink = self.frame % 2 == 0
+        for i, wk in enumerate(self.workers):
+            x0 = PAD + i * CELL_W
+            y_desk = PAD + 16 * SCALE
+            y_clawd = y_desk - 6 * SCALE
+            state = wk["state"]
+            if state == "sleep":
+                draw_art(cr, DESK, x0 + 4 * SCALE, y_desk,
+                         extra={"S": rgb(PAL["muted"])})
+                draw_art(cr, CLAWD_SLEEP, x0 + 7 * SCALE, y_clawd + 2 * SCALE)
+                cr.set_source_rgb(*rgb(PAL["sub"]))
+                self._text(cr, x0 + 15 * SCALE, y_clawd - 4, "z Z z")
+            else:
+                screen = (rgb(PAL["accent"]) if state == "typing" and blink
+                          else rgb(PAL["accent2"]) if state == "typing"
+                          else rgb(PAL["sub"]))
+                draw_art(cr, DESK, x0 + 4 * SCALE, y_desk,
+                         extra={"S": screen})
+                bob = SCALE if (state == "typing" and blink) else 0
+                draw_art(cr, CLAWD_A if blink else CLAWD_B,
+                         x0 + 7 * SCALE, y_clawd - bob)
+                if state == "waiting":       # thought dots cycle
+                    on = self.frame % 3
+                    for d in range(3):
+                        cr.set_source_rgba(*rgb(PAL["sub"]),
+                                           1.0 if d == on else 0.35)
+                        cr.arc(x0 + (10 + d * 3) * SCALE, y_clawd - 6,
+                               SCALE * 0.7, 0, 2 * math.pi)
+                        cr.fill()
+            cr.set_source_rgb(*rgb(PAL["sub"]))
+            self._text(cr, x0 + 2 * SCALE, PAD + CELL_H + 8, wk["label"])
+        return True
+
+    @staticmethod
+    def _text(cr, x, y, s):
+        cr.select_font_face("JetBrainsMono Nerd Font",
+                            cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_NORMAL)
+        cr.set_font_size(10)
+        cr.move_to(x, y)
+        cr.show_text(s)
+
+
+def main():
+    def sig_quit(*_):
+        os._exit(0)
+    GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGTERM, sig_quit)
+    GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGINT, sig_quit)
+    Office()
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

@@ -5,6 +5,7 @@
 WIDGET_DIR="$HOME/.config/conky/widgets"
 CONF="$HOME/.config/conky/widgets.conf"
 PET="$HOME/.local/bin/hypr-pet"
+OFFICE="$HOME/.local/bin/hypr-claude-office"
 DOCK="$HOME/.local/bin/hypr-appdock"
 SERWATCH="$HOME/.local/bin/serial-watch"
 CARDHOST="$HOME/.local/bin/hypr-cardhost"
@@ -23,6 +24,7 @@ case "${1:-start}" in
 stop)
     pkill -f "conky -c $WIDGET_DIR" 2>/dev/null
     pkill -xf "python3 $PET" 2>/dev/null
+    pkill -xf "python3 $OFFICE" 2>/dev/null
     pkill -xf "python3 $DOCK" 2>/dev/null
     pkill -xf "python3 $SERWATCH" 2>/dev/null
     pkill -xf "python3 $CARDHOST" 2>/dev/null
@@ -82,6 +84,10 @@ start)
             [ "$layer" = "bottom" ] && layer=""
             HYPRPET_LAYER="$layer" "$PET" >/dev/null 2>&1 &
         fi
+    fi
+    if [ "$(setting claude_office on)" = "on" ]; then
+        pgrep -xf "python3 $OFFICE" >/dev/null ||
+            "$OFFICE" >/dev/null 2>&1 &
     fi
     ;;
 esac
