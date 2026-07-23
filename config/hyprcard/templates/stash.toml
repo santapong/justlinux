@@ -1,0 +1,37 @@
+[template]
+name = "stash"
+label = "Hidden windows"
+icon = "󰘸"
+description = "Windows parked in special workspaces (stash/hide/scratchpad)"
+default_width = 300
+default_pos = "top_right"
+
+[source]
+cmd = "~/.local/bin/widget-stash.sh --fields"
+interval = 5
+
+[[rows]]
+type = "title"
+text = "󰘸  HIDDEN WINDOWS"
+badge = "{count}"
+
+[[rows]]
+type = "hr"
+
+[[rows]]
+type = "repeat"
+over = "w"
+  [[rows.rows]]
+  type = "keyval"
+  key = "{w.name}"
+  key_ink = "fg"
+  key2 = "  {w.title}"
+  badge = "{w.where}"
+
+[[rows]]
+type = "hr"
+
+[[rows]]
+type = "text"
+text = "{hint}"
+ink = "sub"

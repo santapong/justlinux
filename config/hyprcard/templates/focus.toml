@@ -1,0 +1,28 @@
+[template]
+name = "focus"
+label = "Focus session"
+icon = "󰐰"
+description = "Deep-work countdown: DND while it runs (ALT+SHIFT+F)"
+default_width = 300
+default_pos = "top_left"
+
+[source]
+cmd = "~/.local/bin/widget-focus.sh --fields"
+interval = 5
+
+[[rows]]
+type = "title"
+text = "󰐰  FOCUS"
+badge = "{remaining}"
+
+[[rows]]
+type = "hr"
+
+[[rows]]
+type = "bar"
+value = "{pct}"
+
+[[rows]]
+type = "text"
+text = "{label}"
+ink = "sub"
