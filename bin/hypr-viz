@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""hypr-viz — ambient audio visualizer (ALT+SHIFT+Y toggles).
+
+A small glass panel of spectrum bars on the bottom layer (visible on the
+desktop, behind windows — same philosophy as the widget cards). Captures
+the default sink MONITOR via pw-record (PipeWire native, no cava/pulse
+deps) and computes 12 log-spaced band energies with pure-Python Goertzel
+— no numpy on this box. Colors follow the wallust palette.
+
+Run again to toggle off (the running instance is killed)."""
+import math
+import os
+import signal
+import subprocess
+import sys
+import threading
+from array import array
+from pathlib import Path
+
+import cairo
+import gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, GLib
+
+sys.path.insert(0, str(Path.home() / ".local/lib"))
+from hyprdesk import colors
+from hyprdesk.layer import LayerWindow
+
+RATE = 44100
+CHUNK = 1024                 # samples per frame (~23ms → ~25fps cadence)
+BANDS = 12
+W, H = 300, 64
+DECAY = 0.72                 # fall speed of the bars (per frame)
+
+# ---------- toggle: kill a running instance instead of starting twice ----
+ME = os.path.realpath(__file__)
+try:
+    out = subprocess.run(["pgrep", "-f", f"python3 {ME}"],
+                         capture_output=True, text=True).stdout.split()
+    others = [p for p in out if p and int(p) != os.getpid()]
+    if others:
+        for p in others:
+            os.kill(int(p), signal.SIGTERM)
+        sys.exit(0)
+except (ValueError, ProcessLookupError, PermissionError):
+    pass
+
+
+def hex_rgb(h):
+    h = h.lstrip("#")
+    return tuple(int(h[i:i + 2], 16) / 255 for i in (0, 2, 4))
+
+
+class Viz(LayerWindow):
+    def __init__(self):
+        super().__init__("viz", default_pos="bottom_right",
+                         default_x=24, default_y=76,   # clear the pet strip
+                         layer="bottom", namespace="hypr-viz")
+        self.set_size_request(W, H)
+        self.set_app_paintable(True)
+        self.levels = [0.0] * BANDS
+        pal = colors()
+        self.bg = hex_rgb(pal["bg"])
+        self.c_lo = hex_rgb(pal["accent"])
+        self.c_hi = hex_rgb(pal["accent2"])
+        area = Gtk.DrawingArea()       # childless app-paintable never draws
+        area.connect("draw", self.on_draw)
+        self.add(area)
+        # display-only: never eat clicks (widget-card rule)
+        self.connect("map-event", self._clear_input)
+        self.show_all()
+
+    def _clear_input(self, *_):
+        win = self.get_window()
+        if win:
+            win.input_shape_combine_region(cairo.Region(), 0, 0)
+        return False
+
+    def on_draw(self, _w, cr):
+        cr.set_operator(cairo.OPERATOR_SOURCE)
+        cr.set_source_rgba(0, 0, 0, 0)
+        cr.paint()
+        cr.set_operator(cairo.OPERATOR_OVER)
+        # glass background (blur + ignore_alpha layerrules do the rest)
+        r, pad = 14, 0
+        cr.new_path()
+        cr.arc(pad + r, pad + r, r, math.pi, 1.5 * math.pi)
+        cr.arc(W - pad - r, pad + r, r, 1.5 * math.pi, 2 * math.pi)
+        cr.arc(W - pad - r, H - pad - r, r, 0, 0.5 * math.pi)
+        cr.arc(pad + r, H - pad - r, r, 0.5 * math.pi, math.pi)
+        cr.close_path()
+        cr.set_source_rgba(*self.bg, 0.80)
+        cr.fill()
+        # bars
+        inset, gap = 14, 5
+        bw = (W - 2 * inset - gap * (BANDS - 1)) / BANDS
+        for i, lv in enumerate(self.levels):
+            t = i / max(1, BANDS - 1)
+            col = tuple(a + (b - a) * t for a, b in zip(self.c_lo, self.c_hi))
+            bh = max(2, lv * (H - 24))
+            x = inset + i * (bw + gap)
+            cr.set_source_rgba(*col, 0.95)
+            cr.rectangle(x, H - 12 - bh, bw, bh)
+            cr.fill()
+        return True
+
+
+def audio_loop(viz):
+    freqs = [50 * (12000 / 50) ** (i / (BANDS - 1)) for i in range(BANDS)]
+    coeffs = [2 * math.cos(2 * math.pi * f / RATE) for f in freqs]
+    proc = subprocess.Popen(
+        ["pw-record", "-P", "{ stream.capture.sink = true }",
+         "--rate", str(RATE), "--channels", "1", "--format", "s16", "-"],
+        stdout=subprocess.PIPE)
+    need = CHUNK * 2
+    try:
+        while True:
+            buf = proc.stdout.read(need)
+            if not buf or len(buf) < need:
+                break
+            samples = array("h", buf)
+            new = []
+            for c in coeffs:
+                s1 = s2 = 0.0
+                for x in samples:
+                    s1, s2 = c * s1 - s2 + x, s1
+                p = s1 * s1 + s2 * s2 - c * s1 * s2
+                # log scale into 0..1 (16-bit full scale)
+                db = 10 * math.log10(p / (CHUNK * 32768.0) ** 2 + 1e-12)
+                new.append(max(0.0, min(1.0, (db + 55) / 50)))
+            for i in range(BANDS):
+                viz.levels[i] = max(new[i], viz.levels[i] * DECAY)
+            GLib.idle_add(viz.queue_draw)
+    finally:
+        proc.terminate()
+        GLib.idle_add(Gtk.main_quit)
+
+
+def main():
+    def sig_quit(*_):
+        os._exit(0)                 # Gtk.main_quit from signal is unreliable
+    GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGTERM, sig_quit)
+    GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGINT, sig_quit)
+    viz = Viz()
+    threading.Thread(target=audio_loop, args=(viz,), daemon=True).start()
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

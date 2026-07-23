@@ -18,6 +18,12 @@ auto-themed from the wallpaper by wallust.
 | `wallpaper.sh` | `ALT+SHIFT+W` | Random/pick wallpaper + wallust recolor of the whole desktop (hypr borders, waybar, rofi, swaync — live) |
 | smart top bar | `ALT+B` pins | waybar auto-hide, owned by `hypr-appdock` (`bar_smart=on`): hover the top screen edge to fade the bar in (250ms), leave to fade out; `ALT+B` pins it open / releases it; toggle from the Tools hub. (`waybar-autohide.sh` is the retired standalone predecessor) |
 | `screenshot.sh` | `ALT+SHIFT+S` | Region/screen/all screenshots → file + clipboard + notification |
+| `drop-claude` | `ALT+SHIFT+U` | Dropdown **Claude Code** terminal (guake-style, keeps its session) — the AI sibling of `ALT+U` drop-term |
+| `claude-select.sh` | `ALT+SHIFT+N` | Act on the selected text with Claude: explain / fix / rewrite / summarize / translate (Thai ⇄ English) / custom — result in a glass float, `c` copies |
+| `claude-vision.sh` | `ALT+SHIFT+I` | Select a region → Claude **looks** at it (diagnoses errors, explains diagrams/UI) — the reasoning sibling of `ALT+I` OCR |
+| `focus-mode.sh` | `ALT+SHIFT+F` | Deep-work session: notifications muted, countdown card on the desktop, auto-ends via systemd timer and reports what queued up |
+| `hypr-viz` | `ALT+SHIFT+Y` | Ambient audio visualizer — glass spectrum bars on the desktop (PipeWire sink monitor, pure-Python Goertzel, zero deps), wallust-colored |
+| `wallpaper-ambient.sh` | — | Sky-reactive wallpaper: hourly gradient matched to time-of-day + live weather, cascaded through wallust so the whole desktop follows the sky (`on`/`off` toggles the timer) |
 
 ## Architecture
 
@@ -70,6 +76,8 @@ Then log into Hyprland (SDDM session). Notes:
 | `ALT+H` | window overview (all workspaces + restore hidden) |
 | double-click a titlebar | maximize toggle (hyprbars; keeps waybar + gaps) |
 | `ALT+T` / `ALT+K` | reminder / keybind cheatsheet |
+| `ALT+SHIFT+U` / `ALT+SHIFT+N` / `ALT+SHIFT+I` | Claude: dropdown / selection actions / region vision |
+| `ALT+SHIFT+F` / `ALT+SHIFT+Y` | focus session / audio visualizer |
 | `ALT+SHIFT+S` / `PRINT` | region screenshot |
 | `ALT+1-0`, `ALT+SHIFT+1-0` | workspace switch / move |
 | `ALT+G`, `ALT+SHIFT+TAB` | window group (tabs) / cycle tabs |
@@ -79,8 +87,9 @@ Everything was built and verified with automated tests (Textual pilot harness,
 
 ## Desktop widget cards (hyprcard)
 
-All 12 desktop widgets (clock, stats, calendar, netgraph, weather, github,
-trading, nowplaying, security, devgit, robotics, claude usage) are
+All 14 desktop widgets (clock, stats, calendar, netgraph, weather, github,
+trading, nowplaying, security, devgit, robotics, claude usage, hidden-window
+stash, focus countdown) are
 glass cards rendered by **one process** — `bin/hypr-cardhost` — from
 declarative TOML templates in `config/hyprcard/templates/`. The old
 per-widget conky fleet is retired.

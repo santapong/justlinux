@@ -33,7 +33,7 @@ One person, one software system, four things it leans on:
 
 | Container | Tech | Responsibility |
 |---|---|---|
-| `hypr-cardhost` | Python/GTK3 | Renders all 12 glass widget cards from TOML templates in **one process** |
+| `hypr-cardhost` | Python/GTK3 | Renders all 14 glass widget cards from TOML templates in **one process** |
 | `hypr-appdock` | Python/GTK3 | Per-monitor bottom docks **and the smart top bar** (see Level 3) |
 | `hypr-arrange` | Python/GTK3 | ALT+SHIFT+E grid edit mode for card placement |
 | `hypr-widgetpicker` | Python/GTK3 | Card gallery: add / remove / parameterize instances |
