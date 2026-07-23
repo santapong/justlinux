@@ -70,10 +70,21 @@ def monitor_names():
 
 
 def cardhost_reload():
+    """Tell the host to re-read config; if it isn't running, START it —
+    otherwise add/toggle/remove silently no-op on a dead host."""
     try:
-        subprocess.run([str(Path.home() / ".local/bin/hypr-cardhost"),
-                        "--ctl", "reload"], capture_output=True, timeout=3)
+        r = subprocess.run([str(Path.home() / ".local/bin/hypr-cardhost"),
+                            "--ctl", "reload"], capture_output=True,
+                           timeout=3)
+        if r.returncode == 0 and b"ok" in r.stdout:
+            return
     except Exception:
+        pass
+    try:                         # host down/unreachable: idempotent start
+        subprocess.Popen([str(Path.home() /
+                              ".local/bin/desktop-widgets.sh"), "start"],
+                         start_new_session=True)
+    except OSError:
         pass
 
 
@@ -119,6 +130,11 @@ def find_free_cell(mon, card_w, card_h, c):
         m = layers.get(mon, {})
         for lvl in (m.get("levels") or {}).values():
             for layer in lvl:
+                # skip ghost surfaces (dead clients, pid -1) — Hyprland
+                # 0.55 leaves them lingering; counting them as occupied
+                # cells would push new widgets to phantom positions
+                if layer.get("pid", -1) <= 0:
+                    continue
                 if not layer.get("namespace", "").startswith("hypr-card-"):
                     continue
                 lx = layer["x"] - geo["x"] - res[0]
@@ -630,7 +646,7 @@ class Picker(Gtk.Window):
         suffixes = {"mon", "col", "row", "pos", "x", "y", "scale", "size"}
         t = self.templates.get(c.get(f"inst_{inst_id}", ""), None)
         params = t.params if isinstance(t, cardspec.Template) else {}
-        doomed = [f"inst_{inst_id}", inst_id]
+        doomed = [f"inst_{inst_id}"]
         doomed += [f"{inst_id}_{s}" for s in suffixes
                    if f"{inst_id}_{s}" in c]
         doomed += [f"{inst_id}_p_{p}" for p in params
@@ -638,7 +654,11 @@ class Picker(Gtk.Window):
         # unknown _p_ keys from a template that later changed its params
         doomed += [k for k in c if k.startswith(f"{inst_id}_p_")
                    and k not in doomed]
-        conf_delete(doomed)
+        # KEEP the bare on/off key set to 'off' rather than deleting it:
+        # every card id equals a conky config stem, and desktop-widgets.sh
+        # defaults a MISSING key to 'on' — deleting it would resurrect the
+        # legacy conky twin at the next start
+        conf_set({inst_id: "off"}, delete=doomed)
         cardhost_reload()
         notify(f"{label} removed — 'hypr-arrange --undo' reverts")
         self.populate_gallery()

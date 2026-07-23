@@ -14,6 +14,11 @@ setting() {   # setting <key> <default>
     echo "${v:-$2}"
 }
 
+# serialize all verbs: concurrent restarts (login + wallpaper + settings)
+# could otherwise spawn two card hosts / two dock managers
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/desktop-widgets.lock"
+flock 9 2>/dev/null || true
+
 case "${1:-start}" in
 stop)
     pkill -f "conky -c $WIDGET_DIR" 2>/dev/null
@@ -47,11 +52,14 @@ restart-conky)
     ;;
 start)
     for cfg in "$WIDGET_DIR"/*.conf; do
+        [ -e "$cfg" ] || continue          # empty/absent dir: glob is literal
         name=$(basename "$cfg" .conf)
         [ "$(setting "$name" on)" = "on" ] || continue
-        # a widget with an inst_ twin has moved to the card host —
-        # its conky config stays on disk as rollback only
+        # a widget that has migrated to the card host stays conky-OFF: an
+        # `inst_` twin OR a matching hyprcard template both mean "this is a
+        # card now" — so removing the inst_ line can't resurrect the twin
         grep -qs "^inst_$name=" "$CONF" && continue
+        [ -e "$HOME/.config/hyprcard/templates/$name.toml" ] && continue
         pgrep -f "conky -c $cfg" >/dev/null ||
             conky -c "$cfg" >/dev/null 2>&1 &
     done
@@ -59,7 +67,10 @@ start)
         pgrep -xf "python3 $CARDHOST" >/dev/null ||
             "$CARDHOST" >/dev/null 2>&1 &
     fi
-    if [ "$(setting apps on)" = "on" ]; then
+    # dock manager runs if the global apps toggle is on OR any monitor has
+    # its own dock enabled (dock_<MON>=on) even with apps=off
+    if [ "$(setting apps on)" = "on" ] ||
+       grep -qsE '^dock_[A-Za-z0-9_]+=on' "$CONF"; then
         pgrep -xf "python3 $DOCK" >/dev/null ||
             "$DOCK" >/dev/null 2>&1 &
     fi

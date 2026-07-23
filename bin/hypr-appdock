@@ -54,7 +54,10 @@ CTL_SOCK = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "hypr-appdock.sock"
 STRIP_H = 4               # reveal-strip height (px)
 HIDE_DELAY_MS = 600       # pointer-left → hide grace
 DWELL_MS = 180            # strip hover before reveal (monitor crossings pass in <50ms)
-SUSPEND_MAX_S = 300       # show-all safety: auto-resume even if arrange dies
+# show-all safety net: auto-resume even if arrange dies. Kept ABOVE
+# arrange's own 300s idle-close so a long (thinking) arrange session
+# can't have its docks yanked out from under it mid-edit.
+SUSPEND_MAX_S = 360
 APP_DIRS = [
     HOME / ".local/share/applications",
     Path("/usr/share/applications"),
@@ -768,9 +771,11 @@ class Manager:
             probe.settimeout(0.5)
             probe.connect(str(CTL_SOCK))
             probe.close()
-            print("hypr-appdock: another instance owns the ctl socket — "
-                  "ctl disabled for this one", file=sys.stderr, flush=True)
-            return
+            # a live dock manager already owns the socket — EXIT rather
+            # than keep a second, duplicate set of docks on screen
+            print("hypr-appdock: another instance is running — exiting",
+                  file=sys.stderr, flush=True)
+            os._exit(0)
         except OSError:
             pass                         # unreachable → genuinely stale
         try:
@@ -811,6 +816,10 @@ class Manager:
                 self.set_suspend(True)
             elif cmd == "resume":        # arrange done: back to auto-hide
                 self.set_suspend(False)
+            elif cmd != "ping":
+                client.sendall(b"err\n")     # an unknown verb must not
+                client.close()               # masquerade as success
+                return False
             client.sendall(b"ok\n")
         except OSError:
             pass

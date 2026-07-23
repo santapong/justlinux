@@ -47,6 +47,13 @@ def _s(ctx, v):
 def _ellipsize(cr, text, max_w):
     if cr.text_extents(text).x_advance <= max_w:
         return text
+    # pre-cut before measuring: a glyph is never narrower than ~3px here,
+    # so anything past max_w/3 chars can't fit — bounds the work regardless
+    # of how long a hostile field value is (O(n²) loop would freeze the
+    # single-threaded host)
+    cap = max(1, int(max_w / 3) + 4)
+    if len(text) > cap:
+        text = text[:cap]
     while text and cr.text_extents(text + "…").x_advance > max_w:
         text = text[:-1]
     return text + "…" if text else ""

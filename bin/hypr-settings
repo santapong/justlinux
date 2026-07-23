@@ -744,9 +744,12 @@ class HyprSettings(App):
             self.widgets = widgets_conf()      # fresh read (see pos_ above)
             if f"{key}_col" in self.widgets:
                 # grid-placed card: legacy _x/_y is SHADOWED by the cell —
-                # nudge the cell instead of writing a silent no-op
+                # nudge the cell instead of writing a silent no-op, clamped
+                # to the grid so col/row can't grow past the last column
                 gk = f"{key}_col" if axis == "x" else f"{key}_row"
-                val = max(0, int(self.widgets.get(gk, "0") or 0) + sign)
+                hi = self.grid_extent(key, axis)
+                val = max(0, min(hi, int(self.widgets.get(gk, "0") or 0)
+                                 + sign))
                 _conf_set({gk: str(val)})
                 self.widgets = widgets_conf()
                 self.query_one(f"#{axis}v_{key}", Static).update(
@@ -811,6 +814,27 @@ class HyprSettings(App):
                              lambda ok, c=cmd: launch(*c) if ok else None)
 
     # ---------- actions ----------
+    def grid_extent(self, key, axis):
+        """Max cell index (cols-1 / rows-1) for a card's monitor, so the
+        steppers can't push a cell past the grid."""
+        try:
+            import sys as _sys
+            _sys.path.insert(0, str(HOME / ".local/lib"))
+            from hyprdesk import grid
+            from hyprdesk.monitors import hypr_monitors
+            mon = self.widgets.get(f"{key}_mon")
+            g = next((m for m in hypr_monitors() if m.get("name") == mon),
+                     None)
+            if not g:
+                return 11 if axis == "x" else 5
+            r = g.get("reserved") or (0, 0, 0, 0)
+            ww = g["width"] - r[0] - r[2]
+            wh = g["height"] - r[1] - r[3]
+            cols, rows_n, _, _ = grid.geometry(ww, wh, self.widgets)
+            return (cols - 1) if axis == "x" else (rows_n - 1)
+        except Exception:
+            return 11 if axis == "x" else 5
+
     def widgets_layout_set(self, key, suffix, val):
         """Write a layout key; for 'apps' also write through to any existing
         per-monitor dock_<MON>_* keys so the control keeps moving every dock

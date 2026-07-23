@@ -85,6 +85,7 @@ def conf_delete(keys):
 
 def conf_undo():
     """Restore the previous widgets.conf (one-deep). Returns True if restored."""
+    WIDGETS_CONF.parent.mkdir(parents=True, exist_ok=True)   # dir may be gone
     with open(LOCK, "w") as lockf:
         fcntl.flock(lockf, fcntl.LOCK_EX)
         try:
@@ -96,5 +97,34 @@ def conf_undo():
         except OSError:
             pass
         TMP.write_text(prev)
+        os.replace(TMP, WIDGETS_CONF)
+    return True
+
+
+def snapshot(tag):
+    """Save a NAMED snapshot of widgets.conf (e.g. before an arrange
+    commit) — immune to being clobbered by unrelated conf_set writers,
+    unlike the shared one-deep UNDO."""
+    WIDGETS_CONF.parent.mkdir(parents=True, exist_ok=True)
+    snap = WIDGETS_CONF.parent / (WIDGETS_CONF.name + f".snap-{tag}")
+    with open(LOCK, "w") as lockf:
+        fcntl.flock(lockf, fcntl.LOCK_EX)
+        try:
+            snap.write_text(WIDGETS_CONF.read_text())
+        except OSError:
+            return False
+    return True
+
+
+def restore(tag):
+    """Restore a named snapshot. Returns True if it existed and applied."""
+    snap = WIDGETS_CONF.parent / (WIDGETS_CONF.name + f".snap-{tag}")
+    with open(LOCK, "w") as lockf:
+        fcntl.flock(lockf, fcntl.LOCK_EX)
+        try:
+            text = snap.read_text()
+        except OSError:
+            return False
+        TMP.write_text(text)
         os.replace(TMP, WIDGETS_CONF)
     return True

@@ -96,13 +96,17 @@ class Template:
                 raise TemplateError(f"unknown row type {rtype!r}")
 
 
+FIELD_MAX = 2000       # a runaway field value must not become a render bomb
+
+
 def parse_fields(text):
-    """key=value lines (key may be dotted: coin.0.name) → flat dict."""
+    """key=value lines (key may be dotted: coin.0.name) → flat dict.
+    Values are capped defensively at the seam."""
     fields = {}
     for line in str(text).splitlines():
         m = re.match(r"^([\w.]+)\s*=\s*(.*)$", line.strip())
         if m:
-            fields[m.group(1)] = m.group(2)
+            fields[m.group(1)] = m.group(2)[:FIELD_MAX]
     return fields
 
 
@@ -155,15 +159,34 @@ def instances(c):
 
 
 def instance_params(c, inst_id, template):
-    """Resolved params for an instance: <id>_p_<name> keys over defaults.
-    Legacy global keys (github_user, trading_coins, dev_repos) still win
-    as fallback so half-migrated configs keep working."""
-    legacy = {"user": c.get("github_user"), "coins": c.get("trading_coins"),
-              "repos": c.get("dev_repos")}
+    """Resolved params for an instance: <id>_p_<name> keys over template
+    defaults. (Legacy globals github_user/trading_coins/dev_repos are
+    migrated into _p_ keys at startup by the host, then never consulted —
+    a live fallback here leaked old values back when the picker CLEARED a
+    Configure field.)"""
     out = {}
     for pname, p in template.params.items():
         val = c.get(f"{inst_id}_p_{pname}")
-        if val is None and legacy.get(pname) is not None:
-            val = legacy[pname]
         out[pname] = str(val) if val is not None else p["default"]
     return out
+
+
+LEGACY_PARAM_KEYS = {"github_user": "user", "trading_coins": "coins",
+                     "dev_repos": "repos"}
+
+
+def migrate_legacy_params(c, templates):
+    """One-shot: fold legacy global param keys into the matching
+    instances' <id>_p_<name> keys — only where the instance's template
+    actually declares that param and has no explicit value yet. Returns
+    {changes}, {} if nothing to do."""
+    changes = {}
+    for inst_id, tname in instances(c):
+        t = templates.get(tname)
+        if not isinstance(t, Template):
+            continue
+        for legacy_key, pname in LEGACY_PARAM_KEYS.items():
+            if (legacy_key in c and pname in t.params
+                    and f"{inst_id}_p_{pname}" not in c):
+                changes[f"{inst_id}_p_{pname}"] = c[legacy_key]
+    return changes

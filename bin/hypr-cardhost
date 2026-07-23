@@ -96,6 +96,8 @@ class AsyncCmd:
             self.proc.stdout.fileno(), GLib.IO_IN | GLib.IO_HUP, self.on_io)
         self.killer = GLib.timeout_add_seconds(timeout, self.on_timeout)
 
+    MAX_BUF = 256 * 1024          # a runaway source can't exhaust memory
+
     def on_io(self, fd, cond):
         try:
             chunk = self.proc.stdout.read()
@@ -103,6 +105,9 @@ class AsyncCmd:
             chunk = None
         if chunk:
             self.buf += chunk
+            if len(self.buf) > self.MAX_BUF:
+                self.on_timeout()         # kill + finish with what we have
+                return False
             return True
         self.watch = None                 # returning False removes the watch
         self.finish(self.buf.decode(errors="replace")
@@ -339,7 +344,16 @@ class CardWindow(LayerWindow):
                 res = host.reserved.get(mon_name, (0, 0, 0, 0))
                 work_w = self.geo.width - res[0] - res[2]
                 work_h = self.geo.height - res[1] - res[3]
-                x, y = grid.origin(work_w, work_h, int(col), int(row), c)
+                # clamp the saved cell so this card's span stays on the
+                # grid — a hand-edited/overflowed _col/_row (settings
+                # stepper, resize-to-huge) can't push the card off-screen
+                cw = int(self.content_w + 2 * rows.PAD)
+                ch = int(round(rows.measure(template.rows, self.ctx())
+                               + 2 * rows.PAD))
+                cs, rs = grid.span(work_w, work_h, cw, ch, c)
+                ccol, crow = grid.clamp(work_w, work_h, int(col), int(row),
+                                        cs, rs, c)
+                x, y = grid.origin(work_w, work_h, ccol, crow, c)
                 self.place_at(x, y)
             except (TypeError, ValueError):
                 pass
@@ -456,6 +470,16 @@ class Host:
         display.connect("monitor-added", lambda *_: self.respawn_soon())
         display.connect("monitor-removed", lambda *_: self.respawn_soon())
         self.first_run_toast()
+        # at session start cards may spawn BEFORE waybar reserves its 30px,
+        # so grid cells land 30px high — re-check the reserved insets a few
+        # seconds later and respawn if they changed (also covers a waybar
+        # restart via hypr-tools restart-bar)
+        GLib.timeout_add_seconds(3, self._reserve_recheck)
+
+    def _reserve_recheck(self):
+        if monitor_reserved() != self.reserved:
+            self.respawn_soon()
+        return False
 
     def first_run_toast(self):
         """Hidden gestures get taught exactly once. Delayed 10s: at
@@ -484,6 +508,14 @@ class Host:
     def spawn_all(self):
         c = conf()
         templates = cardspec.load_templates()
+        # fold legacy global params (github_user/trading_coins/dev_repos)
+        # into per-instance _p_ keys once, so clearing a param in the
+        # picker can't resurrect a legacy value
+        migration = cardspec.migrate_legacy_params(c, templates)
+        if migration:
+            from hyprdesk.confwrite import conf_set as _cset
+            _cset(migration)
+            c = conf()
         self.reserved = monitor_reserved()
         monmap = gdk_monitor_map(Gdk.Display.get_default())
         by_name = {name: (gdk, name) for gdk, name, _ in monmap}
@@ -558,9 +590,10 @@ class Host:
 
     def start_tickers(self):
         srcs = self.cards_by_source()
-        if srcs["clock"] or any(
-                r.get("type") == "clock" for c in self.cards.values()
-                for r in c.template.rows):
+        # the minute ticker drives BOTH clock redraws and the calgrid
+        # midnight rollover — arm it if either kind of card is present
+        if any(r.get("type") in ("clock", "calgrid")
+               for c in self.cards.values() for r in c.template.rows):
             self.tickers.append(GLib.timeout_add_seconds(1, self.tick_clock))
         if srcs["stats"]:
             self.tick_stats()
@@ -632,12 +665,18 @@ class Host:
         except ValueError:
             card.update_fields(None)
             return
-        # empty output counts as FAILURE, not success-with-no-data —
-        # otherwise a broken param (bad coin id) renders a blank card
-        # that looks permanently fresh
-        AsyncCmd(argv, lambda text: card.update_fields(
-            (cardspec.parse_fields(text) or None)
-            if text is not None else None))
+        # per-card generation token: a slow fetch that lands after a newer
+        # one must not overwrite fresher data with stale fields
+        gen = card.fetch_gen = getattr(card, "fetch_gen", 0) + 1
+
+        def deliver(text):
+            if gen != card.fetch_gen:
+                return              # superseded by a later fetch
+            # empty output counts as FAILURE, not success-with-no-data —
+            # a broken param (bad coin id) must not look permanently fresh
+            card.update_fields((cardspec.parse_fields(text) or None)
+                               if text is not None else None)
+        AsyncCmd(argv, deliver)
 
     # ----- ctl socket (same hardened pattern as the dock) -----
     def serve_ctl(self):
@@ -646,9 +685,11 @@ class Host:
             probe.settimeout(0.5)
             probe.connect(str(CTL_SOCK))
             probe.close()
-            print("hypr-cardhost: another instance owns the ctl socket",
+            # a live host already owns the socket — EXIT rather than run a
+            # second, socketless, duplicate fleet (concurrent-restart race)
+            print("hypr-cardhost: another instance is running — exiting",
                   file=sys.stderr, flush=True)
-            return
+            os._exit(0)
         except OSError:
             pass
         try:
@@ -683,6 +724,10 @@ class Host:
                 self.pal = colors()
                 for card in self.cards.values():
                     card.area.queue_draw()
+            elif cmd != "ping":
+                client.sendall(b"err\n")     # an unknown verb must not
+                client.close()               # masquerade as success
+                return False
             client.sendall(b"ok\n")
         except OSError:
             pass

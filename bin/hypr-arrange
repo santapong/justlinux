@@ -34,7 +34,8 @@ from gi.repository import Gtk, Gdk, GLib
 sys.path.insert(0, str(Path.home() / ".local/lib"))
 from hyprdesk import colors, conf
 from hyprdesk.layer import LayerWindow
-from hyprdesk.confwrite import conf_set as _atomic_set, conf_undo
+from hyprdesk.confwrite import (conf_set as _atomic_set, snapshot as _snapshot,
+                                restore as _restore)
 from hyprdesk import grid
 from hyprdesk.theme import rgb
 
@@ -113,6 +114,11 @@ def surfaces_all(geo):
         mx, my = geo[mon_name][0], geo[mon_name][1]
         for lvl in mon.get("levels", {}).values():
             for layer in lvl:
+                # skip GHOST surfaces: Hyprland 0.55 leaves dead
+                # layer-shell surfaces (pid -1) lingering after a client
+                # exits — counting them would duplicate/mis-place widgets
+                if layer.get("pid", -1) <= 0:
+                    continue
                 ns = layer.get("namespace", "")
                 if ns.startswith("hypr-card-"):
                     name, kind = ns[len("hypr-card-"):], "card"
@@ -367,8 +373,8 @@ class Session:
                     changes[f"{name}_scale"] = \
                         f"{max(0.5, min(2.0, cur * it['scale'])):.2f}"
                 if "cell" not in it:
-                    continue   # resize-only: keep its position untouched —
-                               # snapping a never-moved card would shift it
+                    continue   # resize-only: keep its position untouched
+                               # (the host re-clamps the span on placement)
                 _, _, ww, wh = self.work_geo(it["mon"])
                 col, row = it["cell"]
                 # re-clamp with the CURRENT (possibly resized) span so a
@@ -410,7 +416,8 @@ class Session:
                     changes[f"{name}_size"] = \
                         max(6, min(40, int(cur * it["scale"])))
         if changes:
-            _atomic_set(changes)
+            _snapshot("arrange")           # dedicated pre-commit snapshot —
+            _atomic_set(changes)           # survives later settings writes
             if card_dirty:
                 tool_ctl("hypr-cardhost", "reload")   # cards move live
             if dock_dirty:
@@ -602,11 +609,14 @@ def main():
     GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGTERM, _sig_quit)
     GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGINT, _sig_quit)
     if "--undo" in sys.argv:
-        if conf_undo():
+        # restore arrange's OWN snapshot — the shared one-deep undo may
+        # have been overwritten by a settings/theme write since the save
+        if _restore("arrange"):
             tool_ctl("hypr-cardhost", "reload")
             tool_ctl("hypr-appdock", "reload")
             subprocess.run([str(Path.home() /
-                                ".local/bin/desktop-widgets.sh"), "restart"])
+                                ".local/bin/desktop-widgets.sh"),
+                            "restart-conky"])
             notify("Layout reverted")
         else:
             print("nothing to undo", file=sys.stderr)
@@ -623,8 +633,12 @@ def main():
         try:
             lockf.seek(0)
             pid = int(lockf.read().strip() or 0)
+            # verify the PID is actually a live hypr-arrange before
+            # signalling — a recycled PID could be an unrelated process
             if pid:
-                os.kill(pid, signal.SIGTERM)   # running session quits clean
+                cmd = Path(f"/proc/{pid}/cmdline").read_bytes()
+                if b"hypr-arrange" in cmd:
+                    os.kill(pid, signal.SIGTERM)   # running session quits
         except (ValueError, OSError, ProcessLookupError):
             pass
         return
