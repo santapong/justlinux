@@ -29,7 +29,8 @@ from gi.repository import Gtk, GLib
 sys.path.insert(0, str(Path.home() / ".local/lib"))
 from hyprdesk import colors, conf_get, rgb
 from hyprdesk.layer import LayerWindow
-from hyprdesk.claudesessions import claude_procs, proc_cpu_ticks
+from hyprdesk.claudesessions import (claude_procs, proc_cpu_ticks,
+                                     recent_transcripts, session_meta)
 
 SCALE = 3
 FPS_MS = 160
@@ -84,11 +85,14 @@ CLAWD_SLEEP = [
     "..OOOOO..",
     ".........",
 ]
-# desk with a laptop (16 wide): S = screen, K = keyboard, D = desktop
+# desk with a monitor + mug (16 wide): S = screen, K = keyboard,
+# D = desktop, M = mug. The worker is drawn BEHIND the desk, so only
+# the head peeks over the screen while typing.
 DESK = [
-    ".....SSSSS......",
-    ".....SSSSS......",
-    "....KKKKKKK.....",
+    "....SSSSSSS.....",
+    "....SSSSSSS.....",
+    "....SSSSSSS.....",
+    "....KKKKKKK..M..",
     "DDDDDDDDDDDDDDDD",
     ".L............L.",
     ".L............L.",
@@ -97,8 +101,10 @@ DESK = [
 INK = {
     "O": rgb("#D97757"), "D2": rgb("#8f4830"), "E": rgb("#1d1d1b"),
     "D": rgb(PAL["muted"]), "L": rgb(PAL["muted"]),
-    "K": rgb(PAL["sub"]),
+    "K": rgb(PAL["sub"]), "M": rgb(PAL["accent"]),
 }
+SCREEN_DARK = rgb("#14161c")
+DIM = tuple(c * 0.45 for c in rgb(PAL["sub"]))
 
 
 def draw_art(cr, art, x, y, extra=None):
@@ -165,9 +171,25 @@ class Office(LayerWindow):
         self.set_size_request(self.w, self.h)
 
     # ----- data -----
+    def _transcript_for(self, cwd, taken):
+        """Newest transcript whose own cwd matches — the best guess for
+        which conversation this process is (no fd to follow: claude
+        appends and closes)."""
+        import time as _t
+        for _mt, f in recent_transcripts(60):
+            if str(f) in taken:
+                continue
+            meta_cwd, _ = session_meta(f, max_lines=15)
+            if meta_cwd == cwd:
+                return str(f)
+        return ""
+
     def _poll(self):
+        import time as _t
         prev = {w["pid"]: w for w in self.workers}
+        taken = set()
         rows = []
+        self._resolve_n = getattr(self, "_resolve_n", 0) + 1
         for pid, cwd, interactive in claude_procs():
             ticks = proc_cpu_ticks(pid)
             if ticks is None:
@@ -175,12 +197,25 @@ class Office(LayerWindow):
             w = prev.get(pid, {"pid": pid, "ticks": ticks, "idle": 0.0})
             delta = ticks - w["ticks"]
             w["ticks"] = ticks
+            # transcript freshness: is Claude still streaming output?
+            if not w.get("tx") or self._resolve_n % 15 == 0:
+                w["tx"] = self._transcript_for(cwd, taken)
+            if w.get("tx"):
+                taken.add(w["tx"])
+            tx_fresh = False
+            try:
+                if w.get("tx"):
+                    tx_fresh = _t.time() - os.stat(w["tx"]).st_mtime < 8
+            except OSError:
+                w["tx"] = ""
             if delta >= BUSY_TICKS:
                 w["state"], w["idle"] = "typing", 0.0
+            elif tx_fresh:
+                w["state"], w["idle"] = "reading", 0.0
             else:
                 w["idle"] = w.get("idle", 0) + POLL_S
                 w["state"] = ("sleep" if w["idle"] > SLEEP_AFTER
-                              else "waiting")
+                              else "attention")   # finished — needs YOU
             home = str(Path.home())
             base = ("~" if cwd.rstrip("/") == home
                     else os.path.basename(cwd.rstrip("/")) or "~")
@@ -220,50 +255,96 @@ class Office(LayerWindow):
         cr.set_source_rgba(*rgb(PAL["bg"]), 0.80)
         cr.fill()
         blink = self.frame % 2 == 0
+        # scene title
+        cr.set_source_rgba(*rgb(PAL["sub"]), 0.9)
+        self._text(cr, PAD, PAD + 6, "󰚩 CLAUDE OFFICE", size=9)
         if not self.workers:             # empty office: one sleepy Clawd
             draw_art(cr, CLAWD_SLEEP, PAD + 8 * SCALE,
-                     PAD + 12 * SCALE)
+                     PAD + 14 * SCALE)
             cr.set_source_rgb(*rgb(PAL["sub"]))
-            self._text(cr, PAD + 20 * SCALE, PAD + 14 * SCALE,
+            self._text(cr, PAD + 20 * SCALE, PAD + 16 * SCALE,
                        "no sessions — waiting for work")
             return True
+        y_desk = PAD + 14 * SCALE
+        y_floor = y_desk + 7 * SCALE
+        # floor line across the office
+        cr.set_source_rgba(*rgb(PAL["sub"]), 0.25)
+        cr.rectangle(PAD // 2, y_floor + SCALE, w - PAD, 1)
+        cr.fill()
         for i, wk in enumerate(self.workers):
             x0 = PAD + i * CELL_W
-            y_desk = PAD + 16 * SCALE
-            y_clawd = y_desk - 6 * SCALE
+            desk_x = x0 + 4 * SCALE
+            y_clawd = y_desk - 5 * SCALE
             state = wk["state"]
+            # desk shadow
+            cr.set_source_rgba(0, 0, 0, 0.22)
+            cr.rectangle(desk_x, y_floor, 16 * SCALE, SCALE)
+            cr.fill()
             if state == "sleep":
-                draw_art(cr, DESK, x0 + 4 * SCALE, y_desk,
+                draw_art(cr, DESK, desk_x, y_desk,
                          extra={"S": rgb(PAL["muted"])})
-                draw_art(cr, CLAWD_SLEEP, x0 + 7 * SCALE, y_clawd + 2 * SCALE)
+                # slumped over the keyboard, fast asleep
+                draw_art(cr, CLAWD_SLEEP, desk_x + 4 * SCALE,
+                         y_desk - 1 * SCALE)
                 cr.set_source_rgb(*rgb(PAL["sub"]))
-                self._text(cr, x0 + 15 * SCALE, y_clawd - 4, "z Z z")
+                self._text(cr, desk_x + 12 * SCALE, y_clawd - 2, "z Z z")
             else:
-                screen = (rgb(PAL["accent"]) if state == "typing" and blink
-                          else rgb(PAL["accent2"]) if state == "typing"
-                          else rgb(PAL["sub"]))
-                draw_art(cr, DESK, x0 + 4 * SCALE, y_desk,
-                         extra={"S": screen})
                 bob = SCALE if (state == "typing" and blink) else 0
+                # worker BEHIND the desk: head peeks over the screen
                 draw_art(cr, CLAWD_A if blink else CLAWD_B,
-                         x0 + 7 * SCALE, y_clawd - bob)
-                if state == "waiting":       # thought dots cycle
+                         desk_x + 2 * SCALE, y_clawd - bob)
+                screen = SCREEN_DARK if state == "typing" else DIM
+                draw_art(cr, DESK, desk_x, y_desk, extra={"S": screen})
+                if state == "typing":
+                    # scrolling code lines on the dark screen
+                    for r in range(3):
+                        cx = (self.frame + r * 2) % 4
+                        cr.set_source_rgb(*rgb(
+                            PAL["accent2"] if r % 2 else PAL["accent"]))
+                        cr.rectangle(desk_x + (4 + cx) * SCALE,
+                                     y_desk + r * SCALE + SCALE // 2,
+                                     2 * SCALE, max(1, SCALE // 2))
+                        cr.fill()
+                elif state == "reading":     # streaming: thought dots
                     on = self.frame % 3
                     for d in range(3):
                         cr.set_source_rgba(*rgb(PAL["sub"]),
                                            1.0 if d == on else 0.35)
-                        cr.arc(x0 + (10 + d * 3) * SCALE, y_clawd - 6,
+                        cr.arc(desk_x + (11 + d * 2) * SCALE, y_clawd - 4,
                                SCALE * 0.7, 0, 2 * math.pi)
                         cr.fill()
+                elif state == "attention":   # done — waiting for YOU
+                    bx = desk_x + 11 * SCALE
+                    by = y_clawd - 8 * SCALE
+                    pulse = 0.75 + 0.25 * (1 if blink else 0)
+                    cr.set_source_rgba(*rgb(PAL["accent2"]), pulse)
+                    cr.arc(bx + 2 * SCALE, by + 2 * SCALE, 2.6 * SCALE,
+                           0, 2 * math.pi)
+                    cr.fill()
+                    cr.move_to(bx + 1 * SCALE, by + 4 * SCALE)
+                    cr.line_to(bx - 1 * SCALE, by + 6 * SCALE)
+                    cr.line_to(bx + 3 * SCALE, by + 5 * SCALE)
+                    cr.close_path()
+                    cr.fill()
+                    cr.set_source_rgb(*rgb(PAL["bg"]))
+                    self._text(cr, bx + 1.4 * SCALE, by + 3.4 * SCALE,
+                               "!", size=11)
+            # label + state dot
+            dot = {"typing": rgb(PAL["accent"]), "reading": rgb(PAL["sub"]),
+                   "attention": rgb(PAL["accent2"]),
+                   "sleep": rgb(PAL["muted"])}[state]
+            cr.set_source_rgb(*dot)
+            cr.arc(x0 + 2 * SCALE, PAD + CELL_H + 5, 2.5, 0, 2 * math.pi)
+            cr.fill()
             cr.set_source_rgb(*rgb(PAL["sub"]))
-            self._text(cr, x0 + 2 * SCALE, PAD + CELL_H + 8, wk["label"])
+            self._text(cr, x0 + 4 * SCALE, PAD + CELL_H + 8, wk["label"])
         return True
 
     @staticmethod
-    def _text(cr, x, y, s):
+    def _text(cr, x, y, s, size=10):
         cr.select_font_face("JetBrainsMono Nerd Font",
                             cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_NORMAL)
-        cr.set_font_size(10)
+        cr.set_font_size(size)
         cr.move_to(x, y)
         cr.show_text(s)
 

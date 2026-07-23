@@ -44,8 +44,19 @@ def launch():
         clients = []
     for c in clients:
         if isinstance(c, dict) and c.get("class") == KITTY_CLASS:
-            subprocess.run(["hyprctl", "dispatch", "focuswindow",
-                            f"address:{c['address']}"])
+            # SUMMON the studio to the current workspace (drop-term UX)
+            # instead of yanking the user to wherever it was left
+            addr = f"address:{c['address']}"
+            try:
+                ws = json.loads(subprocess.run(
+                    ["hyprctl", "-j", "activeworkspace"], capture_output=True,
+                    text=True).stdout).get("id", 1)
+                subprocess.run(["hyprctl", "dispatch", "movetoworkspace",
+                                f"{ws},{addr}"])
+            except Exception:
+                pass
+            subprocess.run(["hyprctl", "dispatch", "focuswindow", addr])
+            subprocess.run(["hyprctl", "dispatch", "centerwindow"])
             return
     subprocess.Popen(
         ["kitty", "--class", KITTY_CLASS, "-o", "background_opacity=0.93",
