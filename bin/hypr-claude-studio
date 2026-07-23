@@ -78,6 +78,9 @@ def style_tmux():
         ("set", "-g", "window-status-current-format",
          f"#[bg={acc},fg={bg},bold] #I #W #[default]"),
         ("set", "-g", "window-status-separator", ""),
+        # browser-style tabs: middle-click a tab in the bar to close it
+        # (right-click keeps tmux's default context menu with Kill)
+        ("bind-key", "-n", "MouseUp2Status", "kill-window", "-t="),
     ):
         tmux(*args)
 
@@ -132,7 +135,7 @@ def sidebar():
         def compose(self) -> ComposeResult:
             yield Static(
                 f"[bold {pal['accent']}]󰚩 Sessions[/] — Enter opens a tab"
-                " · tabs live in the bar above", id="hint")
+                " · middle-click a tab above closes it", id="hint")
             yield Tree("sessions", id="tree")
             yield Footer()
 

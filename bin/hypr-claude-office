@@ -43,12 +43,15 @@ SLEEP_AFTER = 120            # s of idle ⇒ zzz
 # ---------- toggle: kill a running instance ----------
 ME = os.path.realpath(__file__)
 try:
-    out = subprocess.run(["pgrep", "-f", f"python3 {ME}"],
+    # -xf (exact full cmdline): a plain -f substring match kills any shell
+    # whose command line merely CONTAINS the path (hyprcard lesson)
+    out = subprocess.run(["pgrep", "-xf", f"python3 {ME}"],
                          capture_output=True, text=True).stdout.split()
     others = [p for p in out if p and int(p) != os.getpid()]
     if others:
         for p in others:
             os.kill(int(p), signal.SIGTERM)
+        subprocess.run(["notify-send", "Claude office", "Closed."])
         sys.exit(0)
 except (ValueError, ProcessLookupError, PermissionError):
     pass
@@ -116,9 +119,14 @@ def draw_art(cr, art, x, y, extra=None):
 class Office(LayerWindow):
     def __init__(self):
         mon = conf_get("office_mon", "DP-1")
+        # top layer by default: the point is SEEING Claude work while your
+        # windows are open. office_layer=bottom moves it to the desktop.
+        layer = conf_get("office_layer", "top")
+        if layer not in ("top", "bottom", "overlay"):
+            layer = "top"
         super().__init__("office", default_pos="bottom_left",
                          default_x=24, default_y=24,
-                         layer="bottom", namespace="hypr-office")
+                         layer=layer, namespace="hypr-office")
         try:
             from hyprdesk.monitors import gdk_monitor_map
             import gi as _gi
@@ -149,7 +157,10 @@ class Office(LayerWindow):
         return False
 
     def _resize(self, n):
-        self.w = PAD * 2 + max(1, n) * CELL_W
+        if n == 0:                       # compact "waiting for work" card
+            self.w = PAD * 2 + 78 * SCALE
+        else:
+            self.w = PAD * 2 + n * CELL_W
         self.h = PAD + CELL_H + 18
         self.set_size_request(self.w, self.h)
 
@@ -170,17 +181,19 @@ class Office(LayerWindow):
                 w["idle"] = w.get("idle", 0) + POLL_S
                 w["state"] = ("sleep" if w["idle"] > SLEEP_AFTER
                               else "waiting")
-            base = os.path.basename(cwd.rstrip("/")) or "~"
+            home = str(Path.home())
+            base = ("~" if cwd.rstrip("/") == home
+                    else os.path.basename(cwd.rstrip("/")) or "~")
             w["label"] = (base[:10] + ("" if interactive else " 󰑮"))
             rows.append(w)
         rows.sort(key=lambda w: w["pid"])
         if len(rows) != len(self.workers):
             self._resize(len(rows))
         self.workers = rows
-        if rows and not self.get_visible():
+        # always stay visible while enabled — an empty office renders a
+        # sleeping Clawd, so toggling ON always has a visible result
+        if not self.get_visible():
             self.show_all()          # map-event re-clears the input region
-        elif not rows and self.get_visible():
-            self.hide()              # nobody's working: office closes
         return True
 
     # ----- render -----
@@ -207,6 +220,13 @@ class Office(LayerWindow):
         cr.set_source_rgba(*rgb(PAL["bg"]), 0.80)
         cr.fill()
         blink = self.frame % 2 == 0
+        if not self.workers:             # empty office: one sleepy Clawd
+            draw_art(cr, CLAWD_SLEEP, PAD + 8 * SCALE,
+                     PAD + 12 * SCALE)
+            cr.set_source_rgb(*rgb(PAL["sub"]))
+            self._text(cr, PAD + 20 * SCALE, PAD + 14 * SCALE,
+                       "no sessions — waiting for work")
+            return True
         for i, wk in enumerate(self.workers):
             x0 = PAD + i * CELL_W
             y_desk = PAD + 16 * SCALE
@@ -254,6 +274,9 @@ def main():
     GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGTERM, sig_quit)
     GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGINT, sig_quit)
     Office()
+    mon = conf_get("office_mon", "DP-1")
+    subprocess.run(["notify-send", "Claude office",
+                    f"Open — bottom-left of {mon}. ALT+CTRL+O closes."])
     Gtk.main()
 
 

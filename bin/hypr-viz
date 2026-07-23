@@ -36,7 +36,9 @@ DECAY = 0.72                 # fall speed of the bars (per frame)
 # ---------- toggle: kill a running instance instead of starting twice ----
 ME = os.path.realpath(__file__)
 try:
-    out = subprocess.run(["pgrep", "-f", f"python3 {ME}"],
+    # -xf (exact full cmdline): a plain -f substring match kills any shell
+    # whose command line merely CONTAINS the path (hyprcard lesson)
+    out = subprocess.run(["pgrep", "-xf", f"python3 {ME}"],
                          capture_output=True, text=True).stdout.split()
     others = [p for p in out if p and int(p) != os.getpid()]
     if others:
