@@ -425,20 +425,27 @@ PY
 }
 
 toggle_autohide() {
-    if pgrep -f waybar-autohide.sh >/dev/null; then
-        pkill -f waybar-autohide.sh
-        notify-send "Waybar" "Auto-hide OFF — bar always visible"
+    # smart bar (hypr-appdock bar_smart) superseded the standalone
+    # waybar-autohide.sh daemon — this tile now flips the conf key
+    if grep -qx 'bar_smart=on' "$HOME/.config/conky/widgets.conf" 2>/dev/null; then
+        python3 -c "import sys,os; sys.path.insert(0, os.path.expanduser('~/.local/lib'));
+from hyprdesk.confwrite import conf_set; conf_set({'bar_smart': 'off'})"
+        "$HOME/.local/bin/hypr-appdock" --ctl reload >/dev/null 2>&1
+        notify-send "Waybar" "Smart bar OFF — bar always visible"
     else
-        "$HOME/.local/bin/waybar-autohide.sh" &
-        disown
-        notify-send "Waybar" "Auto-hide ON — touch the top edge to reveal (ALT+B to toggle manually)"
+        pkill -f waybar-autohide.sh 2>/dev/null   # never run both hiders
+        python3 -c "import sys,os; sys.path.insert(0, os.path.expanduser('~/.local/lib'));
+from hyprdesk.confwrite import conf_set; conf_set({'bar_smart': 'on'})"
+        "$HOME/.local/bin/hypr-appdock" --ctl reload >/dev/null 2>&1
+        notify-send "Waybar" "Smart bar ON — touch the top edge to reveal (ALT+B pins)"
     fi
 }
 
 main_menu() {
     local pick
     local autohide_state="OFF → turn ON"
-    pgrep -f waybar-autohide.sh >/dev/null && autohide_state="ON → turn OFF"
+    grep -qx 'bar_smart=on' "$HOME/.config/conky/widgets.conf" 2>/dev/null \
+        && autohide_state="ON → turn OFF"
     pick=$(printf '%s\n' \
         "  Settings — control panel (click & pick) ALT+X" \
         "󰀻  Apps — launcher                         ALT+R" \

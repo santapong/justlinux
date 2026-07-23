@@ -567,6 +567,7 @@ class Manager:
         self.strips = {}                 # connector -> bottom EdgeStrip
         self.bar_strips = {}             # connector -> top EdgeStrip (bar_smart)
         self._bar_poll_src = None
+        self.bar_pin = False             # ALT+B: hold the smart bar open
         self.states = {}                 # connector -> monitor_states() entry
         self.css = None
         self.suspend = False             # show-all mode (arrange overlay)
@@ -707,6 +708,8 @@ class Manager:
         self.bar_smart = c.get("bar_smart", "off") == "on"
         if was_smart and not self.bar_smart and not self.bar_visible():
             self.bar_toggle()            # smart mode off: leave the bar up
+        if self.bar_smart:
+            self._bar_watch()            # smart mode (re)enabled: tuck soon
         self.spawn_all()
         self.refresh(initial=True)
         return False                     # one-shot
@@ -806,7 +809,7 @@ class Manager:
         if not (self.bar_smart and self.bar_visible()):
             self._bar_poll_src = None
             return False                 # nothing shown: stop polling
-        if self.suspend or self._bar_hovering():
+        if self.suspend or self.bar_pin or self._bar_hovering():
             return True                  # must stay up: keep watching
         self.bar_toggle()
         self._bar_poll_src = None
@@ -977,6 +980,16 @@ class Manager:
             elif cmd == "reload":
                 self.on_pins_changed()
                 self.respawn_soon()
+            elif cmd == "bar-pin":       # ALT+B: pin the smart bar open
+                self.bar_pin = not self.bar_pin
+                if self.bar_pin and not self.bar_visible():
+                    self.bar_toggle()
+                if not self.bar_pin:
+                    self._bar_watch()    # released: resume auto-hide
+                client.sendall(b"ok pinned\n" if self.bar_pin
+                               else b"ok released\n")
+                client.close()
+                return False
             elif cmd == "show-all":      # arrange overlay: map every dock
                 self.set_suspend(True)
             elif cmd == "resume":        # arrange done: back to auto-hide
@@ -1015,7 +1028,7 @@ def ctl_send(cmd):
         reply = s.recv(64).decode(errors="replace").strip()
         s.close()
         print(reply or "no reply")
-        return 0 if reply == "ok" else 1
+        return 0 if reply.startswith("ok") else 1
     except OSError as e:
         print(f"dock not reachable: {e}", file=sys.stderr)
         return 1
