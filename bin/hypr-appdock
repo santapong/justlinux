@@ -18,6 +18,7 @@ v2 (widget-redesign phase 1):
 Config keys (widgets.conf, all optional — legacy apps_* read as fallback):
   dock_layer=top|bottom      dock_autohide=on|off
   dock_<MON>=on|off          dock_<MON>_pos/_x/_y/_size
+  bar_smart=on|off           (auto-hide waybar: top-edge dwell reveals it)
 where <MON> is the connector sanitized for the key grammar (DP-1 → DP_1).
 
 Modes:  (default) run docks · --picker [--monitor DP-1] · --ctl CMD
@@ -54,6 +55,8 @@ CTL_SOCK = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "hypr-appdock.sock"
 STRIP_H = 4               # reveal-strip height (px)
 HIDE_DELAY_MS = 600       # pointer-left → hide grace
 DWELL_MS = 180            # strip hover before reveal (monitor crossings pass in <50ms)
+BAR_POLL_MS = 400         # cursor poll cadence while the smart bar is revealed
+MANAGER = []              # live Manager instance (signal-exit bar restore)
 # show-all safety net: auto-resume even if arrange dies. Kept ABOVE
 # arrange's own 300s idle-close so a long (thinking) arrange session
 # can't have its docks yanked out from under it mid-edit.
@@ -556,11 +559,14 @@ class Manager:
         self.autohide = (self.layer == "top"
                          and c.get("dock_autohide", "on") == "on")
         self.dock_top = c.get("dock_top", "off") == "on"   # extra top dock
+        self.bar_smart = c.get("bar_smart", "off") == "on" # auto-hide waybar
         self.apps = all_apps()
         self.pins = load_pins()
         self.docks = {}                  # connector -> bottom Dock
         self.top_docks = {}              # connector -> top Dock (if dock_top)
         self.strips = {}                 # connector -> bottom EdgeStrip
+        self.bar_strips = {}             # connector -> top EdgeStrip (bar_smart)
+        self._bar_poll_src = None
         self.states = {}                 # connector -> monitor_states() entry
         self.css = None
         self.suspend = False             # show-all mode (arrange overlay)
@@ -576,6 +582,10 @@ class Manager:
         # and the body is a no-op while autohide is off
         GLib.timeout_add_seconds(5, self._hide_sanity)
         self.serve_ctl()
+        MANAGER.append(self)
+        if self.bar_smart:
+            # waybar starts visible at login — tuck it away once mapped
+            GLib.timeout_add_seconds(2, self._bar_startup)
         display = Gdk.Display.get_default()
         display.connect("monitor-added", lambda *_: self.respawn_soon())
         display.connect("monitor-removed", lambda *_: self.respawn_soon())
@@ -621,6 +631,16 @@ class Manager:
     def spawn_all(self):
         c = conf()
         for gdk_mon, name, san in gdk_monitor_map(Gdk.Display.get_default()):
+            # bar_smart strip is independent of the dock being enabled on
+            # this monitor — the panel spans every output
+            if self.bar_smart and name not in self.bar_strips:
+                bstrip = EdgeStrip(
+                    gdk_mon, san,
+                    lambda m=name: self.reveal_bar(m),
+                    self._bar_watch,
+                    edge="top")
+                bstrip.show_all()
+                self.bar_strips[name] = bstrip
             enabled = c.get(f"dock_{san}", c.get("apps", "on")) == "on"
             if not enabled or name in self.docks:
                 continue
@@ -663,7 +683,10 @@ class Manager:
                 dock.strip.destroy()
         for w in self._all_docks():
             w.destroy()
+        for s in self.bar_strips.values():
+            s.destroy()
         self.docks, self.top_docks, self.strips = {}, {}, {}
+        self.bar_strips = {}
 
     def respawn_soon(self):
         # debounce monitor hotplug bursts: one pending respawn at a time
@@ -680,6 +703,10 @@ class Manager:
         # re-read the top-dock flag too, so `--ctl reload` can toggle it
         # at runtime (was only read once at startup)
         self.dock_top = c.get("dock_top", "off") == "on"
+        was_smart = self.bar_smart
+        self.bar_smart = c.get("bar_smart", "off") == "on"
+        if was_smart and not self.bar_smart and not self.bar_visible():
+            self.bar_toggle()            # smart mode off: leave the bar up
         self.spawn_all()
         self.refresh(initial=True)
         return False                     # one-shot
@@ -716,7 +743,78 @@ class Manager:
             if (self.autohide and dock.get_visible()
                     and not self._hovered(dock) and not st.get("empty")):
                 dock.hide()
+        # smart-bar equivalent — also catches a respawned waybar, which
+        # always comes back visible
+        if self.bar_smart and self.bar_visible():
+            self._bar_watch()
         return True
+
+    # ----- smart waybar (bar_smart) -----
+    # waybar is NOT our window: SIGUSR1 toggles it between shown (top
+    # layer, level 2, its normal config) and hidden (bottom layer, level 1
+    # — verified on v0.15). Reveal comes from the per-monitor top
+    # EdgeStrips; while the bar is up we poll the cursor against its layer
+    # boxes (no GTK crossing events for a foreign surface) and toggle it
+    # back down once the pointer has left the band.
+
+    def bar_layers(self):
+        """[(level, x, y, w, h)] of live waybar surfaces. pid<=0 entries
+        are Hyprland 0.55 corpses — always filter them."""
+        out = []
+        data = hypr_json("layers")
+        if not isinstance(data, dict):
+            return out
+        for d in data.values():
+            for lvl, entries in (d.get("levels") or {}).items():
+                for e in entries:
+                    if (isinstance(e, dict) and e.get("namespace") == "waybar"
+                            and e.get("pid", -1) > 0):
+                        out.append((int(lvl), e["x"], e["y"], e["w"], e["h"]))
+        return out
+
+    def bar_visible(self):
+        return any(lvl >= 2 for lvl, *_ in self.bar_layers())
+
+    def bar_toggle(self):
+        subprocess.run(["pkill", "-USR1", "-x", "waybar"], check=False)
+
+    def reveal_bar(self, mon):
+        st = self.states.get(mon, {})
+        if st.get("fullscreen"):         # same rule as the docks
+            return
+        if not self.bar_visible():
+            self.bar_toggle()
+        self._bar_watch()
+
+    def _bar_hovering(self):
+        if any(s.pointer_in for s in self.bar_strips.values()):
+            return True
+        pos = hypr_json("cursorpos")
+        if not isinstance(pos, dict):
+            return False
+        cx, cy = pos.get("x", -1), pos.get("y", -1)
+        for lvl, x, y, w, h in self.bar_layers():
+            if lvl >= 2 and x <= cx <= x + w and y <= cy <= y + h + STRIP_H:
+                return True
+        return False
+
+    def _bar_watch(self):
+        if self.bar_smart and self._bar_poll_src is None:
+            self._bar_poll_src = GLib.timeout_add(BAR_POLL_MS, self._bar_tick)
+
+    def _bar_tick(self):
+        if not (self.bar_smart and self.bar_visible()):
+            self._bar_poll_src = None
+            return False                 # nothing shown: stop polling
+        if self.suspend or self._bar_hovering():
+            return True                  # must stay up: keep watching
+        self.bar_toggle()
+        self._bar_poll_src = None
+        return False
+
+    def _bar_startup(self):
+        self._bar_watch()
+        return False
 
     def apply_visibility(self):
         if not self.autohide or self.suspend:
@@ -932,6 +1030,12 @@ def main():
     # from a unix-signal source does not stop Gtk.main() (verified), and
     # the dock has no state to flush (pins are saved at edit time)
     def sig_quit(*_):
+        try:                             # never exit leaving the panel tucked
+            m = MANAGER[0] if MANAGER else None
+            if m and m.bar_smart and not m.bar_visible():
+                m.bar_toggle()
+        except Exception:
+            pass
         os._exit(130)
     GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGTERM, sig_quit)
     GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGINT, sig_quit)
