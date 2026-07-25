@@ -27,3 +27,17 @@ value = "{pct}"
 type = "text"
 text = "{label}"
 ink = "sub"
+
+[[rows]]
+type = "hr"
+
+[[rows]]
+type = "keyval"
+icon = "clock"
+key = "this week"
+value = "{week_total}"
+
+[[rows]]
+type = "sparkline"
+data = "{week}"
+height = 16

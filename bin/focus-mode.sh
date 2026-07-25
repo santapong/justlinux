@@ -22,6 +22,34 @@ start() {
 }
 
 end() {
+    # LOG BEFORE DELETING. This used to open with `rm -f "$STATE"`, which
+    # threw away the start time, the label and therefore the duration —
+    # every focus session ever run left no trace at all. Read it first,
+    # append a row, then clear.
+    if [ -f "$STATE" ]; then
+        s_start=$(sed -n 's/^start=//p' "$STATE" | head -1)
+        s_label=$(sed -n 's/^label=//p' "$STATE" | head -1)
+        s_end=$(sed -n 's/^end=//p' "$STATE" | head -1)
+        now=$(date +%s)
+        case "$s_start" in
+            ''|*[!0-9]*) : ;;      # unreadable state: skip the row, still clean up
+            *)
+                # actual elapsed, not the planned length — an early ALT+SHIFT+F
+                # ends the session and that is the honest number to record
+                elapsed=$(( now - s_start ))
+                planned=0
+                case "$s_end" in ''|*[!0-9]*) : ;; *) planned=$(( s_end - s_start ));; esac
+                [ "$elapsed" -lt 0 ] && elapsed=0
+                printf '%s\t%s\t%s\t%s\n' "$s_start" "$elapsed" "$planned" \
+                    "${s_label:-deep work}" >> "$STATE_DIR/history.tsv"
+                # keep it bounded — this file is append-only forever otherwise
+                if [ "$(wc -l < "$STATE_DIR/history.tsv" 2>/dev/null || echo 0)" -gt 2000 ]; then
+                    tail -1000 "$STATE_DIR/history.tsv" > "$STATE_DIR/history.tsv.tmp" &&
+                        mv "$STATE_DIR/history.tsv.tmp" "$STATE_DIR/history.tsv"
+                fi
+                ;;
+        esac
+    fi
     rm -f "$STATE"
     swaync-client -df >/dev/null 2>&1
     waiting=$(swaync-client -c 2>/dev/null || echo "")
