@@ -19,14 +19,17 @@ auto-themed from the wallpaper by wallust.
 | smart top bar | `ALT+B` pins | waybar auto-hide, owned by `hypr-appdock` (`bar_smart=on`): hover the top screen edge to fade the bar in (250ms), leave to fade out; `ALT+B` pins it open / releases it; toggle from the Tools hub. (`waybar-autohide.sh` is the retired standalone predecessor) |
 | `screenshot.sh` | `ALT+SHIFT+S` | Region/screen/all screenshots → file + clipboard + notification |
 | `drop-claude` | `ALT+SHIFT+U` | Dropdown **Claude Code** terminal (guake-style, keeps its session) — the AI sibling of `ALT+U` drop-term |
-| `hypr-claude-studio` | `ALT+CTRL+U` | **Claude Studio** — a VS-Code-style workspace: expandable session tree (🟢 running · projects → conversations) in tab 0, every opened session is its own **tab in the top bar** (mouse-clickable, isolated tmux socket), `n` = new session in the highlighted project |
+| `hypr-claude-studio` | `ALT+CTRL+U` | **Claude Studio** — a VS-Code-style workspace: expandable session tree (🟢 running · 󰑮 background · projects → conversations) in tab 0, every opened session is its own **tab** named from Claude's own title for the conversation, with a **✕ to close it**. Closing a tab ends the terminal, not the conversation — it stays resumable from the tree. `n` = new session, `x` = stop a background one |
 | `hypr-launcher claude` | Tools hub | Quick session picker — the flat filterable list version of the same data |
-| `hypr-claude-office` | `ALT+CTRL+O` | **The 2D Claude office** — one pixel-art desk per live Claude session: the mini-Clawd *types* (glowing laptop) while its session burns CPU, shows thought-dots while waiting, sleeps after 2 min idle; the scene appears only while Claude works |
+| `hypr-claude-office` | `ALT+CTRL+O` | **The 2D Claude office** — one pixel-art desk per live Claude session, each labelled with what that session *is*. States come from Claude's own job state, not a CPU guess; a desk that needs you is tinted and the header counts them. Clicking a desk opens that session, clicking anywhere else opens the Studio. Full detail in [`docs/claude-office.md`](docs/claude-office.md) |
 | `claude-select.sh` | `ALT+SHIFT+N` | Act on the selected text with Claude: explain / fix / rewrite / summarize / translate (Thai ⇄ English) / custom — result in a glass float, `c` copies |
 | `claude-vision.sh` | `ALT+SHIFT+I` | Select a region → Claude **looks** at it (diagnoses errors, explains diagrams/UI) — the reasoning sibling of `ALT+I` OCR |
 | `focus-mode.sh` | `ALT+SHIFT+F` | Deep-work session: notifications muted, countdown card on the desktop, auto-ends via systemd timer and reports what queued up |
 | `hypr-viz` | `ALT+SHIFT+Y` | Ambient audio visualizer — glass spectrum bars on the desktop (PipeWire sink monitor, pure-Python Goertzel, zero deps), wallust-colored |
 | `wallpaper-ambient.sh` | — | Sky-reactive wallpaper: hourly gradient matched to time-of-day + live weather, cascaded through wallust so the whole desktop follows the sky (`on`/`off` toggles the timer) |
+
+> **Scope**: this repo is the *desktop* — dotfiles, widgets, panels. Robot work
+> lives in `~/ros2_ws` and the RoboLLM repo, not here.
 
 ## Architecture
 
@@ -105,10 +108,11 @@ per-widget conky fleet is retired.
 | Piece | Role |
 |---|---|
 | `bin/hypr-cardhost` | the card host: async data sources, grid placement, error/stale cards, live retheme (`--ctl ping\|reload\|reload-theme`) |
-| `bin/hypr-arrange` | **ALT+SHIFT+E** — grid edit mode: drag cards (cell snap, cross-monitor, magnetic alignment guides), Enter saves, Esc cancels, press again to close, `--undo` reverts the last save |
+| `bin/hypr-arrange` | **ALT+SHIFT+E** — grid edit mode with **two snap modes**, `g` switches: *GRID* lands every surface on a cell, *FREE* gives pixel placement with magnetic alignment guides. Drag anything — cards, the office, the visualizer, the docks — Enter saves, Esc cancels, `--undo` reverts the last save |
 | `bin/hypr-widgetpicker` | template gallery with live previews, params, per-monitor add + manage (also: Settings → Widgets → *＋ Add widget…*) |
 | `bin/hypr-appdock` | one auto-hiding dock per monitor (touch the bottom screen edge to reveal), per-monitor pins — plus the **smart top bar**: `bar_smart=on` makes waybar itself auto-hide with top-edge dwell reveal, `ALT+B` pin, and a fade animation |
-| `lib/hyprdesk/` | shared modules: `rows.py` renderers, `cardspec.py` templates, `grid.py` cells, `confwrite.py` atomic config writer, `monitors.py`, `layer.py`, `theme.py` |
+| `lib/hyprdesk/` | shared modules: `rows.py` renderers, `cardspec.py` templates, `grid.py` cells, `confwrite.py` atomic config writer, `pixicons.py` icon bitmaps, `monitors.py`, `layer.py`, `theme.py` |
+| `lib/hyprdesk/pixicons.py` | **pixel icons** — generated bitmaps from [pixelarticons](https://github.com/halfmage/pixelarticons) (MIT). Rasterised offline so every icon lands on whole pixels; colour comes from the caller, so wallust still drives them. A row gets one with `icon = "cpu"`. Regenerate with `gen_pixicons.py` |
 | `bin/widget-*.sh` | data fetchers — `--fields` emits `key=value` for the host; no flag emits legacy conky markup (rollback) |
 
 **Settings** live in `config/conky/widgets.conf` (single source of truth —
