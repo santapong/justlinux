@@ -181,6 +181,12 @@ class Session:
         self.dirty = set()
         self.grab = None       # [item, mode, dx, dy]
         self.guides = []       # [("v"|"h", coord, mon)] alignment guides
+        # SNAP MODE, toggled with g. Placement used to be decided by KIND —
+        # cards always grid, everything else always free — so a card could
+        # never sit between cells and the office could never line up with
+        # one. The mode now decides, and it applies to whatever you drag.
+        self.snap = "grid" if str(
+            self.c.get("arrange_snap", "grid")).lower() != "free" else "free"
         self.overlays = {}     # mon_name -> Overlay
         self.last_activity = time.monotonic()
         display = Gdk.Display.get_default()
@@ -320,39 +326,57 @@ class Session:
             lx, ly = gx - tmx - dx, gy - tmy - dy
             mw, mh = self.mon_size(target)
             it["mon"] = target
-            if it["kind"] == "card":
-                res_l, res_t, ww, wh = self.work_geo(target)
-                it["x"] = max(res_l, min(res_l + ww - it["w"], lx))
-                it["y"] = max(res_t, min(res_t + wh - it["h"], ly))
-                col, row = grid.cell_at(ww, wh, it["x"] - res_l,
-                                        it["y"] - res_t, self.c)
-                cs, rs = grid.span(ww, wh, it["w"], it["h"], self.c)
-                col, row = grid.clamp(ww, wh, col, row, cs, rs, self.c)
-                it["cell"] = (col, row)
-                it["collides"] = self.card_collides(it, col, row)
-                # cards are cell-authoritative: guides only CONFIRM when
-                # the snapped position happens to line up with a sibling
-                bx, by = self._alignment(it, 2)
-                self.guides = [g for g in (
-                    bx and ("v", bx[1], it["mon"]),
-                    by and ("h", by[1], it["mon"])) if g]
-            else:
-                # Canva-style magnetic alignment measured on the RAW drag
-                # position (the 12px grid would push it out of range) —
-                # an alignment match beats the coarse grid snap
-                raw_x = max(0, min(mw - it["w"], lx))
-                raw_y = max(0, min(mh - it["h"], ly))
-                it["x"], it["y"] = raw_x, raw_y
-                bx, by = self._alignment(it, self.GUIDE_SNAP)
-                it["x"] = raw_x + bx[0] if bx else round(raw_x / GRID) * GRID
-                it["y"] = raw_y + by[0] if by else round(raw_y / GRID) * GRID
-                it["x"] = int(max(0, min(mw - it["w"], round(it["x"]))))
-                it["y"] = int(max(0, min(mh - it["h"], round(it["y"]))))
-                bx, by = self._alignment(it, 1)   # post-snap: what aligned?
-                self.guides = [g for g in (
-                    bx and ("v", bx[1], it["mon"]),
-                    by and ("h", by[1], it["mon"])) if g]
+            self._place(it, lx, ly, mw, mh)
         self.redraw_all()
+
+    def _place(self, it, lx, ly, mw, mh):
+        """Put an item at a drag position under the CURRENT snap mode.
+        Grid mode lands every kind on a cell; free mode gives every kind
+        pixel placement with magnetic alignment."""
+        if self.snap == "grid":
+            res_l, res_t, ww, wh = self.work_geo(it["mon"])
+            it["x"] = max(res_l, min(res_l + ww - it["w"], lx))
+            it["y"] = max(res_t, min(res_t + wh - it["h"], ly))
+            col, row = grid.cell_at(ww, wh, it["x"] - res_l,
+                                    it["y"] - res_t, self.c)
+            cs, rs = grid.span(ww, wh, it["w"], it["h"], self.c)
+            col, row = grid.clamp(ww, wh, col, row, cs, rs, self.c)
+            it["cell"] = (col, row)
+            it.pop("freepos", None)
+            # non-cards have no cell in the conf: snap their PIXELS to the
+            # cell origin instead, so they line up with the card lattice
+            ox, oy = grid.origin(ww, wh, col, row, self.c)
+            it["x"], it["y"] = res_l + ox, res_t + oy
+            it["collides"] = (self.card_collides(it, col, row)
+                              if it["kind"] == "card" else False)
+            # cell-authoritative: guides only CONFIRM when the snapped
+            # position happens to line up with a sibling
+            bx, by = self._alignment(it, 2)
+        else:
+            # Canva-style magnetic alignment measured on the RAW drag
+            # position (the 12px grid would push it out of range) —
+            # an alignment match beats the coarse grid snap
+            raw_x = max(0, min(mw - it["w"], lx))
+            raw_y = max(0, min(mh - it["h"], ly))
+            it["x"], it["y"] = raw_x, raw_y
+            bx, by = self._alignment(it, self.GUIDE_SNAP)
+            it["x"] = raw_x + bx[0] if bx else round(raw_x / GRID) * GRID
+            it["y"] = raw_y + by[0] if by else round(raw_y / GRID) * GRID
+            it["x"] = int(max(0, min(mw - it["w"], round(it["x"]))))
+            it["y"] = int(max(0, min(mh - it["h"], round(it["y"]))))
+            it.pop("cell", None)     # free placement is pixel-authoritative
+            it["freepos"] = True     # distinguishes a free DRAG from a
+                                     # resize-only item that never moved
+            it["collides"] = False   # off-grid cards may overlap by intent
+            bx, by = self._alignment(it, 1)   # post-snap: what aligned?
+        self.guides = [g for g in (
+            bx and ("v", bx[1], it["mon"]),
+            by and ("h", by[1], it["mon"])) if g]
+
+    def _resnap(self, it):
+        """Re-apply the current mode to an item already under the cursor."""
+        mw, mh = self.mon_size(it["mon"])
+        self._place(it, it["x"], it["y"], mw, mh)
 
     def release(self, *_):
         if not self.grab:
@@ -385,12 +409,21 @@ class Session:
             Gtk.main_quit()
         elif ev.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
             self.save()
+        elif ev.keyval in (Gdk.KEY_g, Gdk.KEY_G):
+            self.snap = "free" if self.snap == "grid" else "grid"
+            # re-snap whatever is already held so the switch is visible
+            # immediately rather than only on the next pointer motion
+            if self.grab:
+                self._resnap(self.grab[0])
+            self.redraw_all()
 
     # ----- commit -----
     def save(self):
         if self.grab:          # Enter mid-drag: settle the drop first so
             self.release()     # collision refusal can't be bypassed
         changes = {}
+        drops = []             # keys to REMOVE (a stale free position would
+                               # otherwise outrank a fresh grid cell)
         conky_dirty = dock_dirty = card_dirty = False
         widget_dirty = set()   # office/viz reload individually, by signal
         for it in (i for i in self.items if i["name"] in self.dirty):
@@ -402,10 +435,18 @@ class Session:
                     cur = float(self.c.get(f"{name}_scale", 1) or 1)
                     changes[f"{name}_scale"] = \
                         f"{max(0.5, min(2.0, cur * it['scale'])):.2f}"
+                res_l, res_t, ww, wh = self.work_geo(it["mon"])
                 if "cell" not in it:
-                    continue   # resize-only: keep its position untouched
-                               # (the host re-clamps the span on placement)
-                _, _, ww, wh = self.work_geo(it["mon"])
+                    if not it.get("freepos"):
+                        continue   # resize-only: keep its position untouched
+                                   # (host re-clamps the span on placement)
+                    # free-placed card: persist WORKAREA pixels. place_at()
+                    # already takes pixels — the grid was only ever how they
+                    # were computed — so _fx/_fy just skip that computation.
+                    changes[f"{name}_mon"] = it["mon"]
+                    changes[f"{name}_fx"] = int(max(0, it["x"] - res_l))
+                    changes[f"{name}_fy"] = int(max(0, it["y"] - res_t))
+                    continue
                 col, row = it["cell"]
                 # re-clamp with the CURRENT (possibly resized) span so a
                 # scaled-up card can't hang off the grid
@@ -414,6 +455,7 @@ class Session:
                 changes[f"{name}_mon"] = it["mon"]
                 changes[f"{name}_col"] = col
                 changes[f"{name}_row"] = row
+                drops += [f"{name}_fx", f"{name}_fy"]   # back on the grid
                 continue
             # legacy anchor derivation (conky gaps are workarea-relative)
             x, y, w, h = it["x"], it["y"], it["w"], it["h"]
@@ -450,9 +492,11 @@ class Session:
                               base_font_size(name))
                     changes[f"{name}_size"] = \
                         max(6, min(40, int(cur * it["scale"])))
-        if changes:
+        if changes or drops:
             _snapshot("arrange")           # dedicated pre-commit snapshot —
-            _atomic_set(changes)           # survives later settings writes
+            # drops clear a card's free pixels when it goes back on the grid;
+            # leaving them would silently outrank the new cell
+            _atomic_set(changes, delete=drops)  # survives later settings writes
             if card_dirty:
                 tool_ctl("hypr-cardhost", "reload")   # cards move live
             if dock_dirty:
@@ -612,18 +656,25 @@ class Overlay(LayerWindow):
                 cr.rectangle(x + w - HANDLE, y + h - HANDLE, HANDLE, HANDLE)
                 cr.fill()
 
-        # help bar
-        msg = ("drag = move (cards snap to grid, cross-monitor ok) · "
-               "corner = resize · Enter = save · Esc = cancel")
+        # help bar — the snap mode leads, because it changes what a drag DOES
+        grid_mode = self.s.snap == "grid"
+        mode = ("󰕭 GRID snap" if grid_mode else "󰆿 FREE move")
+        msg = (f"{mode}  (g = switch) · drag = move · corner = resize · "
+               "Enter = save · Esc = cancel")
         cr.set_font_size(14)
         ext = cr.text_extents(msg)
         bx = (self.mon_w - ext.width) / 2
         cr.set_source_rgba(*bg, 0.9)
         cr.rectangle(bx - 16, 18, ext.width + 32, 34)
         cr.fill()
-        cr.set_source_rgba(*fg, 1)
+        # tint the mode word itself: at a glance, which rules are in force
+        mext = cr.text_extents(mode)
+        cr.set_source_rgba(*(acc if grid_mode else acc2), 1)
         cr.move_to(bx, 40)
-        cr.show_text(msg)
+        cr.show_text(mode)
+        cr.set_source_rgba(*fg, 1)
+        cr.move_to(bx + mext.x_advance, 40)
+        cr.show_text(msg[len(mode):])
 
     @staticmethod
     def rounded(cr, x, y, w, h, r):

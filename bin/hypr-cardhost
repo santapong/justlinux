@@ -338,8 +338,26 @@ class CardWindow(LayerWindow):
         # The grid lives in WORKAREA coordinates — layer margins already
         # are workarea-relative, so origins map straight onto margins,
         # but cell sizes must come from the workarea, not the monitor
+        # FREE placement wins when present: hypr-arrange's free-move mode
+        # (g in grid edit) writes workarea pixels straight through, since
+        # place_at() takes pixels anyway — the grid was only ever how they
+        # got computed. Going back on the grid deletes these keys.
+        fx, fy = c.get(f"{inst_id}_fx"), c.get(f"{inst_id}_fy")
+        placed = False
+        if fx not in (None, "") and fy not in (None, ""):
+            try:
+                res = host.reserved.get(mon_name, (0, 0, 0, 0))
+                work_w = self.geo.width - res[0] - res[2]
+                work_h = self.geo.height - res[1] - res[3]
+                # clamp so a stale pixel pair can never strand a card off
+                # screen after a resolution or scale change
+                self.place_at(max(0, min(work_w - 1, int(fx))),
+                              max(0, min(work_h - 1, int(fy))))
+                placed = True
+            except (TypeError, ValueError):
+                pass                    # fall through to the grid
         col, row = c.get(f"{inst_id}_col"), c.get(f"{inst_id}_row")
-        if col is not None and row is not None:
+        if not placed and col is not None and row is not None:
             try:
                 res = host.reserved.get(mon_name, (0, 0, 0, 0))
                 work_w = self.geo.width - res[0] - res[2]
