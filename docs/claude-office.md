@@ -92,7 +92,14 @@ In priority order:
   Claude's `detail` line.
 - Capped at `office_cols × 2` desks; the remainder collapses into `+N more`.
 
-## Clicking a desk
+## Clicking
+
+The whole card takes clicks. **A desk opens its session; anywhere else opens
+the Studio** — the header, the gaps between desks, the `+N more` marker, and
+the empty office (which shows a sleeping Clawd when nothing is running). The
+office is a *view*; the Studio is where you work.
+
+Clicking a desk:
 
 ```
 window address?  ──yes──▶ focus that window
@@ -107,6 +114,22 @@ has a session id? ──yes──▶ reopen it (studio tab, else kitty)
 A **live** session is never resumed. `claude --resume` on a running
 conversation starts a *second* process against one transcript.
 
+## Many sessions at once
+
+Desks wrap at `office_cols` and stop after two rows; the last slot then becomes
+`+N more`, which opens the Studio.
+
+Two rules keep that readable:
+
+- **Desks hold pid order** so they don't shuffle under your cursor as states
+  change.
+- **Slots are allocated by urgency** — `needs you` → `working` → `reading` →
+  `idle` → `asleep`. A session waiting on you is never the one folded into
+  `+N more`.
+
+The column count is also clamped to what the monitor can actually hold, so a
+hand-edited `office_cols` cannot push the card off the side of the screen.
+
 ## Configuration
 
 All in `config/conky/widgets.conf`:
@@ -117,8 +140,26 @@ All in `config/conky/widgets.conf`:
 | `office_mon` | `DP-1` | which monitor it lives on |
 | `office_layer` | `bottom` | `bottom` = desktop widget (windows cover it), `top` = floats over your work |
 | `office_ws` | *unset* | pin to ONE workspace; unset = every workspace |
-| `office_cols` | `8` | desks per row before wrapping |
+| `office_cols` | `5` | desks per row before wrapping (clamped to what the monitor fits) |
 | `office_pos` / `_x` / `_y` | `bottom_left` 24,24 | placement, written by grid edit mode |
+
+### Does it respect the grid?
+
+Yes — in **GRID** mode. `hypr-arrange` used to decide placement by *kind*:
+cards always snapped, everything else never did. Since the two-mode editor,
+the mode decides, and in GRID mode the office snaps to the same cell lattice
+the cards use.
+
+The remaining difference is **storage, not snapping**. A card stores
+`_col/_row`, so it re-flows when the resolution or grid density changes. The
+office stores the resulting pixels as `office_pos/_x/_y`, because
+`LayerWindow` — which every non-card surface is built on — has no concept of
+cells. So it *lands* on the grid but does not *follow* the grid afterwards.
+
+Making it a true cell citizen would mean re-implementing the placement engine
+that lives inside `hypr-cardhost` in every standalone widget, and the office's
+width changes with the session count, so a stored cell span would go stale on
+the next poll.
 
 ### Moving it
 

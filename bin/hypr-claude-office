@@ -59,7 +59,9 @@ CELL_H = 30 * SCALE
 ROW_H = CELL_H + 44          # desk + 2 name lines + status line: row pitch
 PAD = 14
 TIP_H = 16                   # hover-detail strip, reserved even when empty
-COLS_DEF = 8                 # office_cols: desks per row before wrapping
+COLS_DEF = 5                 # office_cols: desks per row before wrapping.
+                             # 5 keeps the card the same width it was when
+                             # cells were name-less and half as wide.
 MAX_ROWS = 2                 # past this the tail collapses into "+N more"
 # cpu ticks per poll ⇒ "typing". MEASURED on this box over 8 polls of
 # three GENUINELY idle sessions: 15-43 a poll (one had not written its
@@ -80,6 +82,8 @@ CLAUDE_JOBS = Path.home() / ".claude/jobs"
 # state.json, so anything missing/unknown falls back to the heuristic.
 JOB_UI = {"blocked": "attention", "working": "typing",
           "done": "idle", "stopped": "sleep"}
+# which desks earn a slot when there are more sessions than room
+URGENCY = {"attention": 0, "typing": 1, "reading": 2, "idle": 3, "sleep": 4}
 # transcript entries written AROUND a turn — they say nothing about whose
 # move it is, so the tail scan looks straight through them
 TX_NOISE = ("mode", "permission-mode", "file-history-snapshot",
@@ -433,6 +437,22 @@ class Office(LayerWindow):
             self.cols = max(1, int(conf_get("office_cols", COLS_DEF)))
         except (TypeError, ValueError):
             self.cols = COLS_DEF
+        # ...and never wider than the monitor it lives on, whatever the
+        # conf says. 8 desks is 1036px, which does not fit a 1600px head
+        # beside anything else.
+        try:
+            mine = str(conf_get("office_mon", "DP-1"))
+            for m in json.loads(subprocess.run(
+                    ["hyprctl", "-j", "monitors"], capture_output=True,
+                    text=True, timeout=2).stdout):
+                if m.get("name") != mine:
+                    continue
+                usable = int(m.get("width", 1600) / (m.get("scale") or 1))
+                fits = max(1, (usable - 2 * PAD - 48) // CELL_W)
+                self.cols = max(1, min(self.cols, int(fits)))
+                break
+        except Exception:
+            pass                     # conf value stands if we can't ask
 
     def _grid(self, n):
         """(rows, shown) for n workers: wrap at self.cols, and past
@@ -556,12 +576,13 @@ class Office(LayerWindow):
         win = self.get_window()
         if not win:
             return False
-        region = cairo.Region()      # empty office: fully click-through
-        _rows, shown = self._grid(len(self.workers))
-        for i in range(shown):
-            x, y = self.cell_rect(i)
-            region.union(cairo.RectangleInt(x=x, y=y,
-                                            width=CELL_W, height=ROW_H))
+        # the WHOLE card takes clicks now: a desk opens its session, and
+        # anywhere else opens the studio — including the empty office,
+        # which was previously click-through and so unclickable. Only the
+        # card's own rectangle is captured; the desktop around it stays
+        # free (the pet/dock rule).
+        region = cairo.Region(cairo.RectangleInt(
+            x=0, y=0, width=max(1, int(self.w)), height=max(1, int(self.h))))
         win.input_shape_combine_region(region, 0, 0)
         return False
 
@@ -581,16 +602,35 @@ class Office(LayerWindow):
             self.queue_draw()
         return False
 
+    def open_studio(self):
+        """The office is a VIEW; the studio is where you actually work.
+        Clicking anywhere that isn't a desk goes there."""
+        try:
+            subprocess.Popen(
+                ["python3", str(Path.home() / ".local/bin/hypr-claude-studio")],
+                start_new_session=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError:
+            subprocess.run(["notify-send", "Claude office",
+                            "could not open the studio"])
+
     def on_click(self, _w, event):
         idx = self._cell_at(event.x, event.y)
-        if idx < 0:
-            return False
+        if idx >= 0:
+            # a cell's rect starts at the row top, but the desk art does
+            # not — the band above it is the header (row 0) or the gap
+            # between rows. Clicking THERE means "the widget", not "this
+            # session", so it goes to the studio like any other background.
+            _x, ytop = self.cell_rect(idx)
+            if event.y < ytop + 8 * SCALE:
+                idx = -1
+        if idx < 0 or idx >= len(self.workers):
+            self.open_studio()       # background, header, empty office
+            return True
         _rows, shown = self._grid(len(self.workers))
         spill = len(self.workers) - shown
         if spill and idx == shown - 1:
-            subprocess.run(["notify-send", "Claude office",
-                            f"{spill + 1} more sessions than desks — "
-                            "ALT+CTRL+U opens the studio"])
+            self.open_studio()       # "+N more": the studio lists them all
             return True
         wk = self.workers[idx]
         if wk.get("addr"):           # jump to the session's terminal
@@ -899,6 +939,18 @@ class Office(LayerWindow):
             w["place"] = os.path.basename(str(cwd).rstrip("/")) or "~"
             rows.append(w)
         rows.sort(key=lambda w: w["pid"])
+        # More sessions than desks? Then WHICH ones get hidden matters.
+        # Desks keep pid order so they don't shuffle under the cursor as
+        # states change, but the slots are allocated by urgency first —
+        # a session waiting on you must never be the one folded into
+        # "+N more".
+        cap = self.cols * MAX_ROWS
+        if len(rows) > cap:
+            keep = {id(w) for w in sorted(
+                rows, key=lambda w: (URGENCY.get(w.get("state"), 9),
+                                     w["pid"]))[:cap - 1]}
+            rows = ([w for w in rows if id(w) in keep]
+                    + [w for w in rows if id(w) not in keep])
         # the headline number: how many desks are waiting on YOU
         self.needy = sum(1 for w in rows
                          if w.get("state") in ("attention", "blocked"))
