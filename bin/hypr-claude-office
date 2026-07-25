@@ -374,11 +374,13 @@ def draw_art(cr, art, x, y, extra=None, scale=SCALE):
 class Office(LayerWindow):
     def __init__(self):
         mon = conf_get("office_mon", "DP-1")
-        # top layer by default: the point is SEEING Claude work while your
-        # windows are open. office_layer=bottom moves it to the desktop.
-        layer = conf_get("office_layer", "top")
+        # DESKTOP widget by default, like every card in the fleet: windows
+        # cover it and you see it on the bare desktop. It used to default
+        # to `top`, which made it the one widget that floated over your
+        # work on every workspace. office_layer=top restores that.
+        layer = conf_get("office_layer", "bottom")
         if layer not in ("top", "bottom", "overlay"):
-            layer = "top"
+            layer = "bottom"
         super().__init__("office", default_pos="bottom_left",
                          default_x=24, default_y=24,
                          layer=layer, namespace="hypr-office")
@@ -398,7 +400,9 @@ class Office(LayerWindow):
         self.needy = 0               # workers waiting on YOU right now
         self.hover = -1              # desk under the pointer, -1 = none
         self.studio_addr = ""        # studio window, if one is open
+        self.on_ws = True            # visible on the active workspace?
         self.reload_conf()
+        self._watch_workspace()
         self.set_app_paintable(True)
         area = Gtk.DrawingArea()
         area.connect("draw", self.on_draw)
@@ -435,6 +439,102 @@ class Office(LayerWindow):
         MAX_ROWS the last visible slot becomes a "+N more" marker."""
         shown = min(n, self.cols * MAX_ROWS)
         return max(1, -(-shown // self.cols)), shown
+
+    def _watch_workspace(self):
+        """office_ws pins the office to ONE workspace. Unset (the default)
+        it shows on all of them, exactly as before.
+
+        A layer surface has no workspace of its own — it belongs to a
+        monitor and rides above/below every workspace on it — so "only on
+        workspace 3" can only mean hiding it when you leave. Driven by
+        Hyprland's event socket rather than polling, so the reveal lands
+        on the same frame as the switch."""
+        want = str(conf_get("office_ws", "")).strip()
+        if not want:
+            return                       # every workspace: nothing to watch
+        sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+        rt = os.environ.get("XDG_RUNTIME_DIR", "/run/user/1000")
+        sock = f"{rt}/hypr/{sig}/.socket2.sock"
+        if not sig or not os.path.exists(sock):
+            return                       # not under Hyprland: stay visible
+        try:
+            import socket as _socket
+            s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+            s.connect(sock)
+            s.setblocking(False)
+        except OSError:
+            return
+        self._ws_buf = ""
+
+        def on_event(src, _cond):
+            try:
+                chunk = s.recv(8192).decode(errors="replace")
+            except BlockingIOError:
+                return True
+            except OSError:
+                return False             # socket died: stop watching
+            if not chunk:
+                return False             # EOF — compositor gone
+            self._ws_buf += chunk
+            lines, _, self._ws_buf = self._ws_buf.rpartition("\n")
+            for line in lines.splitlines():
+                if line.split(">>")[0] in ("workspace", "focusedmon",
+                                           "workspacev2"):
+                    self._apply_ws()
+            return True
+
+        GLib.io_add_watch(s.fileno(), GLib.PRIORITY_DEFAULT,
+                          GLib.IOCondition.IN | GLib.IOCondition.HUP,
+                          on_event)
+        self._ws_sock = s                # keep a reference: GC would close it
+        self._apply_ws()
+
+    @staticmethod
+    def _arrange_open():
+        try:
+            return subprocess.run(
+                ["pgrep", "-xf",
+                 f"python3 {Path.home()}/.local/bin/hypr-arrange"],
+                capture_output=True, timeout=2).returncode == 0
+        except Exception:
+            return False
+
+    def _apply_ws(self):
+        """Show only on office_ws; a hidden wayland window drops its
+        wl_surface, so this really does unmap it (hyprctl layers loses
+        the row) — hypr-arrange force-shows it before enumerating."""
+        want = str(conf_get("office_ws", "")).strip()
+        if not want:
+            self.on_ws = True
+        elif self._arrange_open():
+            # grid edit mode enumerates `hyprctl layers`, and a hidden
+            # wayland window has no surface there — a pinned office would
+            # vanish from the editor and become unmovable
+            self.on_ws = True
+        else:
+            try:
+                # the workspace active on THIS office's monitor, not the
+                # globally focused one — with three heads those differ,
+                # and the global answer would blink the office on a head
+                # you are not even looking at
+                mine = str(conf_get("office_mon", "DP-1"))
+                out = subprocess.run(["hyprctl", "-j", "monitors"],
+                                     capture_output=True, text=True,
+                                     timeout=2).stdout
+                cur = {}
+                for m in json.loads(out):
+                    if m.get("name") == mine:
+                        cur = m.get("activeWorkspace") or {}
+                        break
+                self.on_ws = want in (str(cur.get("id")),
+                                      str(cur.get("name")))
+            except Exception:
+                self.on_ws = True        # can't tell ⇒ never hide it
+        if self.on_ws and not self.get_visible():
+            self.show_all()
+            self._update_input()
+        elif not self.on_ws and self.get_visible():
+            self.hide()
 
     def cell_rect(self, i):
         """Top-left of slot i. Everything that needs desk geometry asks
@@ -813,10 +913,13 @@ class Office(LayerWindow):
             self._resize(len(rows))
         self.workers = rows
         # always stay visible while enabled — an empty office renders a
-        # sleeping Clawd, so toggling ON always has a visible result
-        if not self.get_visible():
+        # sleeping Clawd, so toggling ON always has a visible result.
+        # on_ws is the one exception: office_ws pinned it to another
+        # workspace, and re-showing here would undo that every poll.
+        if self.on_ws and not self.get_visible():
             self.show_all()
         self._update_input()         # desk click targets follow the layout
+        self._apply_ws()             # recovers when edit mode closes
         self._write_badge(rows)
         return True
 
@@ -1106,9 +1209,15 @@ def main():
         # fleet's reload signal would kill the office outright
         try:
             win.reload_conf()        # office_cols may have changed too
+            # force-show: hypr-arrange signals before it enumerates
+            # `hyprctl layers`, and a workspace-hidden office has no
+            # surface to find — it would silently drop out of edit mode
+            if not win.get_visible():
+                win.show_all()
             win._resize(len(win.workers))
             win.reposition()         # no args ⇒ re-read pos/x/y from conf
             win._update_input()      # click targets follow the surface
+            win._apply_ws()          # then settle back to the ws rule
         except Exception:
             pass
         return True

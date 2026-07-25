@@ -35,6 +35,10 @@ C4-model diagrams (Context → Containers → Components → Dynamic) live in
 card host, docks, smart bar, TUI panels and the single `widgets.conf`
 source of truth fit together.
 
+[`docs/claude-office.md`](docs/claude-office.md) — how the Claude office
+decides what each desk shows: where its facts come from, how a session is
+bound to a conversation, how "needs you" is derived, and every `office_*` key.
+
 ## Requirements
 
 ```sh

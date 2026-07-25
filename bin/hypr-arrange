@@ -94,6 +94,32 @@ def signal_widget(name):
         pass
 
 
+def restart_widget(name):
+    """Bounce a 'widget' kind. Needed ONLY for a monitor change: a layer
+    surface is bound to its output at map time (set_target_monitor is
+    pre-show-only), so a live SIGUSR1 can move it within a head but never
+    across one. Everything else stays on the no-flicker signal path."""
+    proc = WIDGET_PROC.get(name)
+    if not proc:
+        return
+    home = Path.home()
+    try:
+        subprocess.run(["pkill", "-xf", f"python3 {home}/.local/bin/{proc}"],
+                       capture_output=True, timeout=3)
+        for _ in range(20):                  # let the surface really go
+            if subprocess.run(
+                    ["pgrep", "-xf", f"python3 {home}/.local/bin/{proc}"],
+                    capture_output=True).returncode != 0:
+                break
+            time.sleep(0.1)
+        subprocess.Popen(["python3", f"{home}/.local/bin/{proc}"],
+                         start_new_session=True,
+                         stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
 def base_font_size(name):
     try:
         t = (Path.home() / f".config/conky/widgets/{name}.conf").read_text()
@@ -320,8 +346,11 @@ class Session:
             omx, omy = self.geo[overlay.mon][0], self.geo[overlay.mon][1]
             gx, gy = omx + ev.x, omy + ev.y
             target = self.mon_at_global(gx, gy) or it["mon"]
-            if it["kind"] != "card":
+            if it["kind"] not in ("card", "widget"):
                 target = it["mon"]           # conky/dock stay home
+            # 'widget' (office/viz) MAY cross heads: it cannot move there
+            # live — a layer surface is bound to its output at map time —
+            # so save() restarts it on the new monitor instead.
             tmx, tmy = self.geo[target][0], self.geo[target][1]
             lx, ly = gx - tmx - dx, gy - tmy - dy
             mw, mh = self.mon_size(target)
@@ -426,6 +455,7 @@ class Session:
                                # otherwise outrank a fresh grid cell)
         conky_dirty = dock_dirty = card_dirty = False
         widget_dirty = set()   # office/viz reload individually, by signal
+        widget_moved = set()   # ... except across heads, which needs a restart
         for it in (i for i in self.items if i["name"] in self.dirty):
             name, kind = it["name"], it["kind"]
             mw, mh = self.mon_size(it["mon"])
@@ -484,7 +514,12 @@ class Session:
                 # NOT conky_dirty: that would restart every conky twin for
                 # an office nudge, and the font-scale write below reads
                 # ~/.config/conky/widgets/<name>.conf — no such file here
+                changes[f"{name}_mon"] = it["mon"]
                 widget_dirty.add(name)
+                if it["mon"] != it["omon"]:
+                    # dragged to another head: signalling cannot move it
+                    # there, only a restart can (see restart_widget)
+                    widget_moved.add(name)
             else:
                 conky_dirty = True
                 if "scale" in it:
@@ -507,7 +542,12 @@ class Session:
                           ".local/bin/desktop-widgets.sh"),
                      "restart-conky"], start_new_session=True)
             for w in widget_dirty:
-                signal_widget(w)
+                # a head change needs the surface rebuilt; a plain move
+                # keeps the cheap, flicker-free signal path
+                if w in widget_moved:
+                    restart_widget(w)
+                else:
+                    signal_widget(w)
             notify("Saved — 'hypr-arrange --undo' reverts")
         Gtk.main_quit()
 

@@ -24,6 +24,11 @@ sys.path.insert(0, str(Path.home() / ".local/lib"))
 ME = os.path.realpath(__file__)
 TMUX_SESSION = "claude-studio"
 KITTY_CLASS = "hyprclaudestudio"
+# per-tab close button. Window 0 is the session tree — it has no ✕,
+# closing it would take the sidebar with it. The range tag names the
+# window so the click handler knows WHICH tab the ✕ belonged to.
+CLOSE_X = ("#{?#{!=:#{window_index},0},"
+           "#[range=user|x#{window_index}]✕#[norange],}")
 
 
 def tmux(*args, out=False):
@@ -86,15 +91,61 @@ def style_tmux():
          f"#[fg={acc},bold] 󰚩 Claude Studio #[default] "),
         ("set", "-g", "status-left-length", "22"),
         ("set", "-g", "status-right", f"#[fg={sub}] #S "),
-        ("set", "-g", "window-status-format", " #I #W "),
+        ("set", "-g", "window-status-format", f" #I #W {CLOSE_X} "),
         ("set", "-g", "window-status-current-format",
-         f"#[bg={acc},fg={bg},bold] #I #W #[default]"),
+         f"#[bg={acc},fg={bg},bold] #I #W {CLOSE_X}#[bg={acc},fg={bg}] "
+         "#[default]"),
         ("set", "-g", "window-status-separator", ""),
-        # browser-style tabs: middle-click a tab in the bar to close it
-        # (right-click keeps tmux's default context menu with Kill)
+        # browser-style tabs: click the ✕ to close one, middle-click
+        # anywhere on the tab for the same thing. Left-click elsewhere
+        # still just selects, so the ✕ needs its own hit region — hence
+        # the range tag (tmux has no per-glyph hit testing otherwise).
+        ("bind-key", "-n", "MouseUp1Status", "if", "-F",
+         "#{m/r:^x[0-9]+$,#{mouse_status_range}}",
+         "kill-window -t #{s/^x//:mouse_status_range}",
+         "select-window -t="),
         ("bind-key", "-n", "MouseUp2Status", "kill-window", "-t="),
     ):
         tmux(*args)
+
+
+def _tab_name(entry, width=18):
+    """A tab you can tell apart. Every session in $HOME used to open a tab
+    called "santapong", which made the close buttons a guessing game — so
+    prefer Claude's own name for the conversation."""
+    from hyprdesk.claudesessions import session_title
+    title = ""
+    sid = entry.get("sid")
+    if sid:
+        for proj in (Path.home() / ".claude/projects").glob(f"*/{sid}.jsonl"):
+            title = session_title(proj)
+            break
+    name = title or os.path.basename(
+        (entry.get("cwd") or "").rstrip("/")) or "~"
+    # tmux renames on '#' and whitespace oddities; keep it plain
+    name = " ".join(str(name).split()).replace("#", "")
+    return name[:width] or "~"
+
+
+def rename_open_tabs():
+    """Give tabs opened before this ran the same real names. Only windows
+    whose start command names a session can be identified; a bare `claude`
+    has no id until its transcript exists, so it keeps the directory."""
+    import re
+    uuid = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+                      r"[0-9a-f]{4}-[0-9a-f]{12}")
+    for line in tmux("list-panes", "-s", "-F",
+                     "#{window_index}|#{pane_current_path}|"
+                     "#{pane_start_command}", out=True).splitlines():
+        idx, _, rest = line.partition("|")
+        cwd, _, cmd = rest.partition("|")
+        if idx == "0":
+            continue
+        m = uuid.search(cmd or "")
+        if not m:
+            continue
+        name = _tab_name({"sid": m.group(0), "cwd": cwd})
+        tmux("rename-window", "-t", idx, name)
 
 
 def open_session_tab(entry):
@@ -107,9 +158,8 @@ def open_session_tab(entry):
         if sid in cmd:
             tmux("select-window", "-t", idx)
             return
-    name = os.path.basename(cwd.rstrip("/")) or "~"
-    tmux("new-window", "-t", f"{TMUX_SESSION}:", "-n", name, "-c", cwd,
-         f"claude --resume {sid}")
+    tmux("new-window", "-t", f"{TMUX_SESSION}:", "-n", _tab_name(entry),
+         "-c", cwd, f"claude --resume {sid}")
 
 
 def new_session_tab(cwd):
@@ -127,6 +177,7 @@ def sidebar():
 
     pal = colors()
     style_tmux()
+    rename_open_tabs()
 
     class Studio(App):
         ENABLE_COMMAND_PALETTE = False
@@ -155,6 +206,12 @@ def sidebar():
         def on_mount(self):
             self.reload_tree()
             self.query_one(Tree).focus()
+            # the tree goes stale the moment a tab is closed or a session
+            # starts elsewhere; r still forces it, this just keeps up
+            self.set_interval(6.0, self.reload_tree)
+            # Claude names a conversation a little after it starts, so a
+            # tab opened from the tree gets its real name on a later pass
+            self.set_interval(30.0, rename_open_tabs)
 
         def reload_tree(self):
             tree = self.query_one(Tree)
