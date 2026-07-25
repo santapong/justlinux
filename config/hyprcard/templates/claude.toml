@@ -12,7 +12,8 @@ interval = 60
 
 [[rows]]
 type = "title"
-text = "󱚝  CLAUDE PLAN USAGE"
+icon = "zap"
+text = "CLAUDE PLAN USAGE"
 
 [[rows]]
 type = "hr"

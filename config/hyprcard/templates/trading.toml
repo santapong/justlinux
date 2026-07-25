@@ -18,7 +18,8 @@ interval = 300
 
 [[rows]]
 type = "title"
-text = "󰋂  MARKETS"
+icon = "coins"
+text = "MARKETS"
 badge = "24 h"
 
 [[rows]]

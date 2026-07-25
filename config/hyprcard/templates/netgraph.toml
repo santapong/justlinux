@@ -12,7 +12,8 @@ interval = 2
 
 [[rows]]
 type = "title"
-text = "󰖩  NETWORK · {iface}"
+icon = "net"
+text = "NETWORK · {iface}"
 badge = "▼ {down}"
 
 [[rows]]

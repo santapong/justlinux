@@ -20,6 +20,7 @@ from pathlib import Path
 
 import cairo
 
+from . import pixicons
 from .cardspec import subst
 from .theme import rgb
 
@@ -42,6 +43,49 @@ def _ink(cr, ctx, slot, alpha=1.0):
 
 def _s(ctx, v):
     return v * ctx.get("scale", 1.0)
+
+
+# icon column width when a row declares one — 16px glyph plus a 5px gutter,
+# both scaled with the card. Measured once here so the measure pass and the
+# draw pass cannot disagree about where the label starts.
+ICON_W = 16
+ICON_GAP = 5
+
+
+def _icon_scale(ctx):
+    """Always the 16px bitmap at a WHOLE-number scale.
+
+    A pixel icon drawn at a fractional scale stops being a pixel icon, and
+    the card scale is a float. Rounding to an integer keeps every source
+    pixel square, and pinning the size means the space reserved below and
+    the pixels drawn can never disagree — they did, and the label landed
+    on top of the icon at 2x.
+    """
+    return max(1, round(ctx.get("scale", 1.0)))
+
+
+def _icon_w(ctx, spec):
+    """Horizontal space a row's icon claims, or 0 when it has none."""
+    if not spec.get("icon"):
+        return 0
+    return (ICON_W + ICON_GAP) * _icon_scale(ctx)
+
+
+def _icon(cr, ctx, spec, x, baseline, slot="accent2"):
+    """Blit a row's pixel icon, optically centred on the text baseline.
+    Colour is the caller's slot, which is what keeps these wallust-driven.
+    """
+    name = spec.get("icon")
+    if not name:
+        return 0
+    scale = _icon_scale(ctx)
+    _ink(cr, ctx, slot)
+    # 0.78 of the icon box sits above the baseline: that lines a 16px glyph
+    # up with 11px text without needing font metrics
+    pixicons.draw(cr, name, round(x),
+                  round(baseline - ICON_W * scale * 0.78),
+                  size=ICON_W, scale=scale)
+    return _icon_w(ctx, spec)
 
 
 def _ellipsize(cr, text, max_w):
@@ -106,8 +150,9 @@ def row_title(cr, spec, ctx, y):
         if badge:
             _font(cr, ctx, 10)
             badge_w = cr.text_extents(badge).x_advance + _s(ctx, 10)
-        _text(cr, ctx, 0, base, text, "accent2", 12, bold=True,
-              max_w=max(_s(ctx, 40), ctx["width"] - badge_w))
+        tx = _icon(cr, ctx, spec, 0, base)
+        _text(cr, ctx, tx, base, text, "accent2", 12, bold=True,
+              max_w=max(_s(ctx, 40), ctx["width"] - badge_w - tx))
         if badge:
             _text(cr, ctx, ctx["width"], base, badge, "sub", 10, right=True)
     return h
@@ -137,9 +182,10 @@ def row_keyval(cr, spec, ctx, y):
         key_ink = spec.get("key_ink", "sub")
         if key_ink not in ("sub", "fg", "accent2"):
             key_ink = "sub"
-        used = _text(cr, ctx, 0, base, key, key_ink, 11,
-                     max_w=ctx["width"] * 0.4 if spec.get("key2")
-                     else ctx["width"] * 0.55)
+        kx = _icon(cr, ctx, spec, 0, base, key_ink)
+        used = kx + _text(cr, ctx, kx, base, key, key_ink, 11,
+                          max_w=(ctx["width"] * 0.4 if spec.get("key2")
+                                 else ctx["width"] * 0.55) - kx)
         key2 = subst(spec.get("key2", ""), ctx["params"], ctx["fields"]) \
             if spec.get("key2") else ""
         if key2:
@@ -178,7 +224,8 @@ def row_bar(cr, spec, ctx, y):
             lslot = spec.get("label_ink", "accent2")
             if lslot not in ("accent2", "sub", "fg"):
                 lslot = "accent2"
-            _text(cr, ctx, 0, base,
+            lx = _icon(cr, ctx, spec, 0, base, lslot)
+            _text(cr, ctx, lx, base,
                   subst(label, ctx["params"], ctx["fields"]), lslot, 11)
             text = subst(spec.get("text", ""), ctx["params"], ctx["fields"]) \
                 if spec.get("text") else f"{pct:.0f}%"

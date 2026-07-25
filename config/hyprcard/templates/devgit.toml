@@ -17,7 +17,8 @@ interval = 60
 
 [[rows]]
 type = "title"
-text = "  DEV REPOS"
+icon = "commit"
+text = "DEV REPOS"
 
 [[rows]]
 type = "hr"

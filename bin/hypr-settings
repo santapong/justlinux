@@ -92,6 +92,13 @@ DEFAULT_POS = {"clock": ("top_right", 24, 44), "stats": ("middle_right", 24, 0),
 # in widgets.conf as claude_office= (not office=), and viz defaults OFF —
 # it's a hotkey-only toy, never autostarted just by appearing in this list.
 ONOFF_KEY = {"office": "claude_office"}
+
+# surfaces whose LAYER (what they sit in front of) is user-settable. A
+# layer is fixed when the surface maps, so changing it restarts that one
+# widget — unlike a move, which SIGUSR1 does live.
+LAYER_KEYS = ("office", "viz")
+LAYER_DEFAULT = {"office": "bottom", "viz": "bottom"}
+LAYER_CYCLE = ["bottom", "top", "overlay"]
 ONOFF_DEFAULT = {"viz": "off"}
 
 # office / viz are hyprdesk widget-kind surfaces, not conky — SIGUSR1 makes
@@ -576,6 +583,22 @@ class HyprSettings(App):
                                      "-/+ pairs nudge X then Y by 12 px. "
                                      "Widgets restart a moment after you stop.",
                                      classes="hint")
+                    with Card("Depth · what a surface sits in front of"):
+                        for key in LAYER_KEYS:
+                            with Horizontal(classes="row"):
+                                yield Label(WIDGET_LABELS.get(key, key))
+                                lb = Button(
+                                    self.widgets.get(f"{key}_layer",
+                                                     LAYER_DEFAULT[key]),
+                                    id=f"layer_{key}", classes="posbtn")
+                                lb.active_effect_duration = 0
+                                yield lb
+                        yield Static("bottom = on the desktop, windows cover "
+                                     "it (like the cards) · top = in front of "
+                                     "your windows · overlay = in front of "
+                                     "everything, even fullscreen. Changing "
+                                     "depth restarts that surface.",
+                                     classes="hint")
                     with Card("Style"):
                         with Horizontal(classes="row"):
                             yield Label("Card look (border + background)")
@@ -764,6 +787,22 @@ class HyprSettings(App):
             event.button.label = nxt
             self.schedule_widget_restart()
             return
+        if bid.startswith("layer_"):
+            key = bid.removeprefix("layer_")
+            self.widgets = widgets_conf()
+            cur = self.widgets.get(f"{key}_layer", LAYER_DEFAULT.get(key,
+                                                                     "bottom"))
+            nxt = (LAYER_CYCLE[(LAYER_CYCLE.index(cur) + 1) % len(LAYER_CYCLE)]
+                   if cur in LAYER_CYCLE else LAYER_CYCLE[0])
+            _conf_set({f"{key}_layer": nxt})
+            self.widgets = widgets_conf()
+            event.button.label = nxt
+            # a layer is chosen when the surface MAPS, so SIGUSR1 cannot
+            # change it — this is the one widget edit that must respawn
+            launch(str(HOME / ".local/bin/desktop-widgets.sh"),
+                   f"restart-{key}")
+            return
+
         if bid.startswith("pos_"):
             key = bid.removeprefix("pos_")
             # re-read before computing: hypr-arrange may have saved since

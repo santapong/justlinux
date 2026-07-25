@@ -12,7 +12,8 @@ interval = 5
 
 [[rows]]
 type = "title"
-text = "󰐰  FOCUS"
+icon = "alarm"
+text = "FOCUS"
 badge = "{remaining}"
 
 [[rows]]

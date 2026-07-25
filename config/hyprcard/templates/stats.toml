@@ -12,25 +12,29 @@ interval = 5
 
 [[rows]]
 type = "bar"
-label = " CPU"
+icon = "cpu"
+label = "CPU"
 value = "{cpu}"
 text = "{cpu}% · {cputemp}°C"
 
 [[rows]]
 type = "bar"
-label = " RAM"
+icon = "ram"
+label = "RAM"
 value = "{mem_pct}"
 text = "{mem_used} / {mem_max}"
 
 [[rows]]
 type = "bar"
-label = " DISK /"
+icon = "disk"
+label = "DISK /"
 value = "{disk_pct}"
 text = "{disk_used} / {disk_size}"
 
 [[rows]]
 type = "keyval"
-key = "󰖩 {iface}"
+icon = "net"
+key = "{iface}"
 value = "{net_down} ↓  {net_up} ↑"
 
 [[rows]]

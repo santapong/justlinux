@@ -12,7 +12,8 @@ interval = 5
 
 [[rows]]
 type = "title"
-text = "󰘸  HIDDEN WINDOWS"
+icon = "archive"
+text = "HIDDEN WINDOWS"
 badge = "{count}"
 
 [[rows]]

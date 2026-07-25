@@ -12,7 +12,8 @@ interval = 10
 
 [[rows]]
 type = "title"
-text = "󰚩  ROBOTICS BENCH"
+icon = "robot"
+text = "ROBOTICS BENCH"
 
 [[rows]]
 type = "hr"

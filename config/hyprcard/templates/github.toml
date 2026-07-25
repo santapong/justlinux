@@ -18,7 +18,8 @@ interval = 3600
 
 [[rows]]
 type = "title"
-text = "  {user}"
+icon = "git"
+text = "{user}"
 badge = "{count} this year"
 
 [[rows]]

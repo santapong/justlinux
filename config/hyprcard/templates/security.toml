@@ -12,7 +12,8 @@ interval = 30
 
 [[rows]]
 type = "title"
-text = "󰕥  SECURITY"
+icon = "shield"
+text = "SECURITY"
 
 [[rows]]
 type = "hr"
