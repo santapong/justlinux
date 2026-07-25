@@ -1,26 +1,31 @@
 [template]
 name = "trading"
-label = "Crypto markets"
+label = "Markets"
 icon = "󰋂"
-description = "Prices, 24h change and sparkline per coin"
+description = "Crypto and stock prices, 24h change and sparkline — up to 7 symbols"
 multi_instance = true
 default_width = 300
 default_pos = "bottom_middle"
 
 [params.coins]
-label = "Coins (CoinGecko ids, comma separated)"
+label = "Crypto (CoinGecko ids, comma separated)"
 type = "string"
 default = "bitcoin,ethereum"
 
+[params.stocks]
+label = "Stocks (tickers, e.g. AAPL,NVDA — max 7 symbols total)"
+type = "string"
+default = ""
+
 [source]
-cmd = "~/.local/bin/widget-trading.sh --fields --coins {coins}"
+cmd = "~/.local/bin/widget-trading.sh --fields --coins {coins} --stocks {stocks}"
 interval = 300
 
 [[rows]]
 type = "title"
 icon = "coins"
 text = "MARKETS"
-badge = "24 h"
+badge = "{cap}"
 
 [[rows]]
 type = "hr"
