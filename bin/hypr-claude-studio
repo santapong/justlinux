@@ -14,6 +14,7 @@ Modes: (default) focus-or-spawn the studio · --sidebar (inside tmux)
 """
 import json
 import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -132,6 +133,7 @@ def sidebar():
         BINDINGS = [
             Binding("enter", "open", "Open tab", show=True),
             Binding("n", "new", "New session here", show=True),
+            Binding("x", "kill_bg", "Stop bg job", show=True),
             Binding("r", "refresh", "Refresh", show=True),
             Binding("q", "quit_studio", "Close studio", show=True),
         ]
@@ -198,12 +200,43 @@ def sidebar():
             kind = data.get("kind")
             if kind == "past":
                 open_session_tab(data)
-            elif kind == "run" and data.get("addr"):
-                subprocess.run(["hyprctl", "dispatch", "focuswindow",
-                                f"address:{data['addr']}"])
+            elif kind == "run":
+                if data.get("addr"):
+                    subprocess.run(["hyprctl", "dispatch", "focuswindow",
+                                    f"address:{data['addr']}"])
+                elif not self.focus_own_pane(data.get("tty")):
+                    self.notify("Can't find that session's window",
+                                severity="warning")
             elif kind == "bg":
-                self.notify("Background job — it has no terminal here",
-                            severity="warning")
+                self.notify("Background session — press x to stop it,"
+                            " or watch it on claude.ai", severity="warning")
+
+        def focus_own_pane(self, tty):
+            """A session opened inside the studio has no Hyprland window
+            of its own (the parent chain dead-ends at the tmux server) —
+            match its tty against our panes and focus that tab instead."""
+            if not tty:
+                return False
+            for line in tmux("list-panes", "-s", "-F",
+                             "#{window_index}|#{pane_tty}",
+                             out=True).splitlines():
+                idx, _, ptty = line.partition("|")
+                if ptty == tty:
+                    tmux("select-window", "-t", idx)
+                    return True
+            return False
+
+        def action_kill_bg(self):
+            data = self._current() or {}
+            if data.get("kind") != "bg" or not data.get("pid"):
+                self.notify("Highlight a 󰑮 background job first")
+                return
+            try:
+                os.kill(int(data["pid"]), signal.SIGTERM)
+            except OSError:
+                pass
+            self.notify("Stopped — its transcript stays resumable")
+            self.set_timer(1.0, self.reload_tree)
 
         def action_new(self):
             data = self._current() or {}

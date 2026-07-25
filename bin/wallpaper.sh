@@ -99,6 +99,10 @@ fi
 if pgrep -xf "python3 $HOME/.local/bin/hypr-appdock" >/dev/null 2>&1; then
     ~/.local/bin/hypr-appdock --ctl reload-theme >/dev/null 2>&1 || live_ok=0
 fi
+pkill -USR2 -xf "python3 $HOME/.local/bin/hypr-claude-office" 2>/dev/null || true
+# viz bakes its palette too, and `start` below deliberately leaves a running
+# one alone — without this it keeps the previous theme's colours forever
+pkill -USR2 -xf "python3 $HOME/.local/bin/hypr-viz" 2>/dev/null || true
 if [ $live_ok = 1 ]; then
     # the pet bakes its palette at spawn — bounce only the pet
     pkill -xf "python3 $HOME/.local/bin/hypr-pet" 2>/dev/null || true

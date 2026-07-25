@@ -22,6 +22,7 @@
         "tray",
         "custom/firewall",
         "custom/clamav",
+        "custom/claude",
         "custom/notification",
         "custom/power"
     ],
@@ -152,5 +153,11 @@
         "interval": 30,
         "on-click": "~/.local/bin/hypr-tools.sh settings security",
         "on-click-right": "~/.local/bin/hypr-tools.sh clamav"
+    },
+    "custom/claude": {
+        "return-type": "json",
+        "exec": "~/.local/bin/widget-claude.sh",
+        "interval": 5,
+        "on-click": "~/.local/bin/hypr-claude-office --show"
     }
 }

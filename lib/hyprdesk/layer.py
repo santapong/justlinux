@@ -49,7 +49,9 @@ class LayerWindow(Gtk.Window):
         visual = self.get_screen().get_rgba_visual()
         if visual:
             self.set_visual(visual)
-        c = conf()
+        self._lname = name              # conf key prefix, for live re-reads
+        self._lfull = fullscreen
+        self._ldefault = (default_pos, default_x, default_y)
         p = gptr(self)
         LLS.gtk_layer_init_for_window(p)
         LLS.gtk_layer_set_layer(p, LAYER.get(layer, 1))
@@ -62,21 +64,54 @@ class LayerWindow(Gtk.Window):
             # ignore exclusive zones (waybar) — cover the WHOLE monitor
             LLS.gtk_layer_set_exclusive_zone(p, -1)
         else:
-            pos = c.get(f"{name}_pos", default_pos)
-            try:                        # hand-edited conf must never crash
-                x = int(c.get(f"{name}_x", default_x))
-            except (TypeError, ValueError):
-                x = int(default_x)
-            try:
-                y = int(c.get(f"{name}_y", default_y))
-            except (TypeError, ValueError):
-                y = int(default_y)
-            for edge in POS_ANCHORS.get(pos, ("bottom",)):
-                LLS.gtk_layer_set_anchor(p, EDGE[edge], True)
-                LLS.gtk_layer_set_margin(
-                    p, EDGE[edge], x if edge in ("left", "right") else y)
+            self._apply_pos(*self._conf_pos(None, None, None))
         if not fullscreen:
             LLS.gtk_layer_set_exclusive_zone(p, 0)
+
+    def _conf_pos(self, pos, x, y):
+        """Fill omitted args from widgets.conf — conf() is uncached, so this
+        picks up edits made since __init__."""
+        c = conf()
+        dpos, dx, dy = self._ldefault
+        if pos is None:
+            pos = c.get(f"{self._lname}_pos", dpos)
+        if x is None:
+            x = c.get(f"{self._lname}_x", dx)
+        if y is None:
+            y = c.get(f"{self._lname}_y", dy)
+        try:                            # hand-edited conf must never crash
+            x = int(x)
+        except (TypeError, ValueError):
+            x = int(dx)
+        try:
+            y = int(y)
+        except (TypeError, ValueError):
+            y = int(dy)
+        # gtk_layer_set_margin takes a C int: an out-of-range value from a
+        # hand-edited conf raises ctypes.ArgumentError, and from a SIGUSR1
+        # handler that would turn the next reload into a kill
+        x = max(-32000, min(32000, x))
+        y = max(-32000, min(32000, y))
+        return pos, x, y
+
+    def _apply_pos(self, pos, x, y):
+        p = gptr(self)
+        for edge in POS_ANCHORS.get(pos, ("bottom",)):
+            LLS.gtk_layer_set_anchor(p, EDGE[edge], True)
+            LLS.gtk_layer_set_margin(
+                p, EDGE[edge], x if edge in ("left", "right") else y)
+
+    def reposition(self, pos=None, x=None, y=None):
+        """Move an already-mapped surface; omitted args re-read from conf."""
+        if self._lfull:
+            return
+        p = gptr(self)
+        # margins outlive the anchor that set them, so an edge we stop
+        # anchoring would still offset the surface — wipe all four first
+        for edge in EDGE.values():
+            LLS.gtk_layer_set_anchor(p, edge, False)
+            LLS.gtk_layer_set_margin(p, edge, 0)
+        self._apply_pos(*self._conf_pos(pos, x, y))
 
     def set_target_monitor(self, gdk_monitor):
         """Pin the surface to a specific monitor (before show_all)."""

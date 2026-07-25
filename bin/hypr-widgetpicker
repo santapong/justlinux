@@ -36,7 +36,7 @@ import json
 # id prefixes that can never be instance ids (they'd collide with other
 # widgets.conf key families)
 RESERVED = {"apps", "pet", "dock", "dockedge", "cards", "theme", "grid",
-            "claude_pet", "inst", "arrange"}
+            "claude_pet", "inst", "arrange", "office", "viz"}
 
 PREVIEW_SCALE = 0.55
 BUILTIN_SAMPLE = {

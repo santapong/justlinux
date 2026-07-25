@@ -1,11 +1,12 @@
 #!/bin/sh
 # Manage the desktop widgets: conky (clock / stats / calendar / claude)
 # and the hypr-pet wandering cat. Honors ~/.config/conky/widgets.conf.
-#   desktop-widgets.sh [start|stop|restart]
+#   desktop-widgets.sh [start|stop|restart|restart-conky|restart-office|restart-viz]
 WIDGET_DIR="$HOME/.config/conky/widgets"
 CONF="$HOME/.config/conky/widgets.conf"
 PET="$HOME/.local/bin/hypr-pet"
 OFFICE="$HOME/.local/bin/hypr-claude-office"
+VIZ="$HOME/.local/bin/hypr-viz"
 DOCK="$HOME/.local/bin/hypr-appdock"
 SERWATCH="$HOME/.local/bin/serial-watch"
 CARDHOST="$HOME/.local/bin/hypr-cardhost"
@@ -16,15 +17,21 @@ setting() {   # setting <key> <default>
 }
 
 # serialize all verbs: concurrent restarts (login + wallpaper + settings)
-# could otherwise spawn two card hosts / two dock managers
+# could otherwise spawn two card hosts / two dock managers.
+# never re-invoke "$0" from a verb — flock without -n blocks, so the child
+# would wait on its parent forever. stop/start are functions, called inline.
+# every daemon below is spawned with 9>&-: an inherited fd keeps the lock
+# held for the daemon's whole life and bricks every later invocation.
 exec 9>"${XDG_RUNTIME_DIR:-/tmp}/desktop-widgets.lock"
 flock 9 2>/dev/null || true
 
-case "${1:-start}" in
-stop)
+viz_up() { pgrep -xf "python3 $VIZ" >/dev/null 2>&1; }
+
+do_stop() {
     pkill -f "conky -c $WIDGET_DIR" 2>/dev/null
     pkill -xf "python3 $PET" 2>/dev/null
     pkill -xf "python3 $OFFICE" 2>/dev/null
+    pkill -xf "python3 $VIZ" 2>/dev/null
     pkill -xf "python3 $DOCK" 2>/dev/null
     pkill -xf "python3 $SERWATCH" 2>/dev/null
     pkill -xf "python3 $CARDHOST" 2>/dev/null
@@ -35,24 +42,15 @@ stop)
         pgrep -f "conky -c $WIDGET_DIR" >/dev/null 2>&1 ||
             pgrep -xf "python3 $PET" >/dev/null 2>&1 ||
             pgrep -xf "python3 $DOCK" >/dev/null 2>&1 ||
-            pgrep -xf "python3 $CARDHOST" >/dev/null 2>&1 || break
+            pgrep -xf "python3 $CARDHOST" >/dev/null 2>&1 ||
+            pgrep -xf "python3 $OFFICE" >/dev/null 2>&1 ||
+            pgrep -xf "python3 $SERWATCH" >/dev/null 2>&1 ||
+            pgrep -xf "python3 $VIZ" >/dev/null 2>&1 || break
         sleep 0.1
     done
-    ;;
-restart)
-    "$0" stop; "$0" start
-    ;;
-restart-conky)
-    # bounce ONLY the conky twins (arrange saved a conky move) — the
-    # cardhost, dock and pet keep running untouched
-    pkill -f "conky -c $WIDGET_DIR" 2>/dev/null
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
-        pgrep -f "conky -c $WIDGET_DIR" >/dev/null 2>&1 || break
-        sleep 0.1
-    done
-    "$0" start
-    ;;
-start)
+}
+
+do_start() {   # $want_viz=1 forces viz back up even when the conf says off
     for cfg in "$WIDGET_DIR"/*.conf; do
         [ -e "$cfg" ] || continue          # empty/absent dir: glob is literal
         name=$(basename "$cfg" .conf)
@@ -63,31 +61,85 @@ start)
         grep -qs "^inst_$name=" "$CONF" && continue
         [ -e "$HOME/.config/hyprcard/templates/$name.toml" ] && continue
         pgrep -f "conky -c $cfg" >/dev/null ||
-            conky -c "$cfg" >/dev/null 2>&1 &
+            conky -c "$cfg" >/dev/null 2>&1 9>&- &
     done
     if grep -qs "^inst_" "$CONF"; then
         pgrep -xf "python3 $CARDHOST" >/dev/null ||
-            "$CARDHOST" >/dev/null 2>&1 &
+            "$CARDHOST" >/dev/null 2>&1 9>&- &
     fi
     # dock manager runs if the global apps toggle is on OR any monitor has
     # its own dock enabled (dock_<MON>=on) even with apps=off
     if [ "$(setting apps on)" = "on" ] ||
        grep -qsE '^dock_[A-Za-z0-9_]+=on' "$CONF"; then
         pgrep -xf "python3 $DOCK" >/dev/null ||
-            "$DOCK" >/dev/null 2>&1 &
+            "$DOCK" >/dev/null 2>&1 9>&- &
     fi
     pgrep -xf "python3 $SERWATCH" >/dev/null ||
-        "$SERWATCH" >/dev/null 2>&1 &
+        "$SERWATCH" >/dev/null 2>&1 9>&- &
     if [ "$(setting pet on)" = "on" ]; then
         if ! pgrep -xf "python3 $PET" >/dev/null; then
             layer=$(setting pet_layer bottom)
             [ "$layer" = "bottom" ] && layer=""
-            HYPRPET_LAYER="$layer" "$PET" >/dev/null 2>&1 &
+            HYPRPET_LAYER="$layer" "$PET" >/dev/null 2>&1 9>&- &
         fi
     fi
     if [ "$(setting claude_office on)" = "on" ]; then
         pgrep -xf "python3 $OFFICE" >/dev/null ||
-            "$OFFICE" >/dev/null 2>&1 &
+            "$OFFICE" >/dev/null 2>&1 9>&- &
     fi
+    # viz never autostarts at login: only the conf toggle or a bounce that
+    # found it already running (ALT+SHIFT+Y leaves no trace in the conf)
+    if [ "$(setting viz off)" = "on" ] || [ "$want_viz" = 1 ]; then
+        pgrep -xf "python3 $VIZ" >/dev/null ||
+            "$VIZ" >/dev/null 2>&1 9>&- &
+    fi
+}
+
+case "${1:-start}" in
+stop)
+    do_stop
+    ;;
+restart)
+    # a hotkey-started viz is invisible to the conf, so remember what was
+    # actually up: otherwise every theme / wallpaper / settings bounce
+    # kills the visualizer for good
+    viz_up && want_viz=1
+    do_stop
+    do_start
+    ;;
+restart-conky)
+    # bounce ONLY the conky twins (arrange saved a conky move) — the
+    # cardhost, dock and pet keep running untouched
+    pkill -f "conky -c $WIDGET_DIR" 2>/dev/null
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        pgrep -f "conky -c $WIDGET_DIR" >/dev/null 2>&1 || break
+        sleep 0.1
+    done
+    do_start
+    ;;
+restart-office)
+    # bounce ONLY the claude-office widget — conky/cardhost/dock/pet keep
+    # running untouched
+    pkill -xf "python3 $OFFICE" 2>/dev/null
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        pgrep -xf "python3 $OFFICE" >/dev/null 2>&1 || break
+        sleep 0.1
+    done
+    do_start
+    ;;
+restart-viz)
+    # bounce ONLY hypr-viz — conky/cardhost/dock/pet keep running untouched.
+    # NO want_viz capture here: this is the verb Hypr Settings calls right
+    # AFTER writing viz=off, so remembering "it was up" would restart it and
+    # make the OFF switch a no-op. The conf is authoritative for this verb.
+    pkill -xf "python3 $VIZ" 2>/dev/null
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        pgrep -xf "python3 $VIZ" >/dev/null 2>&1 || break
+        sleep 0.1
+    done
+    do_start
+    ;;
+start)
+    do_start
     ;;
 esac

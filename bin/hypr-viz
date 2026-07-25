@@ -24,7 +24,8 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, GLib
 
 sys.path.insert(0, str(Path.home() / ".local/lib"))
-from hyprdesk import colors
+from hyprdesk import colors, conf_get
+from hyprdesk.confwrite import conf_set
 from hyprdesk.layer import LayerWindow
 
 RATE = 44100
@@ -32,6 +33,23 @@ CHUNK = 1024                 # samples per frame (~23ms → ~25fps cadence)
 BANDS = 12
 W, H = 300, 64
 DECAY = 0.72                 # fall speed of the bars (per frame)
+
+# SIGUSR1/2 have no default handler but TERMINATE, and pkill matches our
+# cmdline from the moment we exec — a fleet reload/theme signal landing
+# before main() installs the GLib handlers would kill viz outright
+# (hypr-claude-office lesson). GLib.unix_signal_add replaces this.
+signal.signal(signal.SIGUSR1, signal.SIG_IGN)
+signal.signal(signal.SIGUSR2, signal.SIG_IGN)
+
+
+def _persist(state):
+    """Record on/off in widgets.conf so the Settings switch and the
+    hotkey agree, and so a relogin only resumes viz the user left on."""
+    try:
+        conf_set({"viz": state})
+    except OSError:
+        pass
+
 
 # ---------- toggle: kill a running instance instead of starting twice ----
 ME = os.path.realpath(__file__)
@@ -43,10 +61,18 @@ try:
     others = [p for p in out if p and int(p) != os.getpid()]
     if others:
         for p in others:
-            os.kill(int(p), signal.SIGTERM)
+            try:                     # a pid that died on its own must not
+                os.kill(int(p), signal.SIGTERM)   # skip the off-path below
+            except (ProcessLookupError, PermissionError):
+                continue
+        _persist("off")
         sys.exit(0)
 except (ValueError, ProcessLookupError, PermissionError):
     pass
+# NOTE: starting does NOT write viz=on. ALT+SHIFT+Y is a hotkey toy and must
+# never turn itself into a login autostart — only the Settings switch (which
+# writes the conf itself) decides that. Stopping DOES persist off, so the
+# switch can always turn a hotkey-started visualizer off.
 
 
 def hex_rgb(h):
@@ -59,19 +85,36 @@ class Viz(LayerWindow):
         super().__init__("viz", default_pos="bottom_right",
                          default_x=24, default_y=76,   # clear the pet strip
                          layer="bottom", namespace="hypr-viz")
+        mon = conf_get("viz_mon", "")
+        if mon:
+            try:
+                from hyprdesk.monitors import gdk_monitor_map
+                from gi.repository import Gdk
+                for gdk_mon, name, _san in gdk_monitor_map(
+                        Gdk.Display.get_default()):
+                    if name == mon:
+                        self.set_target_monitor(gdk_mon)
+                        break
+            except Exception:
+                pass          # connector absent / API changed → compositor default
         self.set_size_request(W, H)
         self.set_app_paintable(True)
         self.levels = [0.0] * BANDS
-        pal = colors()
-        self.bg = hex_rgb(pal["bg"])
-        self.c_lo = hex_rgb(pal["accent"])
-        self.c_hi = hex_rgb(pal["accent2"])
+        self.reload_theme()
         area = Gtk.DrawingArea()       # childless app-paintable never draws
         area.connect("draw", self.on_draw)
         self.add(area)
         # display-only: never eat clicks (widget-card rule)
         self.connect("map-event", self._clear_input)
         self.show_all()
+
+    def reload_theme(self):
+        """(re)bind the palette — SIGUSR2 calls this without a restart,
+        same as the office (colors() is uncached, always current)."""
+        pal = colors()
+        self.bg = hex_rgb(pal["bg"])
+        self.c_lo = hex_rgb(pal["accent"])
+        self.c_hi = hex_rgb(pal["accent2"])
 
     def _clear_input(self, *_):
         win = self.get_window()
@@ -148,6 +191,31 @@ def main():
     GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGTERM, sig_quit)
     GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGINT, sig_quit)
     viz = Viz()
+    # SIGUSR1 = live reposition (re-read conf); default disposition is
+    # TERMINATE, so a handler is mandatory or the process dies on signal.
+    # The pw-record capture thread is untouched — no restart, no dropout.
+    def sig_move(*_):
+        # swallow everything: GLib restores SIG_DFL when the last source for
+        # a signum dies, so one exception here turns the next reload into a kill
+        try:
+            viz.reposition()
+            # a layer-shell margin change only lands on the next surface
+            # COMMIT, and this widget redraws on audio — in silence the move
+            # took ~10s to appear. Force the commit now.
+            viz.queue_draw()
+        except Exception:
+            pass
+        return True
+    GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGUSR1, sig_move)
+
+    def sig_theme(*_):
+        try:
+            viz.reload_theme()
+            viz.queue_draw()
+        except Exception:
+            pass
+        return True
+    GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGUSR2, sig_theme)
     threading.Thread(target=audio_loop, args=(viz,), daemon=True).start()
     Gtk.main()
 

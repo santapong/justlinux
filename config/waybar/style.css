@@ -80,6 +80,17 @@ window#waybar.hidden {
     border-radius: 6px;
 }
 
+#custom-claude {
+    color: @accent;
+    padding: 0 10px;
+    font-size: 15px;
+    font-weight: bold;
+}
+#custom-claude:hover {
+    background: alpha(@accent, 0.25);
+    border-radius: 6px;
+}
+
 #custom-notification {
     color: @accent;
     padding: 0 10px;

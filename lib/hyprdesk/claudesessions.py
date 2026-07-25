@@ -15,10 +15,27 @@ import time
 from pathlib import Path
 
 CLAUDE_PROJECTS = Path.home() / ".claude/projects"
+CLAUDE_JOBS = Path.home() / ".claude/jobs"
+CLAUDE_ROSTER = Path.home() / ".claude/daemon/roster.json"
+
+_SESSION_META_CACHE = {}       # (path, st_mtime) -> (cwd, preview)
+_SESSION_META_CAP = 200        # bounded: transcripts are append-only so a
+                                # cached parse of an unchanged file never
+                                # goes stale — this just caps memory
 
 
 def session_meta(path, max_lines=40):
-    """(cwd, preview) pulled from a transcript's first lines."""
+    """(cwd, preview) pulled from a transcript's first lines. Cached on
+    (path, mtime) — U13 (Claude Studio sidebar) calls this per-frame."""
+    try:
+        mtime = os.stat(path).st_mtime
+    except OSError:
+        return "", ""
+    key = (str(path), mtime, max_lines)
+    hit = _SESSION_META_CACHE.get(key)
+    if hit is not None:
+        return hit
+
     cwd, preview = "", ""
     try:
         with open(path, errors="replace") as f:
@@ -41,11 +58,156 @@ def session_meta(path, max_lines=40):
                         preview = m[:48]
     except OSError:
         pass
+
+    if len(_SESSION_META_CACHE) >= _SESSION_META_CAP:
+        _SESSION_META_CACHE.pop(next(iter(_SESSION_META_CACHE)))
+    _SESSION_META_CACHE[key] = (cwd, preview)
     return cwd, preview
 
 
+_TITLE_CACHE = {}              # (path, st_mtime) -> str
+
+
+def session_title(path, tail_bytes=65536):
+    """Claude's own name for a conversation — the newest `aiTitle` in the
+    transcript ("Debug Claude Science launch issue"). Titles are rewritten
+    as a session evolves, so the LAST one wins; the tail is scanned first
+    because that is where a fresh one lands. "" when absent."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return ""
+    key = (str(path), st.st_mtime)
+    hit = _TITLE_CACHE.get(key)
+    if hit is not None:
+        return hit
+
+    title = ""
+    try:
+        with open(path, "rb") as f:
+            if st.st_size > tail_bytes:
+                f.seek(-tail_bytes, os.SEEK_END)
+                f.readline()          # drop the partial first line
+            chunk = f.read().decode(errors="replace").splitlines()
+        for line in reversed(chunk):          # newest first
+            if '"aiTitle"' not in line:
+                continue
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(d, dict) and isinstance(d.get("aiTitle"), str):
+                title = d["aiTitle"].strip()
+                break
+        if not title and st.st_size > tail_bytes:
+            # long session whose only title was written near the start
+            with open(path, errors="replace") as f:
+                for i, line in enumerate(f):
+                    if i > 400:
+                        break
+                    if '"aiTitle"' not in line:
+                        continue
+                    try:
+                        d = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(d, dict) and isinstance(d.get("aiTitle"),
+                                                          str):
+                        title = d["aiTitle"].strip()
+    except OSError:
+        return ""
+
+    if len(_TITLE_CACHE) >= _SESSION_META_CAP:
+        _TITLE_CACHE.pop(next(iter(_TITLE_CACHE)))
+    _TITLE_CACHE[key] = title
+    return title
+
+
+_JOB_STATE_CACHE = {}          # (path, st_mtime) -> dict
+
+
+def job_state(sid):
+    """state/detail/tempo/inFlight/name for a job, read from
+    ~/.claude/jobs/<sid[:8]>/state.json. Undocumented internal — shape
+    has already drifted across cliVersions on this box (inFlight/name/
+    tokens are missing on older jobs), so every field access is
+    best-effort and any parse failure just degrades to {}."""
+    path = CLAUDE_JOBS / str(sid)[:8] / "state.json"
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return {}
+    key = (str(path), mtime)
+    hit = _JOB_STATE_CACHE.get(key)
+    if hit is not None:
+        return hit
+
+    try:
+        d = json.loads(path.read_text())
+        if not isinstance(d, dict):
+            return {}
+        out = {
+            "state": d.get("state", ""),
+            "detail": d.get("detail", ""),
+            "tempo": d.get("tempo", ""),
+            "inFlight": d.get("inFlight") or {},
+            "name": d.get("name", ""),
+            "mtime": mtime,
+        }
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return {}
+
+    if len(_JOB_STATE_CACHE) >= _SESSION_META_CAP:
+        _JOB_STATE_CACHE.pop(next(iter(_JOB_STATE_CACHE)))
+    _JOB_STATE_CACHE[key] = out
+    return out
+
+
+def daemon_roster():
+    """[(pid, sid, cwd, transcript, name)] for daemon-hosted workers,
+    read from ~/.claude/daemon/roster.json (mode 0600 — unreadable is
+    a normal outcome, not an error). Undocumented internal: degrade to
+    [] on any shape surprise."""
+    out = []
+    try:
+        d = json.loads(CLAUDE_ROSTER.read_text())
+        if not isinstance(d, dict):
+            return []
+        for short, w in (d.get("workers") or {}).items():
+            if not isinstance(w, dict):
+                continue
+            dispatch = w.get("dispatch") or {}
+            launch = dispatch.get("launch") or {}
+            seed = dispatch.get("seed") or {}
+            out.append((
+                w.get("pid"),
+                w.get("sessionId", short),
+                w.get("cwd", ""),
+                launch.get("transcriptPath", ""),
+                seed.get("name", ""),
+            ))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return []
+    return out
+
+
+CLAUDE_INFRA = ("daemon", "bg-pty-host")
+
+
+def _argv(pid):
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            return f.read().decode(errors="replace").split("\0")
+    except OSError:
+        return []
+
+
 def claude_procs():
-    """[(pid, cwd, interactive)] for live claude CLI processes."""
+    """[(pid, cwd, interactive, tty)] for live claude CLI sessions.
+    Claude Code's own plumbing — the supervisor (`claude daemon run`)
+    and its bg-pty-host / --bg-spare workers — is skipped: the daemon
+    is always alive, so listing it painted a phantom everlasting
+    background job in every picker."""
     out = []
     try:
         pids = subprocess.run(["pgrep", "-x", "claude"], capture_output=True,
@@ -53,10 +215,38 @@ def claude_procs():
     except Exception:
         pids = []
     for p in pids:
+        argv = _argv(p)
+        if any(a in CLAUDE_INFRA for a in argv[1:3]) or "--bg-spare" in argv:
+            continue
         try:
             cwd = os.readlink(f"/proc/{p}/cwd")
             tty = os.readlink(f"/proc/{p}/fd/0")
-            out.append((int(p), cwd, tty.startswith("/dev/pts")))
+            out.append((int(p), cwd, tty.startswith("/dev/pts"), tty))
+        except OSError:
+            continue
+    return out
+
+
+def daemon_hosted():
+    """[(pid, sid, cwd)] sessions the Claude Code daemon keeps alive in
+    bg-pty-host workers. They survive their terminal being closed —
+    close a studio tab or a kitty window and the session lives on until
+    finished or killed, which reads as a task running non-stop."""
+    out = []
+    try:
+        pids = subprocess.run(["pgrep", "-f", "bg-pty-host"],
+                              capture_output=True, text=True).stdout.split()
+    except Exception:
+        pids = []
+    for p in pids:
+        argv = _argv(p)
+        if "--session-id" not in argv:
+            continue                    # pre-warmed spare, not a session
+        i = argv.index("--session-id")
+        if i + 1 >= len(argv):
+            continue
+        try:
+            out.append((int(p), argv[i + 1], os.readlink(f"/proc/{p}/cwd")))
         except OSError:
             continue
     return out
@@ -177,15 +367,20 @@ def session_rows(clients=None):
         return (p or "?").replace(home, "~") or "~"
 
     rows = []
-    for pid, cwd, interactive in claude_procs():
+    for pid, cwd, interactive, tty in claude_procs():
         if interactive:
             rows.append({"label": nice(cwd), "icon": "󰚩", "kind": "run",
                          "addr": window_of_pid(pid, clients), "cwd": cwd,
+                         "pid": pid, "tty": tty,
                          "detail": "🟢 running — Enter focuses its terminal"})
         else:
             rows.append({"label": nice(cwd), "icon": "󰚩", "kind": "bg",
-                         "cwd": cwd,
+                         "cwd": cwd, "pid": pid,
                          "detail": "󰑮 background job — view on claude.ai"})
+    for pid, sid, cwd in daemon_hosted():
+        rows.append({"label": nice(cwd), "icon": "󰚩", "kind": "bg",
+                     "cwd": cwd, "pid": pid, "sid": sid,
+                     "detail": "󰑮 daemon-hosted — outlives its terminal"})
     for mtime, f in recent_transcripts():
         cwd, preview = session_meta(f)
         if not preview:

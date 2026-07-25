@@ -4,10 +4,20 @@
 One desk per live Claude Code session (interactive terminals AND
 background jobs). The worker is a mini Clawd (the fleet's orange
 starburst mascot):
-  · TYPING  — its session is burning CPU right now (spikes wiggle,
+  · TYPING  — its transcript is growing right now (spikes wiggle,
               laptop screen flickers)
-  · WAITING — session alive but idle: thought-dots cycle overhead
+  · WAITING — output paused mid-turn: thought-dots cycle overhead
+  · ATTENTION — the transcript ends on Claude, and nothing since: the
+              ball is in YOUR court ("!" bubble)
+  · IDLE    — alive, nothing waiting on you: calm, no "!" bubble
   · ASLEEP  — idle for 2+ minutes (zzz)
+State comes from Claude's own job state (~/.claude/jobs/<sid>/state.json)
+while that file is FRESH; otherwise the transcript tail decides, with the
+cpu delta as a weak floor (this box idles at 15-43 ticks a poll).
+Click a desk to jump to its terminal — its window, or the studio tab
+hosting it. Only a session with no process left is resumed (as a studio
+tab when the studio is open); resuming a LIVE one would double it.
+Hover a desk for what Claude last said it is doing.
 The scene lives on the bottom layer like the widget cards — visible on
 the desktop, behind windows — and hides itself when no Claude runs.
 
@@ -20,6 +30,8 @@ import os
 import signal
 import subprocess
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
 
 import cairo
@@ -30,36 +42,102 @@ from gi.repository import Gtk, GLib
 sys.path.insert(0, str(Path.home() / ".local/lib"))
 from hyprdesk import colors, conf_get, rgb
 from hyprdesk.layer import LayerWindow
-from hyprdesk.claudesessions import (active_subagents, claude_procs,
-                                     proc_cpu_ticks, recent_transcripts,
-                                     session_meta, window_of_pid)
+from hyprdesk.claudesessions import (CLAUDE_PROJECTS, _argv, _sid_key,
+                                     session_title,
+                                     active_subagents, claude_procs,
+                                     daemon_roster, job_state, proc_cpu_ticks,
+                                     recent_transcripts, session_meta,
+                                     window_of_pid)
 
 SCALE = 3
 FPS_MS = 160
 POLL_S = 2
-CELL_W = 26 * SCALE          # one desk + margin, art cells
+CELL_W = 42 * SCALE          # one desk + margin. Wide enough for a real
+                             # session NAME — the art only needs 26*SCALE,
+                             # but "~" under every desk told you nothing.
 CELL_H = 30 * SCALE
+ROW_H = CELL_H + 44          # desk + 2 name lines + status line: row pitch
 PAD = 14
-BUSY_TICKS = 3               # cpu ticks per poll ⇒ "typing"
+TIP_H = 16                   # hover-detail strip, reserved even when empty
+COLS_DEF = 8                 # office_cols: desks per row before wrapping
+MAX_ROWS = 2                 # past this the tail collapses into "+N more"
+# cpu ticks per poll ⇒ "typing". MEASURED on this box over 8 polls of
+# three GENUINELY idle sessions: 15-43 a poll (one had not written its
+# transcript for 42 minutes), and a busy one sits in the same band — so
+# cpu cannot tell work from idling here. The old floor of 3 pinned every
+# desk on "typing" forever and made "needs you" unreachable; this only
+# fires on a session that is truly hot, and the transcript decides the
+# rest.
+BUSY_TICKS = 120
+TYPING_FRESH = 3             # s since the transcript grew ⇒ typing
+READ_FRESH = 8               # ... ⇒ paused mid-turn (thought dots)
+JOB_FRESH = 60               # s: older state.json = history, not state
 SLEEP_AFTER = 120            # s of idle ⇒ zzz
+STUDIO_CLASS = "hyprclaudestudio"
+STUDIO_TMUX = "claude-studio"   # hypr-claude-studio's private tmux server
+CLAUDE_JOBS = Path.home() / ".claude/jobs"
+# Claude's own job state ⇒ desk state. Only some sessions have a
+# state.json, so anything missing/unknown falls back to the heuristic.
+JOB_UI = {"blocked": "attention", "working": "typing",
+          "done": "idle", "stopped": "sleep"}
+# transcript entries written AROUND a turn — they say nothing about whose
+# move it is, so the tail scan looks straight through them
+TX_NOISE = ("mode", "permission-mode", "file-history-snapshot",
+            "file-history-delta", "last-prompt", "ai-title", "attachment",
+            "queue-operation", "agent-name")
+
+# SIGUSR1/2 have no default handler but TERMINATE, and pkill matches our
+# cmdline from the moment we exec — a fleet reload landing before main()
+# installs the GLib handlers (window construction runs a full synchronous
+# poll) killed the office outright. GLib.unix_signal_add replaces this.
+signal.signal(signal.SIGUSR1, signal.SIG_IGN)
+signal.signal(signal.SIGUSR2, signal.SIG_IGN)
 
 # ---------- toggle: kill a running instance ----------
 ME = os.path.realpath(__file__)
 try:
     # -xf (exact full cmdline): a plain -f substring match kills any shell
-    # whose command line merely CONTAINS the path (hyprcard lesson)
-    out = subprocess.run(["pgrep", "-xf", f"python3 {ME}"],
-                         capture_output=True, text=True).stdout.split()
+    # whose command line merely CONTAINS the path (hyprcard lesson).
+    # BOTH spellings are ours — an office the badge started carries the
+    # --show argument, and the bare toggle must still find it.
+    out = []
+    for pat in (f"python3 {ME}", f"python3 {ME} --show"):
+        out += subprocess.run(["pgrep", "-xf", pat],
+                              capture_output=True, text=True).stdout.split()
     others = [p for p in out if p and int(p) != os.getpid()]
     if others:
+        # --show is the waybar badge's entry point: the badge only exists
+        # while the office is alive, so toggling from there could ONLY
+        # ever close it. Bare invocation (ALT+CTRL+O) still toggles.
+        if "--show" in sys.argv[1:]:
+            subprocess.run(["notify-send", "Claude office",
+                            "Already open on "
+                            + str(conf_get("office_mon", "DP-1"))])
+            sys.exit(0)
         for p in others:
-            os.kill(int(p), signal.SIGTERM)
+            try:
+                os.kill(int(p), signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                continue
+        # the badge outlives us otherwise: waybar keeps claiming N sessions
+        # need you for STALE seconds, and its click relaunches what you closed
+        try:
+            (Path.home() / ".cache/hyprdesk/office.json").unlink()
+        except OSError:
+            pass
         subprocess.run(["notify-send", "Claude office", "Closed."])
         sys.exit(0)
 except (ValueError, ProcessLookupError, PermissionError):
     pass
-
-PAL = colors()
+# nobody else is running, so we are starting. Drop the badge's flag from
+# our own cmdline first: the fleet reposition/theme signals are
+# `pkill -USR1 -xf "python3 <me>"` (exact), and an office started as
+# `... --show` would quietly stop answering them.
+if "--show" in sys.argv[1:]:
+    try:
+        os.execv(sys.executable, ["python3", ME])
+    except OSError:
+        pass                     # exec unavailable: start anyway, flag and all
 
 # mini Clawd (9 wide) — faces the laptop; two frames wiggle the spikes
 CLAWD_A = [
@@ -100,13 +178,182 @@ DESK = [
     ".L............L.",
 ]
 
-INK = {
-    "O": rgb("#D97757"), "D2": rgb("#8f4830"), "E": rgb("#1d1d1b"),
-    "D": rgb(PAL["muted"]), "L": rgb(PAL["muted"]),
-    "K": rgb(PAL["sub"]), "M": rgb(PAL["accent"]),
-}
-SCREEN_DARK = rgb("#14161c")
-DIM = tuple(c * 0.45 for c in rgb(PAL["sub"]))
+
+def _load_theme():
+    """Rebind every palette-derived global — SIGUSR2 re-reads the theme
+    without a restart (colors() is uncached, so this always sees the
+    current widgets.conf)."""
+    global PAL, INK, SCREEN_DARK, DIM
+    PAL = colors()
+    INK = {
+        "O": rgb("#D97757"), "D2": rgb("#8f4830"), "E": rgb("#1d1d1b"),
+        "D": rgb(PAL["muted"]), "L": rgb(PAL["muted"]),
+        "K": rgb(PAL["sub"]), "M": rgb(PAL["accent"]),
+    }
+    SCREEN_DARK = rgb("#14161c")
+    DIM = tuple(c * 0.45 for c in rgb(PAL["sub"]))
+
+
+_load_theme()
+
+
+def _boot_epoch():
+    try:
+        with open("/proc/stat") as f:
+            for line in f:
+                if line.startswith("btime"):
+                    return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
+
+
+BOOT = _boot_epoch()
+try:
+    HZ = os.sysconf("SC_CLK_TCK") or 100
+except (ValueError, OSError):
+    HZ = 100
+
+
+def _proc_start(pid):
+    """Wall-clock start of a pid, or None. Pairing a session to its
+    transcript by iteration order handed desks each other's
+    conversations — a plain `claude` writes its first line seconds after
+    it starts, so time is the honest signal."""
+    if not BOOT:
+        return None
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            data = f.read()
+        # comm can contain spaces/parens: everything after the LAST ')'
+        fields = data[data.rindex(")") + 2:].split()
+        return BOOT + int(fields[19]) / HZ
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _is_sid(s):
+    return len(s) >= 32 and all(c in "0123456789abcdef-" for c in s.lower())
+
+
+def _argv_sid(pid):
+    """The session a process was TOLD to run, from its own argv — the one
+    hard fact about which conversation a desk belongs to. A fork resumes
+    into a NEW id, so its argv names nothing we can bind to."""
+    argv = _argv(pid)
+    if "--fork-session" in argv:
+        return ""
+    for i, a in enumerate(argv):
+        if a in ("--resume", "-r", "--session-id"):
+            nxt = argv[i + 1] if i + 1 < len(argv) else ""
+            if _is_sid(nxt):
+                return nxt
+    return ""
+
+
+_TX_START = {}                 # path -> epoch of its first timestamped line
+
+
+def _tx_start(path):
+    """When a transcript's conversation began. The first lines are
+    untimestamped bookkeeping, so scan a few; degrade to None."""
+    key = str(path)
+    if key in _TX_START:
+        return _TX_START[key]
+    out = None
+    try:
+        with open(path, errors="replace") as f:
+            for i, line in enumerate(f):
+                if i > 12:
+                    break
+                try:
+                    ts = json.loads(line).get("timestamp")
+                except (ValueError, AttributeError):
+                    continue
+                if not ts:
+                    continue
+                try:
+                    out = datetime.fromisoformat(
+                        str(ts).replace("Z", "+00:00")).timestamp()
+                except (TypeError, ValueError):
+                    out = None
+                break
+    except OSError:
+        pass
+    if len(_TX_START) > 200:
+        _TX_START.clear()
+    _TX_START[key] = out
+    return out
+
+
+def _tx_for_sid(sid, txs):
+    """Path of a known session id — from the listing we already have,
+    else straight off disk (an old resumed session is not "recent")."""
+    for _mt, f in txs:
+        if f.stem == sid:
+            return str(f)
+    try:
+        for f in CLAUDE_PROJECTS.glob(f"*/{sid}.jsonl"):
+            return str(f)
+    except OSError:
+        pass
+    return ""
+
+
+def _tail_awaiting(path, nbytes=16384):
+    """True when a transcript ends on CLAUDE — a finished answer, or a
+    tool it is asking permission to run — so the next move is yours.
+    Undocumented format: anything unrecognised means no bubble. Only the
+    tail is read; this runs every poll."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - nbytes))
+            chunk = f.read()
+    except OSError:
+        return False
+    for line in reversed(chunk.split(b"\n")):
+        try:
+            d = json.loads(line)
+        except (ValueError, TypeError):
+            continue             # blank tail line, or a clipped first one
+        if not isinstance(d, dict):
+            continue
+        kind = d.get("type")
+        if kind in TX_NOISE:
+            continue
+        if kind == "system":     # turn_duration closes a finished turn
+            return d.get("subtype") == "turn_duration"
+        return kind == "assistant"
+    return False
+
+
+def _job_fresh(sid, js):
+    """Is this state.json still describing NOW? Every one on this box is
+    days old and terminal, and a stale "done" froze a resumed desk on
+    idle forever. claudesessions may hand us the mtime; stat it here when
+    it does not."""
+    mt = js.get("mtime") or 0
+    if not mt:
+        try:
+            mt = (CLAUDE_JOBS / str(sid)[:8] / "state.json").stat().st_mtime
+        except OSError:
+            return False
+    try:
+        return time.time() - float(mt) < JOB_FRESH
+    except (TypeError, ValueError):
+        return False
+
+
+def studio_tmux(*args, out=False):
+    """The studio's tmux, on its own socket. tmux may not be installed
+    at all — that is just "no studio", never an error."""
+    try:
+        r = subprocess.run(["tmux", "-L", STUDIO_TMUX, *args],
+                           capture_output=True, text=True)
+    except OSError:
+        return "" if out else False
+    return r.stdout if out else r.returncode == 0
 
 
 def draw_art(cr, art, x, y, extra=None, scale=SCALE):
@@ -148,6 +395,10 @@ class Office(LayerWindow):
             pass
         self.workers = []            # [{pid,label,state,ticks,idle,addr}]
         self.frame = 0
+        self.needy = 0               # workers waiting on YOU right now
+        self.hover = -1              # desk under the pointer, -1 = none
+        self.studio_addr = ""        # studio window, if one is open
+        self.reload_conf()
         self.set_app_paintable(True)
         area = Gtk.DrawingArea()
         area.connect("draw", self.on_draw)
@@ -156,69 +407,254 @@ class Office(LayerWindow):
         # rest of the surface stays click-through (pet/dock rule) —
         # masks go on BOTH toplevel and covering child (GDK gotcha)
         from gi.repository import Gdk as _Gdk
-        masks = _Gdk.EventMask.BUTTON_PRESS_MASK
+        masks = (_Gdk.EventMask.BUTTON_PRESS_MASK
+                 | _Gdk.EventMask.POINTER_MOTION_MASK
+                 | _Gdk.EventMask.LEAVE_NOTIFY_MASK)
         self.add_events(masks)
         area.add_events(masks)
         self.connect("button-press-event", self.on_click)
+        self.connect("motion-notify-event", self.on_motion)
+        self.connect("leave-notify-event", self.on_leave)
         self.connect("map-event", self._update_input)
-        self._resize(1)
+        self._resize(0)
         GLib.timeout_add(FPS_MS, self._tick)
         GLib.timeout_add_seconds(POLL_S, self._poll)
         self._poll()
+
+    # ----- geometry: ONE source for click, draw and input region -----
+    def reload_conf(self):
+        """office_cols bounds the width — a left-anchored office grows
+        rightward and would otherwise run off the head."""
+        try:
+            self.cols = max(1, int(conf_get("office_cols", COLS_DEF)))
+        except (TypeError, ValueError):
+            self.cols = COLS_DEF
+
+    def _grid(self, n):
+        """(rows, shown) for n workers: wrap at self.cols, and past
+        MAX_ROWS the last visible slot becomes a "+N more" marker."""
+        shown = min(n, self.cols * MAX_ROWS)
+        return max(1, -(-shown // self.cols)), shown
+
+    def cell_rect(self, i):
+        """Top-left of slot i. Everything that needs desk geometry asks
+        here, so the three views of the grid cannot drift apart."""
+        return (PAD + (i % self.cols) * CELL_W,
+                PAD + (i // self.cols) * ROW_H)
+
+    def _cell_at(self, x, y):
+        """Slot under a pointer position, or -1 — inverse of cell_rect."""
+        col = int((x - PAD) // CELL_W)
+        row = int((y - PAD) // ROW_H)
+        _rows, shown = self._grid(len(self.workers))
+        if x < PAD or y < PAD or not 0 <= col < self.cols:
+            return -1
+        i = row * self.cols + col
+        return i if 0 <= i < shown else -1
 
     def _update_input(self, *_):
         win = self.get_window()
         if not win:
             return False
         region = cairo.Region()      # empty office: fully click-through
-        for i in range(len(self.workers)):
-            region.union(cairo.RectangleInt(
-                x=PAD + i * CELL_W, y=PAD,
-                width=CELL_W, height=self.h - PAD))
+        _rows, shown = self._grid(len(self.workers))
+        for i in range(shown):
+            x, y = self.cell_rect(i)
+            region.union(cairo.RectangleInt(x=x, y=y,
+                                            width=CELL_W, height=ROW_H))
         win.input_shape_combine_region(region, 0, 0)
         return False
 
     # ----- interaction -----
+    def on_motion(self, _w, event):
+        # motion only ever reaches us over a desk: the input region above
+        # keeps the rest of the surface click-through, hover included
+        idx = self._cell_at(event.x, event.y)
+        if idx != self.hover:
+            self.hover = idx
+            self.queue_draw()
+        return False
+
+    def on_leave(self, *_):
+        if self.hover != -1:
+            self.hover = -1
+            self.queue_draw()
+        return False
+
     def on_click(self, _w, event):
-        idx = int((event.x - PAD) // CELL_W)
-        if not (0 <= idx < len(self.workers)):
+        idx = self._cell_at(event.x, event.y)
+        if idx < 0:
             return False
+        _rows, shown = self._grid(len(self.workers))
+        spill = len(self.workers) - shown
+        if spill and idx == shown - 1:
+            subprocess.run(["notify-send", "Claude office",
+                            f"{spill + 1} more sessions than desks — "
+                            "ALT+CTRL+U opens the studio"])
+            return True
         wk = self.workers[idx]
         if wk.get("addr"):           # jump to the session's terminal
             subprocess.run(["hyprctl", "dispatch", "focuswindow",
                             f"address:{wk['addr']}"])
+        elif self._focus_pane(wk):   # studio tab: no window of its own
+            pass
+        elif wk.get("live"):
+            # NEVER resume a running session: `claude --resume` on a live
+            # transcript starts a SECOND process on the same conversation.
+            # Every studio-hosted claude lands here if its tab is gone.
+            hint = ("running in a terminal we can't find — "
+                    "ALT+CTRL+U opens the studio" if wk.get("tty") else
+                    "background job — view it on claude.ai / the app")
+            subprocess.run(["notify-send", "Claude office",
+                            f"{wk['label']}: {hint}"])
+        elif wk.get("sid"):          # daemon-hosted or dead: reopen it
+            self._resume(wk)
         else:
             subprocess.run(["notify-send", "Claude office",
                             f"{wk['label']}: background job — "
                             "view it on claude.ai / the desktop app"])
         return True
 
+    def _focus_pane(self, wk):
+        """Focus the studio tab hosting this session. A claude started in
+        the studio has no Hyprland client of its own — the parent chain
+        dead-ends at the tmux server — so its tty is the only way back."""
+        idx = self._studio_pane(wk.get("tty", ""))
+        if not idx:
+            return False
+        studio_tmux("select-window", "-t", idx)
+        if self.studio_addr:
+            subprocess.run(["hyprctl", "dispatch", "focuswindow",
+                            f"address:{self.studio_addr}"])
+        else:
+            # tab selected, but the studio is detached: nothing on screen
+            subprocess.run(["notify-send", "Claude office",
+                            f"{wk['label']}: waiting in the studio — "
+                            "ALT+CTRL+U opens it"])
+        return True
+
+    @staticmethod
+    def _studio_pane(tty):
+        """Studio window index whose pane owns this tty, or ""."""
+        if not tty:
+            return ""
+        for line in studio_tmux("list-panes", "-s", "-F",
+                                "#{window_index}|#{pane_tty}",
+                                out=True).splitlines():
+            idx, _, ptty = line.partition("|")
+            if ptty and ptty == tty:
+                return idx
+        return ""
+
+    def _resume(self, wk):
+        """Reopen a background/daemon conversation. The studio wins when
+        it is on screen — daemon sessions then collect as tabs in one
+        window instead of littering the workspace with terminals."""
+        sid, cwd = wk["sid"], wk.get("cwd") or str(Path.home())
+        # last line of defence: resuming a LIVE conversation puts a second
+        # claude on one transcript. on_click already routes live desks away,
+        # but this is the call that does the damage, so it refuses too.
+        pid = wk.get("pid")
+        if wk.get("live") or (pid and os.path.exists(f"/proc/{pid}")):
+            subprocess.run(["notify-send", "Claude office",
+                            "That session is still running — it has no "
+                            "window here"])
+            return
+        if self.studio_addr and self._studio_tab(sid, cwd, wk.get("tty")):
+            subprocess.run(["hyprctl", "dispatch", "focuswindow",
+                            f"address:{self.studio_addr}"])
+            return
+        try:
+            subprocess.Popen(
+                ["kitty", "--class", "hyprclaude", "-d", cwd,
+                 "-e", "claude", "--resume", sid],
+                start_new_session=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError:
+            subprocess.run(["notify-send", "Claude office",
+                            f"{wk['label']}: could not open a terminal"])
+
+    def _studio_tab(self, sid, cwd, tty=""):
+        """Mirror of hypr-claude-studio open_session_tab: focus the tab
+        already running this session, else start one. The tty is checked
+        FIRST — the start command only names the sid for tabs the studio
+        itself resumed, so scanning it alone spawned duplicates."""
+        idx = self._studio_pane(tty)
+        if idx:
+            return studio_tmux("select-window", "-t", idx)
+        for line in studio_tmux("list-panes", "-s", "-F",
+                                "#{window_index}|#{pane_start_command}",
+                                out=True).splitlines():
+            idx, _, cmd = line.partition("|")
+            if sid in cmd:
+                return studio_tmux("select-window", "-t", idx)
+        name = os.path.basename(cwd.rstrip("/")) or "~"
+        return studio_tmux("new-window", "-t", f"{STUDIO_TMUX}:", "-n", name,
+                           "-c", cwd, f"claude --resume {sid}")
+
     def _resize(self, n):
+        rows, _shown = self._grid(n)
         if n == 0:                       # compact "waiting for work" card
             self.w = PAD * 2 + 78 * SCALE
         else:
-            self.w = PAD * 2 + n * CELL_W
-        self.h = PAD + CELL_H + 18
+            # floor of 3 desks so the title line ("· 2 need you") never
+            # spills past a one-desk card
+            self.w = PAD * 2 + max(3, min(n, self.cols)) * CELL_W
+        self.h = PAD + rows * ROW_H + TIP_H   # TIP_H: hover must not resize
         self.set_size_request(self.w, self.h)
 
     # ----- data -----
-    def _transcript_for(self, cwd, taken):
-        """Newest transcript whose own cwd matches — the best guess for
-        which conversation this process is (no fd to follow: claude
-        appends and closes)."""
-        import time as _t
-        for _mt, f in recent_transcripts(60):
+    def _transcript_for(self, pid, cwd, taken, txs):
+        """Which conversation this process is really on. argv wins when it
+        names the session (`claude --resume <sid>`) — no guessing beats a
+        fact. Otherwise pair unclaimed cwd-matching transcripts by TIME:
+        handing them out newest-first while pids arrive oldest-first bound
+        desks to each other's sessions. Resolved ONCE per pid: re-resolving
+        every worker made two sessions in the same repo trade desks."""
+        sid = _argv_sid(pid)
+        if sid:
+            # argv is fact — if its file has not appeared yet, wait for it
+            # (unbound desks retry every poll) rather than pair it wrong
+            return _tx_for_sid(sid, txs)
+        started = _proc_start(pid)
+        best, best_gap = "", None
+        for mt, f in txs:
             if str(f) in taken:
                 continue
             meta_cwd, _ = session_meta(f, max_lines=15)
-            if meta_cwd == cwd:
+            if meta_cwd != cwd:
+                continue
+            if started is None:      # no clock: newest-first, as before
                 return str(f)
-        return ""
+            if mt < started - 5:
+                continue             # untouched since the process began
+            gap = abs((_tx_start(f) or mt) - started)
+            if best_gap is None or gap < best_gap:
+                best, best_gap = str(f), gap
+        # an unbounded best wins by default, so a brand-new `claude` with no
+        # transcript yet would adopt a SIBLING session's file in the same cwd.
+        # An unbound desk retries every poll — waiting beats adopting.
+        return best if best_gap is not None and best_gap <= 120 else ""
+
+    def _awaiting(self, w, mtime):
+        """_tail_awaiting, re-read only when the transcript actually grew —
+        an idle desk would otherwise re-parse the same tail every poll."""
+        if w.get("_tail_mt") != mtime:
+            w["_tail_mt"] = mtime
+            w["_tail"] = _tail_awaiting(w["tx"])
+        return w["_tail"]
 
     def _poll(self):
-        import time as _t
+        # an exception escaping here would unwind the GLib timeout source and
+        # PERMANENTLY freeze the office (PyGObject destroys the source and
+        # prints a traceback nobody sees). One bad poll must cost one poll.
+        try:
+            return self._poll_once()
+        except Exception:
+            return True
+
+    def _poll_once(self):
         prev = {w["pid"]: w for w in self.workers}
-        taken = set()
         rows = []
         agents = active_subagents()
         try:
@@ -227,47 +663,152 @@ class Office(LayerWindow):
                 text=True, timeout=2).stdout)
         except Exception:
             clients = []
-        self._resolve_n = getattr(self, "_resolve_n", 0) + 1
-        for pid, cwd, interactive in claude_procs():
+        procs = claude_procs()
+        # DEAD workers out first: the roster keeps finished ones listed,
+        # and seeding `taken` from those reserved their transcripts
+        # forever — the very conversation _resume() reopens could then
+        # never bind its own file
+        roster = [r for r in daemon_roster()
+                  if r[0] and os.path.exists(f"/proc/{r[0]}")]
+        # ONE listing per poll — this used to run per worker, so a busy
+        # office did workers×60 file opens inside a single UI callback
+        txs = recent_transcripts(60)
+        # every already-bound transcript is off the table before anyone
+        # resolves, so a pid keeps the conversation it was first given
+        taken = set(t for _p, _s, _c, t, _n in roster if t)
+        for pid, _cwd, _ia, _tty in procs:
+            bound = prev.get(pid, {}).get("tx")
+            if bound:
+                taken.add(bound)
+        for pid, cwd, interactive, tty in procs:
             ticks = proc_cpu_ticks(pid)
             if ticks is None:
                 continue
+            fresh_desk = pid not in prev
             w = prev.get(pid, {"pid": pid, "ticks": ticks, "idle": 0.0})
-            delta = ticks - w["ticks"]
+            # a pid seen by the roster branch last poll carries no "ticks";
+            # KeyError here would unwind the GLib callback and kill the timer
+            delta = ticks - w.get("ticks", ticks)
             w["ticks"] = ticks
-            # transcript freshness: is Claude still streaming output?
-            if not w.get("tx") or self._resolve_n % 15 == 0:
-                w["tx"] = self._transcript_for(cwd, taken)
-            if w.get("tx"):
-                taken.add(w["tx"])
-            tx_fresh = False
+            if not w.get("tx"):
+                w["tx"] = self._transcript_for(pid, cwd, taken, txs)
+                if w["tx"]:
+                    taken.add(w["tx"])
+            # how long since Claude last wrote: the one signal that
+            # separates a working session from a waiting one on this box
+            tx_mt, tx_age = 0, None
             try:
                 if w.get("tx"):
-                    tx_fresh = _t.time() - os.stat(w["tx"]).st_mtime < 8
+                    tx_mt = os.stat(w["tx"]).st_mtime
+                    tx_age = time.time() - tx_mt
             except OSError:
-                w["tx"] = ""
-            if delta >= BUSY_TICKS:
+                w["tx"] = ""         # vanished: rebind on the next poll
+            sid = Path(w["tx"]).stem if w.get("tx") else ""
+            js = job_state(sid) if sid else {}
+            if not isinstance(js, dict):   # signature drift ⇒ no job state
+                js = {}
+            w["sid"] = sid
+            w["cwd"] = cwd
+            w["detail"] = js.get("detail", "")
+            # a days-old state.json is history, not state: trusting one
+            # unconditionally froze a resumed desk on "idle" forever
+            jstate = (JOB_UI.get(js.get("state"))
+                      if sid and _job_fresh(sid, js) else None)
+            if jstate:               # Claude's own answer beats guessing
+                w["state"] = jstate
+                if jstate != "sleep":
+                    w["idle"] = 0.0
+            elif ((tx_age is not None and tx_age < TYPING_FRESH)
+                  or delta >= BUSY_TICKS):
                 w["state"], w["idle"] = "typing", 0.0
-            elif tx_fresh:
+            elif tx_age is not None and tx_age < READ_FRESH:
                 w["state"], w["idle"] = "reading", 0.0
             else:
-                w["idle"] = w.get("idle", 0) + POLL_S
-                w["state"] = ("sleep" if w["idle"] > SLEEP_AFTER
-                              else "attention")   # finished — needs YOU
+                # quiet for READ_FRESH+ seconds. "Needs you" is a POSITIVE
+                # claim now — the transcript has to end on Claude — because
+                # cpu alone marked every interactive desk busy forever.
+                if fresh_desk and tx_age is not None:
+                    w["idle"] = tx_age   # finished before we opened: old news
+                else:
+                    w["idle"] = w.get("idle", 0) + POLL_S
+                # "your move" is a POSITIVE claim and must OUTRANK the idle
+                # timer: a session that finished an hour ago still needs you,
+                # and testing sleep first made attention a 112s window that a
+                # fresh desk could never enter (needy was always 0).
+                if tx_mt and self._awaiting(w, tx_mt):
+                    w["state"] = "attention"   # your move
+                elif w["idle"] > SLEEP_AFTER:
+                    w["state"] = "sleep"
+                else:
+                    w["state"] = "idle"
             # workflow subagents attached to this session's transcript
-            from hyprdesk.claudesessions import _sid_key
-            sid_flat = _sid_key(Path(w["tx"]).stem) if w.get("tx") else ""
-            w["agents"] = agents.get(sid_flat, 0)
+            w["agents"] = agents.get(_sid_key(sid), 0) if sid else 0
             if w["agents"]:          # a swarm at the desk = it's working
                 w["state"], w["idle"] = "typing", 0.0
             w["addr"] = (window_of_pid(pid, clients)
                          if interactive else "")
+            # kept for the click path: a studio-hosted claude has NO window
+            # of its own, and its tty is the only way back to its tab
+            w["tty"] = tty if interactive else ""
+            w["live"] = True         # a running process is NEVER resumable
+            w["daemon"] = False
             home = str(Path.home())
             base = ("~" if cwd.rstrip("/") == home
                     else os.path.basename(cwd.rstrip("/")) or "~")
-            w["label"] = (base[:10] + ("" if interactive else " 󰑮"))
+            # WHAT the session is beats WHERE it runs: every desk in ~ used
+            # to read "~". Claude names its own conversations, so use that.
+            w["label"] = (session_title(w["tx"]) if w.get("tx") else "") or base
+            w["place"] = base
+            rows.append(w)
+        # daemon-hosted workers get their own desks. Their pid is the
+        # bg-pty-host, so a cpu delta means nothing and there is no window
+        # to focus — job state is the whole story.
+        seen = set(w["pid"] for w in rows)
+        for rpid, sid, cwd, tx, name in roster:
+            try:
+                pid = int(rpid)
+            except (TypeError, ValueError):
+                continue
+            if pid in seen:      # dead roster entries were dropped above
+                continue
+            seen.add(pid)
+            w = prev.get(pid, {"pid": pid, "idle": 0.0})
+            w["tx"] = tx or ""
+            js = job_state(sid)
+            if not isinstance(js, dict):
+                js = {}
+            w["sid"] = str(sid or "")
+            w["cwd"] = str(cwd or "")
+            w["detail"] = js.get("detail", "")
+            # no cpu signal and no window here, so job state is trusted at
+            # any age — it is the only thing this desk knows
+            w["state"] = JOB_UI.get(js.get("state"), "idle")
+            w["agents"] = agents.get(_sid_key(str(sid)), 0)
+            w["addr"] = ""
+            w["tty"] = ""
+            # the roster was filtered to LIVE pids above, so these are running
+            # conversations — never resumable, or the click spawns a second
+            # claude on the same transcript
+            w["live"] = True
+            w["daemon"] = True
+            # the job's own name is already human ("hand-follow-robot-
+            # research"); fall back to the transcript title, then the dir
+            w["label"] = (str(name or "").strip()
+                          or (session_title(tx) if tx else "")
+                          or os.path.basename(str(cwd).rstrip("/")) or "~")
+            w["place"] = os.path.basename(str(cwd).rstrip("/")) or "~"
             rows.append(w)
         rows.sort(key=lambda w: w["pid"])
+        # the headline number: how many desks are waiting on YOU
+        self.needy = sum(1 for w in rows
+                         if w.get("state") in ("attention", "blocked"))
+        # only a studio window that is actually on screen is worth
+        # handing a session to — a detached tmux server helps nobody
+        self.studio_addr = ""
+        for c in clients if isinstance(clients, list) else []:
+            if isinstance(c, dict) and c.get("class") == STUDIO_CLASS:
+                self.studio_addr = c.get("address", "")
+                break
         if len(rows) != len(self.workers):
             self._resize(len(rows))
         self.workers = rows
@@ -276,7 +817,38 @@ class Office(LayerWindow):
         if not self.get_visible():
             self.show_all()
         self._update_input()         # desk click targets follow the layout
+        self._write_badge(rows)
         return True
+
+    def _write_badge(self, rows):
+        """Export attention state for waybar. Best-effort only — a badge
+        write must never take down the office render loop, and a half
+        -written file must never be visible (tmp + os.replace)."""
+        try:
+            cache_dir = Path.home() / ".cache/hyprdesk"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            blocked = [w["label"] for w in rows
+                       if w.get("state") in ("attention", "blocked")]
+            total = len(rows)
+            if self.needy:
+                text = f"󰚩 {self.needy}"
+            elif total:
+                text = f"󰚩 {total}"
+            else:
+                text = "󰚩"
+            if blocked:
+                tooltip = "needs you:\n" + "\n".join(blocked)
+            elif total:
+                tooltip = f"{total} Claude session{'s' if total != 1 else ''} running"
+            else:
+                tooltip = "no sessions"
+            payload = {"needy": self.needy, "total": total,
+                       "blocked": blocked, "text": text, "tooltip": tooltip}
+            tmp = cache_dir / "office.json.tmp"
+            tmp.write_text(json.dumps(payload))
+            os.replace(tmp, cache_dir / "office.json")
+        except OSError:
+            pass
 
     # ----- render -----
     def _tick(self):
@@ -302,9 +874,23 @@ class Office(LayerWindow):
         cr.set_source_rgba(*rgb(PAL["bg"]), 0.80)
         cr.fill()
         blink = self.frame % 2 == 0
-        # scene title
-        cr.set_source_rgba(*rgb(PAL["sub"]), 0.9)
-        self._text(cr, PAD, PAD + 6, "󰚩 CLAUDE OFFICE", size=9)
+        # scene title — the answer to "does Claude need me?" goes here,
+        # so a glance at the header beats counting bubbles
+        if self.needy:
+            cr.set_source_rgba(*rgb(PAL["accent2"]), 0.95)
+            self._text(cr, PAD, PAD + 6,
+                       f"󰚩 CLAUDE OFFICE · {self.needy} need you", size=9)
+        elif self.workers:
+            # never just the bare title: "all quiet" is itself information,
+            # and the count tells you the office is actually watching
+            n = len(self.workers)
+            cr.set_source_rgba(*rgb(PAL["sub"]), 0.9)
+            self._text(cr, PAD, PAD + 6,
+                       f"󰚩 CLAUDE OFFICE · {n} running · none need you",
+                       size=9)
+        else:
+            cr.set_source_rgba(*rgb(PAL["sub"]), 0.9)
+            self._text(cr, PAD, PAD + 6, "󰚩 CLAUDE OFFICE", size=9)
         if not self.workers:             # empty office: one sleepy Clawd
             draw_art(cr, CLAWD_SLEEP, PAD + 8 * SCALE,
                      PAD + 14 * SCALE)
@@ -312,15 +898,36 @@ class Office(LayerWindow):
             self._text(cr, PAD + 20 * SCALE, PAD + 16 * SCALE,
                        "no sessions — waiting for work")
             return True
-        y_desk = PAD + 14 * SCALE
-        y_floor = y_desk + 7 * SCALE
-        # floor line across the office
-        cr.set_source_rgba(*rgb(PAL["sub"]), 0.25)
-        cr.rectangle(PAD // 2, y_floor + SCALE, w - PAD, 1)
-        cr.fill()
-        for i, wk in enumerate(self.workers):
-            x0 = PAD + i * CELL_W
-            desk_x = x0 + 4 * SCALE
+        _rows, shown = self._grid(len(self.workers))
+        spill = len(self.workers) - shown   # desks past the grid cap
+        for i in range(shown):
+            x0, ytop = self.cell_rect(i)
+            y_desk = ytop + 14 * SCALE
+            y_floor = y_desk + 7 * SCALE
+            if i % self.cols == 0:       # one floor line per row
+                cr.set_source_rgba(*rgb(PAL["sub"]), 0.25)
+                cr.rectangle(PAD // 2, y_floor + SCALE, w - PAD, 1)
+                cr.fill()
+            if spill and i == shown - 1:
+                # the tail collapses into one marker: the grid is capped
+                # at office_cols × MAX_ROWS, however many sessions run
+                cr.set_source_rgb(*rgb(PAL["sub"]))
+                self._text(cr, x0 + 2 * SCALE, y_desk + 4 * SCALE,
+                           f"+{spill + 1} more", size=11)
+                continue
+            wk = self.workers[i]
+            if wk["state"] == "attention":
+                # the one desk that wants you gets a tinted plate, so it is
+                # findable without reading a single word
+                cr.set_source_rgba(*rgb(PAL["accent2"]), 0.13)
+                self._rrect(cr, x0 + 2, ytop, CELL_W - 4, ROW_H - 2, 6)
+                cr.fill()
+            if i == self.hover:          # which desk the strip describes
+                cr.set_source_rgba(*rgb(PAL["sub"]), 0.10)
+                cr.rectangle(x0, ytop, CELL_W, ROW_H)
+                cr.fill()
+            # art is narrower than the name column — centre it over the text
+            desk_x = x0 + (CELL_W - 20 * SCALE) // 2
             y_clawd = y_desk - 5 * SCALE
             state = wk["state"]
             # desk shadow
@@ -379,25 +986,96 @@ class Office(LayerWindow):
             # workflow swarm: mini workers hover beside the desk
             n_agents = wk.get("agents", 0)
             if n_agents:
+                # keep the swarm ATTACHED to its desk: anchored to the cell
+                # edge it drifted away once the cell grew for names
+                sx = min(desk_x + 21 * SCALE, x0 + CELL_W - 22)
                 for j in range(min(3, n_agents)):
                     hop = 1 if (self.frame + j) % 2 else 0
                     draw_art(cr, CLAWD_A if (self.frame + j) % 2
                              else CLAWD_B,
-                             x0 + CELL_W - 20 - (j % 2) * 6,
-                             PAD + 14 + j * 12 - hop, scale=2)
+                             sx - (j % 2) * 6,
+                             ytop + 14 + j * 12 - hop, scale=2)
                 cr.set_source_rgb(*rgb(PAL["accent"]))
-                self._text(cr, x0 + CELL_W - 22, PAD + 58,
-                           f"×{n_agents}", size=9)
-            # label + state dot
-            dot = {"typing": rgb(PAL["accent"]), "reading": rgb(PAL["sub"]),
-                   "attention": rgb(PAL["accent2"]),
-                   "sleep": rgb(PAL["muted"])}[state]
-            cr.set_source_rgb(*dot)
-            cr.arc(x0 + 2 * SCALE, PAD + CELL_H + 5, 2.5, 0, 2 * math.pi)
+                self._text(cr, sx - 2, ytop + 58, f"×{n_agents}", size=9)
+            # NAME line, then a STATUS line in words. A 2.5px dot made you
+            # decode a colour from memory; "needs you" just says it.
+            # .get everywhere: an unknown state from a future job-state
+            # value must render a plain desk, never crash the draw handler
+            ink = {"typing": PAL["accent"], "reading": PAL["fg"],
+                   "attention": PAL["accent2"], "idle": PAL["sub"],
+                   "sleep": PAL["sub"]}.get(state, PAL["sub"])
+            word = {"typing": "working", "reading": "reading",
+                    "attention": "needs you", "idle": "idle",
+                    "sleep": "asleep"}.get(state, state)
+            if wk.get("daemon"):
+                word += " 󰑮"           # no terminal of its own
+            ty = ytop + CELL_H + 9
+            # the name is the primary ink; attention lifts it to accent2 so
+            # the desk that wants you reads first at a glance
+            cr.set_source_rgb(*rgb(PAL["accent2"] if state == "attention"
+                                   else PAL["fg"]))
+            for li, line in enumerate(
+                    self._wrap(wk["label"], CELL_W - 4 * SCALE, 9)):
+                self._text(cr, x0 + 2 * SCALE, ty + li * 11, line, size=9)
+            cr.set_source_rgb(*rgb(ink))
+            cr.arc(x0 + 2 * SCALE + 3, ty + 22, 3, 0, 2 * math.pi)
             cr.fill()
-            cr.set_source_rgb(*rgb(PAL["sub"]))
-            self._text(cr, x0 + 4 * SCALE, PAD + CELL_H + 8, wk["label"])
+            self._text(cr, x0 + 2 * SCALE + 10, ty + 25,
+                       self._clip(word, CELL_W - 6 * SCALE, 8), size=8)
+        # hover detail, in space _resize always reserves — a strip that
+        # grew the surface would flicker and re-fire crossing events
+        hov = -1 if spill and self.hover == shown - 1 else self.hover
+        if 0 <= hov < len(self.workers):
+            hw = self.workers[hov]
+            # the desk shows a wrapped, clipped name — the strip is where the
+            # FULL title lives, plus whatever Claude says it is doing
+            tip = " · ".join(t for t in (hw.get("label"), hw.get("place"),
+                                         hw.get("detail")) if t)
+            if tip:
+                cr.set_source_rgba(*rgb(PAL["fg"]), 0.85)
+                self._text(cr, PAD, h - 6, self._clip(tip, w - PAD * 2),
+                           size=9)
         return True
+
+    @staticmethod
+    def _wrap(s, px, size, lines=2):
+        """Break a session name over up to `lines` rows on word boundaries.
+        Titles run ~40 chars ("Debug Claude studio background task error")
+        and one row of a desk cell holds ~21 — one line truncated nearly
+        every name to uselessness."""
+        n = max(4, int(px / (size * 0.6)))
+        words, out, cur = str(s).split(), [], ""
+        for word in words:
+            cand = f"{cur} {word}".strip()
+            if len(cand) <= n:
+                cur = cand
+                continue
+            if cur:
+                out.append(cur)
+            if len(out) == lines - 1:       # last row: take what fits
+                rest = " ".join(words[len(" ".join(out).split()):])
+                out.append(rest if len(rest) <= n else rest[:n - 1] + "…")
+                return out
+            cur = word if len(word) <= n else word[:n - 1] + "…"
+        if cur:
+            out.append(cur)
+        return out[:lines] or [""]
+
+    @staticmethod
+    def _rrect(cr, x, y, w, h, r):
+        cr.new_path()
+        cr.arc(x + r, y + r, r, math.pi, 1.5 * math.pi)
+        cr.arc(x + w - r, y + r, r, 1.5 * math.pi, 2 * math.pi)
+        cr.arc(x + w - r, y + h - r, r, 0, 0.5 * math.pi)
+        cr.arc(x + r, y + h - r, r, 0.5 * math.pi, math.pi)
+        cr.close_path()
+
+    @staticmethod
+    def _clip(s, px, size=9):
+        # monospace: ~0.6em a glyph, close enough to keep the strip
+        # inside the card without measuring text
+        n = max(4, int(px / (size * 0.6)))
+        return s if len(s) <= n else s[:n - 1] + "…"
 
     @staticmethod
     def _text(cr, x, y, s, size=10):
@@ -410,10 +1088,40 @@ class Office(LayerWindow):
 
 def main():
     def sig_quit(*_):
+        try:                         # never leave waybar advertising a
+            (Path.home() /           # dead office's attention count
+             ".cache/hyprdesk/office.json").unlink()
+        except OSError:
+            pass
         os._exit(0)
     GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGTERM, sig_quit)
     GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGINT, sig_quit)
-    Office()
+    win = Office()
+
+    # both handlers swallow everything: GLib restores SIG_DFL when the last
+    # source for a signum dies, so ONE exception in here would silently turn
+    # every later `pkill -USR1` reload into a kill
+    def sig_move(*_):
+        # SIGUSR1 has no default handler but TERMINATE — without this the
+        # fleet's reload signal would kill the office outright
+        try:
+            win.reload_conf()        # office_cols may have changed too
+            win._resize(len(win.workers))
+            win.reposition()         # no args ⇒ re-read pos/x/y from conf
+            win._update_input()      # click targets follow the surface
+        except Exception:
+            pass
+        return True
+
+    def sig_theme(*_):
+        try:
+            _load_theme()
+            win.queue_draw()
+        except Exception:
+            pass
+        return True
+    GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGUSR1, sig_move)
+    GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGUSR2, sig_theme)
     mon = conf_get("office_mon", "DP-1")
     subprocess.run(["notify-send", "Claude office",
                     f"Open — bottom-left of {mon}. ALT+CTRL+O closes."])

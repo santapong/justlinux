@@ -74,6 +74,26 @@ def widget_of_pid(pid):
     return None
 
 
+# the 'widget' kind reloads by SIGNAL: both re-read widgets.conf in place,
+# so a restart would needlessly drop viz's audio capture and the office's
+# worker scan. -xf (exact, full cmdline) is mandatory — a loose pattern has
+# twice matched and killed the invoking shell in this fleet.
+WIDGET_PROC = {"office": "hypr-claude-office", "viz": "hypr-viz"}
+
+
+def signal_widget(name):
+    """SIGUSR1 a 'widget' kind so it repositions without restarting."""
+    proc = WIDGET_PROC.get(name)
+    if not proc:
+        return
+    try:
+        subprocess.run(["pkill", "-USR1", "-xf",
+                        f"python3 {Path.home()}/.local/bin/{proc}"],
+                       capture_output=True, timeout=3)
+    except Exception:
+        pass
+
+
 def base_font_size(name):
     try:
         t = (Path.home() / f".config/conky/widgets/{name}.conf").read_text()
@@ -100,7 +120,8 @@ def surfaces_all(geo):
     """Every arrangeable layer surface, monitor-local, across ALL heads.
 
     kind: 'card' (hypr-cardhost, grid-snapped, cross-monitor) ·
-          'conky' / 'apps' / 'dock' (legacy pixel snap, own monitor)."""
+          'conky' / 'apps' / 'dock' (legacy pixel snap, own monitor) ·
+          'widget' (office / viz — pixel snap, own monitor, no resize)."""
     items = []
     try:
         out = subprocess.run(["hyprctl", "-j", "layers"],
@@ -130,6 +151,10 @@ def surfaces_all(geo):
                     kind = "dock"
                 elif ns == "conky_namespace":
                     name, kind = widget_of_pid(layer.get("pid", 0)), "conky"
+                elif ns == "hypr-office":
+                    name, kind = "office", "widget"
+                elif ns == "hypr-viz":
+                    name, kind = "viz", "widget"
                 else:
                     continue
                 if not name:
@@ -260,8 +285,12 @@ class Session:
         for it in reversed(self.items_on(overlay.mon)):
             if it["x"] <= ev.x <= it["x"] + it["w"] and \
                it["y"] <= ev.y <= it["y"] + it["h"]:
-                corner = (ev.x > it["x"] + it["w"] - HANDLE and
-                          ev.y > it["y"] + it["h"] - HANDLE)
+                # 'widget' has no meaningful scale (viz is a hardcoded
+                # 300x64, the office width is session-derived), so a
+                # corner grab moves it like anywhere else on the box
+                corner = (it["kind"] != "widget"
+                          and ev.x > it["x"] + it["w"] - HANDLE
+                          and ev.y > it["y"] + it["h"] - HANDLE)
                 self.grab = [it, "resize" if corner else "move",
                              ev.x - it["x"], ev.y - it["y"]]
                 it["grab_x"], it["grab_y"] = it["x"], it["y"]
@@ -363,6 +392,7 @@ class Session:
             self.release()     # collision refusal can't be bypassed
         changes = {}
         conky_dirty = dock_dirty = card_dirty = False
+        widget_dirty = set()   # office/viz reload individually, by signal
         for it in (i for i in self.items if i["name"] in self.dirty):
             name, kind = it["name"], it["kind"]
             mw, mh = self.mon_size(it["mon"])
@@ -408,6 +438,11 @@ class Session:
                     cur = int(self.c.get(f"{name}_size", 44) or 44)
                     changes[f"{name}_size"] = \
                         max(24, min(96, int(cur * it["scale"])))
+            elif kind == "widget":
+                # NOT conky_dirty: that would restart every conky twin for
+                # an office nudge, and the font-scale write below reads
+                # ~/.config/conky/widgets/<name>.conf — no such file here
+                widget_dirty.add(name)
             else:
                 conky_dirty = True
                 if "scale" in it:
@@ -427,6 +462,8 @@ class Session:
                     [str(Path.home() /     # nudge is needless churn
                           ".local/bin/desktop-widgets.sh"),
                      "restart-conky"], start_new_session=True)
+            for w in widget_dirty:
+                signal_widget(w)
             notify("Saved — 'hypr-arrange --undo' reverts")
         Gtk.main_quit()
 
@@ -562,14 +599,18 @@ class Overlay(LayerWindow):
             cr.set_font_size(10)
             cr.set_source_rgba(*sub, 0.9)
             cr.move_to(x + 12, y + 38)
+            # direct index: any kind added to surfaces_all() MUST land here
+            # or the first draw raises KeyError and edit mode dies
             tag = {"card": "card · snaps to grid", "conky": "widget",
-                   "dock": "dock", "apps": "dock"}[it["kind"]]
+                   "dock": "dock", "apps": "dock",
+                   "widget": "widget · move only"}[it["kind"]]
             if "scale" in it:
                 tag += f" · ×{it['scale']:.2f}"
             cr.show_text(tag)
-            cr.set_source_rgba(*acc2, 0.8)          # resize handle
-            cr.rectangle(x + w - HANDLE, y + h - HANDLE, HANDLE, HANDLE)
-            cr.fill()
+            if it["kind"] != "widget":              # resize handle
+                cr.set_source_rgba(*acc2, 0.8)      # (not resizable)
+                cr.rectangle(x + w - HANDLE, y + h - HANDLE, HANDLE, HANDLE)
+                cr.fill()
 
         # help bar
         msg = ("drag = move (cards snap to grid, cross-monitor ok) · "
@@ -617,6 +658,8 @@ def main():
             subprocess.run([str(Path.home() /
                                 ".local/bin/desktop-widgets.sh"),
                             "restart-conky"])
+            for w in WIDGET_PROC:          # 'widget' kind (office/viz) reloads
+                signal_widget(w)           # by signal, same as save()
             notify("Layout reverted")
         else:
             print("nothing to undo", file=sys.stderr)

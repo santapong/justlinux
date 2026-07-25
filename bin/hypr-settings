@@ -72,7 +72,8 @@ WIDGET_LABELS = {"clock": "Clock & date", "stats": "System stats",
                  "notes": "Sticky notes",
                  "security": "Security status", "netgraph": "Network graph",
                  "github": "GitHub graph", "trading": "Markets / trading",
-                 "devgit": "Dev repos (git)", "robotics": "Robotics bench"}
+                 "devgit": "Dev repos (git)", "robotics": "Robotics bench",
+                 "office": "Claude office", "viz": "Audio visualizer"}
 POS_CYCLE = ["top_left", "top_middle", "top_right", "middle_right",
              "bottom_right", "bottom_middle", "bottom_left", "middle_left"]
 DEFAULT_POS = {"clock": ("top_right", 24, 44), "stats": ("middle_right", 24, 0),
@@ -84,7 +85,34 @@ DEFAULT_POS = {"clock": ("top_right", 24, 44), "stats": ("middle_right", 24, 0),
                "github": ("top_middle", 0, 240),
                "trading": ("bottom_middle", 0, 120),
                "devgit": ("top_left", 24, 250),
-               "robotics": ("top_middle", 0, 460)}
+               "robotics": ("top_middle", 0, 460),
+               "office": ("bottom_left", 24, 24), "viz": ("bottom_right", 24, 76)}
+
+# 'office' and 'viz' predate the picker: office's on/off toggle already lives
+# in widgets.conf as claude_office= (not office=), and viz defaults OFF —
+# it's a hotkey-only toy, never autostarted just by appearing in this list.
+ONOFF_KEY = {"office": "claude_office"}
+ONOFF_DEFAULT = {"viz": "off"}
+
+# office / viz are hyprdesk widget-kind surfaces, not conky — SIGUSR1 makes
+# them re-read widgets.conf and reposition IN PLACE, same live-reload path
+# hypr-arrange uses, so a drag-free position cycle doesn't drop viz's audio
+# capture or the office's worker scan. -xf (exact, full cmdline) is
+# mandatory — a loose pattern has killed the invoking shell in this fleet.
+LIVE_SIGNAL_PROC = {"office": "hypr-claude-office", "viz": "hypr-viz"}
+
+
+def signal_widget(name):
+    proc = LIVE_SIGNAL_PROC.get(name)
+    if not proc:
+        return False
+    try:
+        r = subprocess.run(["pkill", "-USR1", "-xf",
+                            f"python3 {HOME}/.local/bin/{proc}"],
+                           capture_output=True, timeout=3)
+        return r.returncode == 0
+    except Exception:
+        return False
 
 
 def theme_list():
@@ -115,19 +143,24 @@ def widget_list():
                     label = f"{label} · {inst_id}"
                 out.append((inst_id, label))
             out.append(("apps", WIDGET_LABELS["apps"]))
+            out.append(("office", WIDGET_LABELS["office"]))
+            out.append(("viz", WIDGET_LABELS["viz"]))
             return sorted(out, key=lambda kv: kv[1].lower())
     except Exception:
         pass
     names = sorted(p.stem for p in (HOME / ".config/conky/widgets").glob("*.conf")
                    if p.stem != "apps" and re.fullmatch(r"[A-Za-z][\w-]*", p.stem))
     names.append("apps")
+    names.append("office")
+    names.append("viz")
     return [(n, WIDGET_LABELS.get(n, f"{n.title()} (custom)")) for n in names]
 
 
 def widgets_conf():
     d = {"clock": "on", "stats": "on", "calendar": "on", "claude": "on",
          "apps": "on", "pet": "on", "pet_layer": "bottom", "cards": "on",
-         "claude_pet": "on", "devgit": "on", "robotics": "on"}
+         "claude_pet": "on", "devgit": "on", "robotics": "on",
+         "claude_office": "on", "viz": "off"}
     d["theme"] = "wallust"
     for name, (pos, x, y) in DEFAULT_POS.items():
         d[f"{name}_pos"], d[f"{name}_x"], d[f"{name}_y"] = pos, str(x), str(y)
@@ -250,7 +283,8 @@ def service_active(name):
 def autohide_on():
     if DRY:
         return False
-    return subprocess.run(["pgrep", "-f", "waybar-autohide.sh"],
+    return subprocess.run(["pgrep", "-xf",
+                           f"python3 {HOME}/.local/bin/waybar-autohide.sh"],
                           capture_output=True).returncode == 0
 
 
@@ -507,9 +541,11 @@ class HyprSettings(App):
                         for key, label in widget_list():
                             with Horizontal(classes="row"):
                                 yield Label(label)
-                                yield Switch(
-                                    value=self.widgets.get(key, "on") == "on",
-                                    id=f"sw_w_{key}")
+                                onoff = self.widgets.get(
+                                    ONOFF_KEY.get(key, key),
+                                    ONOFF_DEFAULT.get(key, "on"))
+                                yield Switch(value=onoff == "on",
+                                            id=f"sw_w_{key}")
                         with Horizontal(classes="row"):
                             yield Button("󰀻 Choose dock apps…", id="dock_pick")
                             yield Button("＋ Add widget…", id="wg_add")
@@ -679,7 +715,9 @@ class HyprSettings(App):
             if event.value and not autohide_on():
                 launch(str(HOME / ".local/bin/waybar-autohide.sh"))
             elif not event.value and autohide_on():
-                subprocess.run(["pkill", "-f", "waybar-autohide.sh"], capture_output=True)
+                subprocess.run(["pkill", "-xf",
+                               f"python3 {HOME}/.local/bin/waybar-autohide.sh"],
+                               capture_output=True)
             self.notify("Auto-hide " + ("ON — move mouse to top edge to reveal"
                                         if event.value else "OFF — bar always visible"))
             return
@@ -688,9 +726,17 @@ class HyprSettings(App):
             if wkey == "petlayer":
                 widgets_conf_set("pet_layer", "top" if event.value else "bottom")
             else:
-                widgets_conf_set(wkey, "on" if event.value else "off")
+                widgets_conf_set(ONOFF_KEY.get(wkey, wkey),
+                                 "on" if event.value else "off")
             self.widgets = widgets_conf()
-            self.schedule_widget_restart()
+            # office/viz are single hyprdesk surfaces — restart just that one
+            # instead of bouncing the whole fleet (conky, pet, dock, cardhost)
+            if wkey == "office":
+                launch(str(HOME / ".local/bin/desktop-widgets.sh"), "restart-office")
+            elif wkey == "viz":
+                launch(str(HOME / ".local/bin/desktop-widgets.sh"), "restart-viz")
+            else:
+                self.schedule_widget_restart()
             self.notify("Widgets updated")
             return
         key = sid.removeprefix("sw_")
@@ -736,7 +782,11 @@ class HyprSettings(App):
             else:
                 self.widgets_layout_set(key, "pos", nxt)
             event.button.label = nxt.replace("_", " ")
-            self.schedule_widget_restart()
+            if key in LIVE_SIGNAL_PROC:
+                if not signal_widget(key):
+                    self.schedule_widget_restart()
+            else:
+                self.schedule_widget_restart()
             return
         if bid.startswith(("xm_", "xp_", "ym_", "yp_")):
             axis, sign = bid[0], (1 if bid[1] == "p" else -1)
@@ -759,7 +809,11 @@ class HyprSettings(App):
                 val = max(0, int(self.widgets.get(ck, "0") or 0) + sign * 12)
                 self.widgets_layout_set(key, axis, str(val))
                 self.query_one(f"#{axis}v_{key}", Static).update(str(val))
-            self.schedule_widget_restart()
+            if key in LIVE_SIGNAL_PROC:
+                if not signal_widget(key):
+                    self.schedule_widget_restart()
+            else:
+                self.schedule_widget_restart()
             return
         if bid.startswith(("inc_", "dec_")):
             key = bid[4:]
