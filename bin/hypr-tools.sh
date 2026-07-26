@@ -568,6 +568,7 @@ case "${1:-menu}" in
     apps)        launcher apps ;;
     windows)     launcher windows ;;
     claude-sessions) launcher claude ;;
+    claude-recall) launcher recall ;;
     reorder)     reorder_modules ;;
     autohide)    toggle_autohide ;;
     wallpaper)   launcher wallpaper ;;

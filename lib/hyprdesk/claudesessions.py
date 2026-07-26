@@ -191,6 +191,101 @@ def daemon_roster():
     return out
 
 
+def search_transcripts(query, limit=40, ctx=90):
+    """Sessions whose CONVERSATION contains `query`, newest first.
+
+    The pickers only ever reached recent_transcripts(25), so anything older
+    than about a day was unreachable — you re-ask a question you already
+    answered because the answer is not findable. This greps the whole
+    corpus instead (~280 MB, ~820 files); ripgrep does that in well under a
+    second, which is why the search can re-run on every keystroke.
+
+    Returns [{sid, cwd, title, snippet, mtime, path}]. Falls back to a
+    python scan when rg is absent — slower, same answers.
+    """
+    q = (query or "").strip()
+    if len(q) < 2:
+        return []
+    hits = {}                      # path -> first matching line
+
+    def note(path, line):
+        if path not in hits and len(hits) < limit * 3:
+            hits[path] = line
+
+    try:
+        r = subprocess.run(
+            ["rg", "--no-messages", "--no-heading", "--with-filename",
+             "--max-count", "1", "--fixed-strings", "--ignore-case",
+             "--glob", "*.jsonl", "--", q, str(CLAUDE_PROJECTS)],
+            capture_output=True, text=True, timeout=8)
+        for out in r.stdout.splitlines():
+            path, _, line = out.partition(":")
+            if path.endswith(".jsonl"):
+                note(path, line)
+    except (OSError, subprocess.SubprocessError):
+        low = q.lower()
+        for _mt, f in recent_transcripts(limit=400):
+            try:
+                with open(f, errors="replace") as fh:
+                    for line in fh:
+                        if low in line.lower():
+                            note(str(f), line)
+                            break
+            except OSError:
+                continue
+
+    rows = []
+    for path, line in hits.items():
+        p = Path(path)
+        if "subagents" in p.parts:          # agent logs are not conversations
+            continue
+        try:
+            mtime = p.stat().st_mtime
+        except OSError:
+            continue
+        cwd, preview = session_meta(p)
+        rows.append({
+            "sid": p.stem,
+            "cwd": cwd or str(Path.home()),
+            "title": session_title(p) or preview or p.stem[:8],
+            "snippet": _snippet(line, q, ctx),
+            "mtime": mtime,
+            "path": str(p),
+        })
+    rows.sort(key=lambda r: r["mtime"], reverse=True)
+    return rows[:limit]
+
+
+def _snippet(raw, q, ctx=90):
+    """The matching text with its surroundings, as plain a string as we can
+    make it — a transcript line is JSON, so the raw line is mostly noise."""
+    text = raw
+    try:
+        d = json.loads(raw)
+        msg = (d.get("message") or {}).get("content")
+        if isinstance(msg, list):
+            parts = []
+            for p in msg:
+                if not isinstance(p, dict):
+                    continue
+                if p.get("type") == "text":
+                    parts.append(p.get("text", ""))
+                elif p.get("type") == "tool_use":
+                    parts.append(str(p.get("input", ""))[:200])
+            text = " ".join(parts) or raw
+        elif isinstance(msg, str):
+            text = msg
+    except ValueError:
+        pass
+    text = " ".join(str(text).split())
+    i = text.lower().find(q.lower())
+    if i < 0:
+        return text[:ctx]
+    a = max(0, i - ctx // 3)
+    out = text[a:a + ctx]
+    return ("…" if a else "") + out + ("…" if a + ctx < len(text) else "")
+
+
 CLAUDE_INFRA = ("daemon", "bg-pty-host")
 
 

@@ -441,7 +441,8 @@ def focus_window(entry):
 
 # ---------------- claude sessions ----------------
 sys.path.insert(0, str(Path.home() / ".local/lib"))
-from hyprdesk.claudesessions import session_rows as _session_rows
+from hyprdesk.claudesessions import (search_transcripts as _search_transcripts,
+                                     session_rows as _session_rows)
 
 
 def claude_entries():
@@ -455,6 +456,25 @@ def claude_entries():
                  "sid": "fake", "cwd": "~",
                  "detail": "2h ago — hand_follow grip detection"}]
     return _session_rows()
+
+
+def recall_entries(query):
+    """Search every past conversation. Same dict shape claude_entries emits,
+    so Enter resumes a hit through the identical path."""
+    if DRY:
+        return [{"label": "Fixed the office layer bug", "icon": "󰍉",
+                 "kind": "past", "sid": "fake", "cwd": str(HOME),
+                 "detail": "26 Jul · ~ — …office_layer defaults to bottom…"}]
+    if len((query or "").strip()) < 2:
+        return []
+    out = []
+    for h in _search_transcripts(query, limit=MAX_TILES):
+        when = time.strftime("%d %b", time.localtime(h["mtime"]))
+        where = h["cwd"].replace(str(HOME), "~")
+        out.append({"label": h["title"], "icon": "󰍉", "kind": "past",
+                    "sid": h["sid"], "cwd": h["cwd"],
+                    "detail": f"{when} · {where} — {h['snippet']}"})
+    return out
 
 
 def open_claude_entry(entry):
@@ -770,7 +790,8 @@ class HyprLauncher(App):
                   "windows": ("󰖯", "Windows — click or type to filter"),
                   "wallpaper": ("󰸉", "Wallpaper"),
                   "menu": ("󰍜", "Tools — double-click or Enter to run"),
-                  "claude": ("󰚩", "Claude sessions — 🟢 running · 🕒 resume")}
+                  "claude": ("󰚩", "Claude sessions — 🟢 running · 🕒 resume"),
+                  "recall": ("󰍉", "Recall — search every past Claude conversation")}
         icon, title = titles[self.mode]
         yield Static(f"[bold {C['accent']}]{icon}  {title}[/]", id="hdr")
         if self.mode in ("apps", "menu"):
@@ -779,9 +800,11 @@ class HyprLauncher(App):
             with VerticalScroll(id="scroll") as vs:
                 vs.can_focus = False  # keep focus on the filter; arrows drive the grid
                 yield Vertical(id="gridwrap")
-        elif self.mode in ("windows", "claude"):
+        elif self.mode in ("windows", "claude", "recall"):
             ph = ("filter…  (↑↓ move · Enter focus · Esc close)"
                   if self.mode == "windows" else
+                  "search every conversation…  (Enter resumes it · Esc close)"
+                  if self.mode == "recall" else
                   "filter…  (Enter open/resume · Ctrl+N new here · Esc close)")
             yield FilterInput(placeholder=ph, id="filter")
             yield ListView(id="results")
@@ -802,8 +825,11 @@ class HyprLauncher(App):
             self.entries = desktop_entries() if self.mode == "apps" else tool_entries()
             self.call_later(self.refilter, "")
             self.query_one("#filter", Input).focus()
-        elif self.mode in ("windows", "claude"):
-            self.entries = (window_entries() if self.mode == "windows"
+        elif self.mode in ("windows", "claude", "recall"):
+            # recall has no static list: its results ARE the query, so it
+            # starts empty and fills from the first keystroke
+            self.entries = ([] if self.mode == "recall" else
+                            window_entries() if self.mode == "windows"
                             else claude_entries())
             self.call_later(self.refilter_list, "")
             self.query_one("#filter", Input).focus()
@@ -988,8 +1014,16 @@ class HyprLauncher(App):
     # ---------- windows filtering (list) ----------
     async def refilter_list(self, query):
         q = query.lower().strip()
-        matches = [e for e in self.entries
-                   if not q or q in e["label"].lower() or q in e["detail"].lower()]
+        if self.mode == "recall":
+            # recall SEARCHES, it does not filter: the corpus is ~280 MB of
+            # transcripts and the results are the query's answer, not a
+            # subset of a list we already had. rg does it in <100 ms, but
+            # off-thread so the input never stutters.
+            matches = await asyncio.to_thread(recall_entries, query)
+        else:
+            matches = [e for e in self.entries
+                       if not q or q in e["label"].lower()
+                       or q in e["detail"].lower()]
         lv = self.query_one("#results", ListView)
         await lv.clear()
         await lv.extend(Item(e) for e in matches[:MAX_TILES])
@@ -1019,11 +1053,11 @@ class HyprLauncher(App):
 
     # ---------- navigation ----------
     def action_move(self, step: int):
-        if self.mode not in ("windows", "claude") and self.tiles:
+        if self.mode not in ("windows", "claude", "recall") and self.tiles:
             self.select(self.sel + step)
 
     def action_move_row(self, step: int):
-        if self.mode in ("windows", "claude"):
+        if self.mode in ("windows", "claude", "recall"):
             try:
                 lv = self.query_one("#results", ListView)
             except Exception:
@@ -1034,7 +1068,7 @@ class HyprLauncher(App):
             self.select(self.sel + step * self.cols)
 
     def action_activate(self):
-        if self.mode in ("windows", "claude"):
+        if self.mode in ("windows", "claude", "recall"):
             lv = self.query_one("#results", ListView)
             item = lv.highlighted_child or (lv.children[0] if lv.children else None)
             if isinstance(item, Item):
@@ -1055,7 +1089,7 @@ class HyprLauncher(App):
         self.exit()
 
     def on_list_view_selected(self, event: ListView.Selected):
-        if self.mode in ("windows", "claude") and isinstance(event.item, Item):
+        if self.mode in ("windows", "claude", "recall") and isinstance(event.item, Item):
             (focus_window if self.mode == "windows"
              else open_claude_entry)(event.item.obj)
             self.exit()
@@ -1162,6 +1196,6 @@ class HyprLauncher(App):
 
 if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else "apps"
-    if mode not in ("apps", "windows", "wallpaper", "menu", "claude"):
+    if mode not in ("apps", "windows", "wallpaper", "menu", "claude", "recall"):
         mode = "apps"
     HyprLauncher(mode).run()
