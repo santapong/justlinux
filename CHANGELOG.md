@@ -4,6 +4,20 @@ All notable changes to this desktop. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] — 2026-07-27
+
+### Fixed
+
+- **Opening Hypr Settings appeared to start a Claude session.** It did
+  not — but the office painted a desk for it, and every session picker
+  listed it as a background job, for the ~20 s the Integrations page spends
+  health-checking MCP servers. `claude` is one binary for a conversation
+  and for a pile of one-shot subcommands (`mcp`, `update`, `doctor`,
+  `plugin`, `auth`), and the fleet counted any process by that name. A
+  session is now `claude` with no subcommand. The same rule covers
+  `claude update` and friends, which had the same effect and had simply
+  never been noticed.
+
 ## [1.1.1] — 2026-07-27
 
 ### Documentation

@@ -288,6 +288,35 @@ def _snippet(raw, q, ctx=90):
 
 
 CLAUDE_INFRA = ("daemon", "bg-pty-host")
+# `claude` is one binary for a conversation AND for a pile of one-shot
+# subcommands. `claude mcp list` runs for ~20 s while it health-checks
+# every server — long enough that opening Hypr Settings, which lists MCP
+# servers, painted a phantom desk in the office and a phantom background
+# job in every picker. A session is `claude` with no subcommand.
+CLAUDE_SUBCOMMANDS = frozenset((
+    "agents", "auth", "auto-mode", "daemon", "doctor", "gateway", "install",
+    "mcp", "plugin", "plugins", "project", "setup-token", "ultrareview",
+    "update", "upgrade", "bg-pty-host", "migrate-installer", "config",
+))
+
+
+def _subcommand(argv):
+    """The first bare word after the binary, or "" for a session. Values
+    that belong to a preceding flag (`--resume <sid>`) are skipped, so a
+    resumed session is never mistaken for a subcommand."""
+    skip = False
+    for a in argv[1:]:
+        if skip:
+            skip = False
+            continue
+        if a.startswith("-"):
+            # long flags may take a value; short ones here do too
+            skip = "=" not in a and a not in (
+                "-c", "--continue", "-d", "--debug", "--dangerously-skip-"
+                "permissions", "-v", "--version", "-h", "--help")
+            continue
+        return a
+    return ""
 
 
 def _argv(pid):
@@ -334,6 +363,8 @@ def claude_procs():
         argv = _argv(p)
         if any(a in CLAUDE_INFRA for a in argv[1:3]) or "--bg-spare" in argv:
             continue
+        if _subcommand(argv) in CLAUDE_SUBCOMMANDS:
+            continue                     # a one-shot CLI call, not a chat
         try:
             cwd = os.readlink(f"/proc/{p}/cwd")
             tty = os.readlink(f"/proc/{p}/fd/0")
