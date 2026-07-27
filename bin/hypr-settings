@@ -215,6 +215,52 @@ def read_colors():
         return fallback
 
 
+# ---------------- MCP (Claude Code) ----------------
+# `claude mcp list` health-checks every configured server over the network,
+# so it can take ~20s — callers run it in a worker thread, never on the UI
+# loop. Servers named "claude.ai …" are managed by the account at claude.ai
+# and can only be SHOWN here; only locally-added ones can be removed.
+MCP_LINE = re.compile(
+    r"^(?P<name>.+?):\s+(?P<target>.+?)\s+-\s+"
+    r"(?P<glyph>[✔✘✗!⏸])\s*(?P<note>.*)$")
+
+
+def _esc(s):
+    """Rich-markup-escape a string that came from the outside world."""
+    return str(s).replace("[", r"\[")
+
+
+def mcp_list():
+    """[(name, target, state, note, managed)] from `claude mcp list`.
+    state: good | warn | bad. Raises RuntimeError with a human message."""
+    if DRY:
+        return [("claude.ai Figma", "https://mcp.figma.com/mcp",
+                 "good", "Connected", True),
+                ("local-probe", "npx probe-mcp", "bad", "Failed", False)]
+    try:
+        r = subprocess.run(["claude", "mcp", "list"], capture_output=True,
+                           text=True, timeout=90)
+    except FileNotFoundError:
+        raise RuntimeError("claude CLI not found on PATH")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("claude mcp list timed out (network?)")
+    if r.returncode != 0:
+        msg = (r.stderr or r.stdout or "claude mcp list failed").strip()
+        raise RuntimeError(msg.splitlines()[-1][:120] if msg else "failed")
+    out = []
+    for line in r.stdout.splitlines():
+        m = MCP_LINE.match(line.strip())
+        if not m:
+            continue                    # banner / blank / progress lines
+        glyph = m.group("glyph")
+        state = "good" if glyph == "✔" else \
+            ("warn" if glyph in "!⏸" else "bad")
+        name = m.group("name").strip()
+        out.append((name, m.group("target").strip(), state,
+                    m.group("note").strip(), name.startswith("claude.ai")))
+    return out
+
+
 def hyprctl_get(option, default):
     """Read a live option value; returns int (bools are 0/1)."""
     if DRY or not shutil.which("hyprctl"):
@@ -438,6 +484,9 @@ class HyprSettings(App):
     .val {{ width: 4; text-align: right; padding: 1 1 1 0;
             color: {C['accent']}; text-style: bold; }}
     .hint {{ color: {C['subtext']}; }}
+    .mcprow {{ width: 1fr; }}
+    #mcp_rows {{ height: auto; }}
+    #mcp_rows .row {{ height: auto; }}
     .status {{ padding: 0 0 1 0; }}
 
     Button {{ background: transparent; border: round {C['surface']};
@@ -701,6 +750,29 @@ class HyprSettings(App):
                             "~/.config/hyprdesk/secrets.json (0600) — never to "
                             "widgets.conf, which is in a public repo.",
                             classes="hint")
+                    with Card("MCP servers · Claude Code"):
+                        yield Static("", id="mcp_status", classes="status")
+                        yield Vertical(id="mcp_rows")
+                        with Horizontal(classes="row"):
+                            yield Label("Name")
+                            yield Input(placeholder="e.g. sentry",
+                                        id="mcp_name")
+                        with Horizontal(classes="row"):
+                            yield Label("Command / URL")
+                            yield Input(placeholder="https://… (HTTP) or a "
+                                        "command line (stdio)", id="mcp_cmd")
+                            yield Button("󰅌", id="mcp_paste", classes="small")
+                        with Horizontal(classes="row"):
+                            yield Button("＋ Add server", id="mcp_add",
+                                         variant="primary")
+                            yield Button("󰑓 Re-check health", id="mcp_refresh")
+                        yield Static(
+                            "Servers marked claude.ai are managed by your "
+                            "account at claude.ai — this panel can only show "
+                            "their health. Locally added ones (user scope, "
+                            "~/.claude.json) get a ✕. An https:// target is "
+                            "added as HTTP transport; anything else runs as "
+                            "a stdio command.", classes="hint")
                 with VerticalScroll(id="pane-power"):
                     with Card("Session"):
                         yield Button("󰌾 Lock screen", id="p_lock")
@@ -718,6 +790,7 @@ class HyprSettings(App):
         self.refresh_security()
         self.refresh_wallpapers()
         self._hb_refresh()
+        self.run_worker(self._mcp_refresh(), group="mcp", exclusive=True)
         if self._initial_page:
             self.goto_page(self._initial_page)
         self._poll_tick = 0
@@ -757,6 +830,7 @@ class HyprSettings(App):
         self.refresh_security()
         self.refresh_wallpapers()
         self._hb_refresh()
+        self.run_worker(self._mcp_refresh(), group="mcp", exclusive=True)
         self._refreshing = True
         try:
             self.query_one("#sw_autohide", Switch).value = autohide_on()
@@ -885,6 +959,107 @@ class HyprSettings(App):
             "saved — type a new one to replace it"
         self._hb_msg(f"saved — connected as {name}", good=True)
 
+    # ---------- MCP ----------
+    def _mcp_msg(self, text, bad=False, good=False):
+        col = C["red"] if bad else (C["green"] if good else C["subtext"])
+        try:
+            self.query_one("#mcp_status", Static).update(f"[{col}]{text}[/]")
+        except Exception:
+            pass
+
+    async def _mcp_refresh(self):
+        import asyncio
+        self._mcp_msg("checking server health… (network, can take ~20 s)")
+        try:
+            servers = await asyncio.to_thread(mcp_list)
+        except RuntimeError as e:
+            self._mcp_msg(str(e), bad=True)
+            return
+        except Exception as e:
+            self._mcp_msg(f"could not list servers: {e}", bad=True)
+            return
+        try:
+            box = self.query_one("#mcp_rows", Vertical)
+        except Exception:
+            return                       # pane gone mid-refresh
+        await box.remove_children()
+        self._mcp_rm = {}
+        ink = {"good": C["green"], "warn": C["yellow"], "bad": C["red"]}
+        mark = {"good": "●", "warn": "◐", "bad": "○"}
+        for i, (name, target, state, note, managed) in enumerate(servers):
+            line = (f"[{ink[state]}]{mark[state]}[/] "
+                    f"[{C['text']}]{_esc(name)}[/]  "
+                    f"[{C['subtext']}]{_esc(target[:44])}"
+                    f"{' — ' + _esc(note) if note else ''}[/]")
+            if managed:
+                await box.mount(Static(line, classes="mcprow"))
+            else:
+                bid = f"mcprm_{i}"
+                self._mcp_rm[bid] = name
+                await box.mount(Horizontal(
+                    Static(line, classes="mcprow"),
+                    Button("✕", id=bid, classes="small"),
+                    classes="row"))
+        n, n_local = len(servers), len(self._mcp_rm)
+        if n:
+            self._mcp_msg(f"{n} server(s) — {n - n_local} account-managed, "
+                          f"{n_local} local", good=True)
+        else:
+            self._mcp_msg("no MCP servers configured — add one below")
+
+    async def _mcp_add(self, name, cmd):
+        import asyncio
+        import shlex
+        self._mcp_msg(f"adding “{name}”…")
+        if cmd.startswith(("http://", "https://")):
+            argv = ["claude", "mcp", "add", "-s", "user",
+                    "--transport", "http", name, cmd]
+        else:
+            try:
+                parts = shlex.split(cmd)
+            except ValueError as e:
+                self._mcp_msg(f"bad command line: {e}", bad=True)
+                return
+            argv = ["claude", "mcp", "add", "-s", "user", name, "--"] + parts
+        if DRY:
+            self._mcp_msg("(dry) would run: " + " ".join(argv))
+            return
+        try:
+            r = await asyncio.to_thread(
+                subprocess.run, argv, capture_output=True, text=True,
+                timeout=60)
+        except Exception as e:
+            self._mcp_msg(f"add failed: {e}", bad=True)
+            return
+        if r.returncode != 0:
+            err = (r.stderr or r.stdout or "add failed").strip()
+            self._mcp_msg(_esc(err.splitlines()[-1][:120]), bad=True)
+            return
+        self.query_one("#mcp_name", Input).value = ""
+        self.query_one("#mcp_cmd", Input).value = ""
+        await self._mcp_refresh()
+
+    async def _mcp_remove(self, name):
+        import asyncio
+        self._mcp_msg(f"removing “{name}”…")
+        if DRY:
+            self._mcp_msg(f"(dry) would remove {name}")
+            return
+        try:
+            # no -s: the CLI removes from whichever scope holds it, which
+            # is what a "✕ next to the row" should mean
+            r = await asyncio.to_thread(
+                subprocess.run, ["claude", "mcp", "remove", name],
+                capture_output=True, text=True, timeout=30)
+        except Exception as e:
+            self._mcp_msg(f"remove failed: {e}", bad=True)
+            return
+        if r.returncode != 0:
+            err = (r.stderr or r.stdout or "remove failed").strip()
+            self._mcp_msg(_esc(err.splitlines()[-1][:120]), bad=True)
+            return
+        await self._mcp_refresh()
+
     def on_button_pressed(self, event: Button.Pressed):
         bid = event.button.id or ""
         if bid == "theme_btn":
@@ -897,6 +1072,47 @@ class HyprSettings(App):
             event.button.label = nxt
             self.schedule_widget_restart()
             return
+        if bid == "mcp_refresh":
+            self.run_worker(self._mcp_refresh(), group="mcp", exclusive=True)
+            return
+
+        if bid == "mcp_paste":
+            try:
+                r = subprocess.run(["wl-paste", "-n"], capture_output=True,
+                                   text=True, timeout=4)
+                val = (r.stdout or "").strip()
+            except Exception as e:
+                self._mcp_msg(f"clipboard unavailable: {e}", bad=True)
+                return
+            if not val:
+                self._mcp_msg("clipboard is empty", bad=True)
+                return
+            self.query_one("#mcp_cmd", Input).value = val
+            self._mcp_msg(f"pasted {len(val)} characters")
+            return
+
+        if bid == "mcp_add":
+            name = self.query_one("#mcp_name", Input).value.strip()
+            cmd = self.query_one("#mcp_cmd", Input).value.strip()
+            if not name or not cmd:
+                self._mcp_msg("both a name and a command/URL are needed",
+                              bad=True)
+                return
+            if not re.fullmatch(r"[\w.-]+", name):
+                self._mcp_msg("name: letters, digits, dot, dash, underscore "
+                              "only", bad=True)
+                return
+            self.run_worker(self._mcp_add(name, cmd), group="mcp",
+                            exclusive=True)
+            return
+
+        if bid.startswith("mcprm_"):
+            name = getattr(self, "_mcp_rm", {}).get(bid)
+            if name:
+                self.run_worker(self._mcp_remove(name), group="mcp",
+                                exclusive=True)
+            return
+
         if bid in ("hb_paste_user", "hb_paste_token"):
             # A terminal never delivers ctrl+v to the app — it is the
             # emulator's own paste key. For a field whose whole purpose is

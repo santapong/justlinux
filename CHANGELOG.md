@@ -4,6 +4,30 @@ All notable changes to this desktop. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Splits in Claude Studio.** Any tab now holds several panes — `C-b |`
+  side by side, `C-b -` stacked, or the `[|]` `[-]` buttons at the right of
+  the tab bar — so a conversation can sit next to its build log or a shell
+  in the same repo. `C-b` arrows move between panes, `C-b z` zooms one.
+  Splits inherit the current pane's directory. The pane title line only
+  appears once a window actually has two panes, so a single-pane tab loses
+  no rows. Clicking a split button while the session tree is selected opens
+  a terminal *tab* instead — the sidebar is a Textual app that owns its
+  whole window and must not be cut in half.
+- **`t` in the session tree** — a plain terminal tab in the highlighted
+  project, for the git/build/log half of the work.
+- **MCP servers in Settings → Integrations.** Health of every server
+  `claude` can see, colour-coded from its own check, plus add and remove for
+  the local ones. Servers managed by your account at claude.ai are shown
+  and marked, never offered for deletion — this panel does not own them.
+  An `https://` target is added as HTTP transport, anything else as a stdio
+  command. The command field has a paste button, because `Ctrl+V` belongs
+  to the terminal emulator and never reaches a TUI.
+- `docs/claude-studio.md`.
+
 ## [1.0.0] — 2026-07-27
 
 First tagged release. The desktop has been in daily use throughout; this

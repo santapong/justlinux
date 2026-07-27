@@ -8,9 +8,13 @@ One kitty window running a tmux session:
     then projects → their resumable transcripts
   · Enter opens a session as its own tab (`claude --resume`); if it is
     already open its tab is focused instead; n = new session in the
-    highlighted project; r = refresh
+    highlighted project; t = plain terminal there; r = refresh
+  · SPLITS: any tab holds several panes — C-b | side by side, C-b - stacked
+    (C-b arrows to move between them, C-b z to zoom one full-screen), or
+    click the | and — buttons at the right of the tab bar
 
 Modes: (default) focus-or-spawn the studio · --sidebar (inside tmux)
+       --split h|v (from the tab bar's split buttons)
 """
 import json
 import os
@@ -29,6 +33,13 @@ KITTY_CLASS = "hyprclaudestudio"
 # window so the click handler knows WHICH tab the ✕ belonged to.
 CLOSE_X = ("#{?#{!=:#{window_index},0},"
            "#[range=user|x#{window_index}]✕#[norange],}")
+# the two split buttons live in status-right, so they are not part of any
+# window's range and act on whatever tab is currently selected
+# the labels ARE the prefix keys that do the same thing, so the tab bar
+# teaches the binding. Bare │ and ─ were tried first and read as
+# separators — nothing about them said "click me".
+SPLIT_BUTTONS = ("#[range=user|sh]{acc}[|]#[norange]{sub} "
+                 "#[range=user|sv]{acc}[-]#[norange]{sub}")
 
 
 def tmux(*args, out=False):
@@ -93,7 +104,31 @@ def style_tmux():
         ("set", "-g", "status-left",
          f"#[fg={acc2},bold] 󰚩 Claude Studio #[default] "),
         ("set", "-g", "status-left-length", "22"),
-        ("set", "-g", "status-right", f"#[fg={sub}] #S "),
+        ("set", "-g", "status-right",
+         "#[fg={}]{}  #S ".format(
+             sub, SPLIT_BUTTONS.format(acc=f"#[fg={acc}]",
+                                       sub=f"#[fg={sub}]"))),
+        ("set", "-g", "status-right-length", "32"),
+        # panes: the active one wears the accent, the rest recede. The
+        # title line only appears once a window actually has two panes —
+        # see the hooks below — so a single-pane tab loses no rows.
+        ("set", "-g", "pane-border-style", f"fg={sub}"),
+        ("set", "-g", "pane-active-border-style", f"fg={acc}"),
+        ("set", "-g", "pane-border-format",
+         f" #[fg={acc2},bold]#{{pane_index}}#[default] "
+         f"#[fg={sub}]#{{pane_current_command}} "),
+        # one hook, both directions: pane-exited does not fire for
+        # kill-pane, and after-split-window only ever turns it on
+        ("set-hook", "-g", "window-layout-changed",
+         "if -F '#{==:#{window_panes},1}' "
+         "'setw pane-border-status off' 'setw pane-border-status top'"),
+        # mnemonic splits: the key looks like the split it makes
+        ("bind-key", "|", "split-window", "-h", "-c", "#{pane_current_path}"),
+        ("bind-key", "-", "split-window", "-v", "-c", "#{pane_current_path}"),
+        ("bind-key", "Left", "select-pane", "-L"),
+        ("bind-key", "Right", "select-pane", "-R"),
+        ("bind-key", "Up", "select-pane", "-U"),
+        ("bind-key", "Down", "select-pane", "-D"),
         ("set", "-g", "window-status-format", f" #I #W {CLOSE_X} "),
         ("set", "-g", "window-status-current-format",
          f"#[bg={acc},fg={bg},bold] #I #W {CLOSE_X}#[bg={acc},fg={bg}] "
@@ -103,10 +138,15 @@ def style_tmux():
         # anywhere on the tab for the same thing. Left-click elsewhere
         # still just selects, so the ✕ needs its own hit region — hence
         # the range tag (tmux has no per-glyph hit testing otherwise).
+        # left-click: ✕ closes that tab, the split buttons split the
+        # current one (via --split, which knows the sidebar must not be
+        # cut in half), anything else just selects.
         ("bind-key", "-n", "MouseUp1Status", "if", "-F",
          "#{m/r:^x[0-9]+$,#{mouse_status_range}}",
          "kill-window -t #{s/^x//:mouse_status_range}",
-         "select-window -t="),
+         "if -F '#{m/r:^s[hv]$,#{mouse_status_range}}' "
+         f"\"run-shell 'python3 {ME} --split #{{mouse_status_range}}'\" "
+         "'select-window -t='"),
         ("bind-key", "-n", "MouseUp2Status", "kill-window", "-t="),
     ):
         tmux(*args)
@@ -171,6 +211,26 @@ def new_session_tab(cwd):
          "claude")
 
 
+def new_term_tab(cwd):
+    """A plain shell tab — for the git/build/log half of the work that
+    otherwise means leaving the studio."""
+    name = " " + (os.path.basename(cwd.rstrip("/")) or "~")
+    tmux("new-window", "-t", f"{TMUX_SESSION}:", "-n", name, "-c", cwd)
+
+
+def split_here(where):
+    """Split the selected tab. `where` is the clicked range name (sh|sv).
+    The sidebar is a Textual app that owns its whole window, so a split
+    there opens a terminal TAB instead of squeezing the tree."""
+    idx = tmux("display-message", "-p", "#{window_index}", out=True).strip()
+    cwd = tmux("display-message", "-p", "#{pane_current_path}",
+               out=True).strip() or str(Path.home())
+    if idx == "0":
+        new_term_tab(str(Path.home()))
+        return
+    tmux("split-window", "-h" if where.endswith("h") else "-v", "-c", cwd)
+
+
 def sidebar():
     from textual.app import App, ComposeResult
     from textual.binding import Binding
@@ -187,6 +247,7 @@ def sidebar():
         BINDINGS = [
             Binding("enter", "open", "Open tab", show=True),
             Binding("n", "new", "New session here", show=True),
+            Binding("t", "term", "Terminal here", show=True),
             Binding("x", "kill_bg", "Stop bg job", show=True),
             Binding("r", "refresh", "Refresh", show=True),
             Binding("q", "quit_studio", "Close studio", show=True),
@@ -202,7 +263,8 @@ def sidebar():
         def compose(self) -> ComposeResult:
             yield Static(
                 f"[bold {pal['accent']}]󰚩 Sessions[/] — Enter opens a tab"
-                " · middle-click a tab above closes it", id="hint")
+                " · t = terminal · C-b | ─ splits · middle-click closes",
+                id="hint")
             yield Tree("sessions", id="tree")
             yield Footer()
 
@@ -302,6 +364,10 @@ def sidebar():
             data = self._current() or {}
             new_session_tab(data.get("cwd") or str(Path.home()))
 
+        def action_term(self):
+            data = self._current() or {}
+            new_term_tab(data.get("cwd") or str(Path.home()))
+
         def action_refresh(self):
             self.reload_tree()
 
@@ -314,5 +380,8 @@ def sidebar():
 if __name__ == "__main__":
     if "--sidebar" in sys.argv:
         sidebar()
+    elif "--split" in sys.argv:
+        i = sys.argv.index("--split")
+        split_here(sys.argv[i + 1] if i + 1 < len(sys.argv) else "sh")
     else:
         launch()
