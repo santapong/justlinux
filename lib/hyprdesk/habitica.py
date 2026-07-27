@@ -24,6 +24,7 @@ Dailies and Habits keep their own tabs. "Done" for a Daily means "done
 today", and a Habit is not something you finish at all — it is a + / −
 you press. Neither claim survives being squeezed into a To-Do column.
 """
+import datetime
 import json
 import time
 import urllib.error
@@ -139,6 +140,35 @@ def score(task_id, direction="up"):
 
 
 DOING_TAG = "doing"
+SPRINT_PREFIX = "sprint-"
+
+
+def current_sprint(today=None):
+    """This week's sprint name, from the ISO week — `sprint-2026-W31`.
+    ISO weeks start on Monday and every date belongs to exactly one, which
+    is the whole reason to use them rather than counting from a start date
+    somebody has to remember."""
+    d = today or datetime.date.today()
+    year, week, _ = d.isocalendar()
+    return f"{SPRINT_PREFIX}{year}-W{week:02d}"
+
+
+def sprint_dates(name):
+    """(monday, sunday) for a sprint name, or (None, None) if it is not one
+    of ours — a hand-made `sprint-alpha` tag is still a valid sprint, it
+    just has no dates."""
+    try:
+        year, week = name[len(SPRINT_PREFIX):].split("-W")
+        mon = datetime.date.fromisocalendar(int(year), int(week), 1)
+        return mon, mon + datetime.timedelta(days=6)
+    except (ValueError, TypeError, IndexError):
+        return None, None
+
+
+def sprint_names(fresh=False):
+    """Every sprint tag on the account, newest name last."""
+    return sorted(t["name"] for t in tags(fresh=fresh)
+                  if (t.get("name") or "").startswith(SPRINT_PREFIX))
 
 
 def tags(fresh=False):
@@ -156,19 +186,37 @@ def doing_tag_id(fresh=False):
     return ""
 
 
-def ensure_doing_tag():
-    """The id, creating the tag if this is the first time anything moved
-    into Doing."""
-    tid = doing_tag_id()
+def tag_id(name):
+    for t in tags():
+        if (t.get("name") or "").strip().lower() == name.lower():
+            return t.get("id") or ""
+    return ""
+
+
+def ensure_tag(name):
+    """The id of a tag, creating it if it does not exist yet."""
+    tid = tag_id(name)
     if tid:
         return tid
-    d = (_call("/tags", method="POST", body={"name": DOING_TAG})
-         .get("data") or {})
+    d = (_call("/tags", method="POST", body={"name": name}).get("data") or {})
     _CACHE.pop("tags", None)
     tid = d.get("id") or ""
     if not tid:
-        raise HabiticaError("Habitica would not create the `doing` tag")
+        raise HabiticaError(f"Habitica would not create the `{name}` tag")
     return tid
+
+
+def ensure_doing_tag():
+    return ensure_tag(DOING_TAG)
+
+
+def set_due(task_id, date=""):
+    """Set or clear a To-Do's due date. `date` is YYYY-MM-DD, or "" to
+    clear it — Habitica wants null for that, not an empty string."""
+    out = _call(f"/tasks/{task_id}", method="PUT",
+                body={"date": date or None})
+    _CACHE.clear()
+    return out
 
 
 def add_tag(task_id, tag_id):
@@ -183,11 +231,22 @@ def del_tag(task_id, tag_id):
     return out
 
 
-def set_column(task, col):
+def set_column(task, col, sprint=""):
     """Move a To-Do between board columns, saying it in Habitica's own
     terms. Returns a short line describing what was actually done, because
-    "moved to Done" and "ticked off, +gold" are not the same news."""
+    "moved to Done" and "ticked off, +gold" are not the same news.
+
+    On a sprint board the column also decides membership: anything out of
+    Backlog joins the sprint, anything dropped into Backlog leaves it."""
     tid = task.get("id")
+    if sprint:
+        inside = sprint in (task.get("sprints") or [])
+        if col == "backlog" and inside:
+            del_tag(tid, tag_id(sprint))
+        elif col != "backlog" and not inside:
+            add_tag(tid, ensure_tag(sprint))
+    if col == "backlog":
+        col = "todo"                    # the rest of the rules are the same
     was_done = bool(task.get("completed")) or task.get("col") == "done"
     said = []
     if col == "done":
@@ -211,6 +270,23 @@ def set_column(task, col):
             said.append("cleared its `doing` tag")
     _CACHE.clear()
     return " · ".join(said) or "already there"
+
+
+def board_column(t, sprint=""):
+    """Which column a To-Do sits in. Without a sprint this is the plain
+    three-column board; with one, Backlog is everything the sprint has not
+    claimed, and Done means done IN THIS SPRINT — a sprint board that
+    counted every to-do you ever finished would say nothing about it."""
+    if not sprint:
+        if t.get("completed"):
+            return "done"
+        return "doing" if t.get("doing") else "todo"
+    inside = sprint in (t.get("sprints") or [])
+    if t.get("completed"):
+        return "done" if inside else None       # not this sprint's business
+    if t.get("doing"):
+        return "doing"
+    return "todo" if inside else "backlog"
 
 
 def _col(t, doing_id=""):
@@ -237,10 +313,14 @@ def board(fresh=False):
     # can change them (ensure_doing_tag, add/del_tag) clear the cache.
     doing_id = doing_tag_id()
     cols = {"todo": [], "doing": [], "done": [], "dailies": [], "habits": []}
+    names = {t.get("id"): (t.get("name") or "") for t in tags()}
     for t in todos:
         items = t.get("checklist") or []
         col = _col(t, doing_id)
+        mine = [names.get(i, "") for i in (t.get("tags") or [])]
         cols[col].append({
+            "tags": [n for n in mine if n],
+            "sprints": [n for n in mine if n.startswith(SPRINT_PREFIX)],
             "id": t.get("id") or t.get("_id"),
             "text": (t.get("text") or "").strip(),
             "notes": (t.get("notes") or "").strip(),
@@ -292,4 +372,7 @@ def board(fresh=False):
     # roughly the last 30; the board says so rather than implying that is
     # everything you have ever finished.
     cols["done"].sort(key=lambda c: c.get("done_at") or "", reverse=True)
+    cols["sprints"] = sorted(
+        {s for k in ("todo", "doing", "done") for c in cols[k]
+         for s in c["sprints"]} | set(sprint_names()))
     return cols

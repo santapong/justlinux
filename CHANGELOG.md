@@ -35,6 +35,15 @@ versioning is [SemVer](https://semver.org/spec/v2.0.0.html).
   Hypr Settings is a terminal app, so this is the same panel rather than a
   second settings framework built inside the studio.
 - A tab holding several panes shows `·N` in the bar.
+- **A sprint board and a schedule.** Three more tabs: **Sprint** puts one
+  ISO week's work behind a Backlog column — dragging a card out of Backlog
+  joins the sprint, dropping it back leaves — with `< >` to move between
+  sprints. **Week** is seven day columns; drop a card on a day and that
+  becomes its due date. **Today** answers what to do now: overdue, due
+  today, in progress, and today's dailies. `d` on a card sets a date
+  without leaving the board. A sprint is a `sprint-2026-W31` tag, so it is
+  real state Habitica keeps and the phone can see, and the tag is created
+  only when you first move something into that sprint.
 - **The Habitica board, rebuilt.** Three tabs — To-Dos, Dailies, Habits —
   because Habitica has three kinds of task and squeezing them into one
   board misrepresents all three. Tasks are cards now: difficulty, checklist

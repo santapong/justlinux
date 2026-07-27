@@ -1,30 +1,38 @@
 #!/usr/bin/env python3
 """hypr-kanban — the Habitica board, in the fleet's TUI style.
 
-Three tabs, because Habitica has three kinds of task and they are not the
-same kind of thing:
+Six tabs, because Habitica holds several different questions and one board
+cannot answer them all:
 
-    To-Dos    a board — To do · Doing · Done. Drag a card between them.
+    Today     what is overdue, what is due today, today's dailies
+    To-Dos    the plain board — To do · Doing · Done
+    Sprint    Backlog · To do · Doing · Done for one week's work
+    Week      seven day columns; drop a card on a day to set its due date
     Dailies   things that recur; "done" means done TODAY
     Habits    a + / − you press; there is nothing to finish
 
-"Doing" is not a state Habitica has. Checklist progress was tried as a
-stand-in and was wrong for real use — almost no to-do has a checklist, so
-Doing and Done sat empty forever. It is now a TAG called `doing`, which is
-the one place Habitica lets you say something it did not think of, and it
-shows up on the phone and the website too. The tag is created the first
-time you move something into Doing, never just by opening the board.
+Two states Habitica does not have are kept as TAGS, which is the one place
+it lets you say something it did not think of — so they show up on the
+phone and the website too, and can be set from either:
 
-    drag a card       move it between columns
-    [ ]               same thing from the keyboard
-    Enter / Space     tick the focused task off
+    `doing`               the Doing column
+    `sprint-2026-W31`     membership of one ISO week's sprint
+
+Neither tag is created by opening the board — only by moving something
+into a column that needs it.
+
+    drag a card       between columns, or onto a day in the Week view
+    [ ]               move between columns from the keyboard
+    Enter / dbl-click tick the focused task off
+    d                 set or clear a due date
     + / -             score the focused Habit
-    1 2 3             the three tabs (Tab itself moves focus, as usual)
-    r refresh         q / Esc close
+    < >               previous / next sprint or week
+    1…6 tabs      r refresh      q / Esc close
 
 Credentials live in ~/.config/hyprdesk/secrets.json (0600), never in
 widgets.conf — that file is in a public repo.
 """
+import datetime
 import os
 import sys
 import unicodedata
@@ -36,6 +44,7 @@ from textual.app import App, ComposeResult            # noqa: E402
 from textual.binding import Binding                   # noqa: E402
 from textual.containers import (Horizontal, Vertical,  # noqa: E402
                                 VerticalScroll)
+from textual.screen import ModalScreen                # noqa: E402
 from textual.widgets import (Footer, Static, TabbedContent,  # noqa: E402
                              TabPane)
 
@@ -69,6 +78,8 @@ def read_colors():
 
 C = read_colors()
 COLUMNS = [("todo", "󰄰  To do"), ("doing", "󰥔  Doing"), ("done", "󰄲  Done")]
+SPRINT_COLUMNS = [("backlog", "󰈚  Backlog")] + COLUMNS
+DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 REFRESH_SECS = 120
 # Habitica difficulty, in its own words: trivial · easy · medium · hard
 DIFF = [(2.0, "hard", "red"), (1.5, "medium", "yellow"),
@@ -107,13 +118,45 @@ def difficulty(pri):
     return "trivial", "subtext"
 
 
+def iso(d):
+    return d.strftime("%Y-%m-%d")
+
+
+def monday_of(d):
+    return d - datetime.timedelta(days=d.weekday())
+
+
+def due_ink(date_str):
+    """Overdue is the one date fact worth a colour."""
+    try:
+        d = datetime.date.fromisoformat(date_str)
+    except (ValueError, TypeError):
+        return C["subtext"]
+    today = datetime.date.today()
+    if d < today:
+        return C["red"]
+    if d == today:
+        return C["yellow"]
+    return C["subtext"]
+
+
+class DropZone(VerticalScroll):
+    """A container a card can be dropped on. `key` says what dropping there
+    means — `col:doing`, `due:2026-07-29` — so one drag implementation
+    serves the board, the sprint and the week view."""
+
+    def __init__(self, key, **kw):
+        self.key = key
+        super().__init__(**kw)
+
+
 class Card(Static, can_focus=True):
     """One task, as a card you can pick up.
 
     Terminals have no drag ghost to float under the cursor, so the drag is
-    shown the honest way: the card you are carrying dims and the column
-    that will take it lights up. Press, move, release — the gesture is the
-    same, only the feedback differs.
+    shown the honest way: the card you are carrying dims and the zone that
+    will take it lights up. Press, move, release — the gesture is the same,
+    only the feedback differs.
     """
 
     def __init__(self, task, board, draggable=True):
@@ -137,9 +180,11 @@ class Card(Static, can_focus=True):
             bits.append(f"[{C['green'] if done else C['subtext']}]"
                         f"☑ {t['done_n']}/{t['total_n']}[/]")
         if t.get("due"):
-            bits.append(f"[{C['subtext']}]󰃭 {t['due']}[/]")
+            bits.append(f"[{due_ink(t['due'])}]󰃭 {t['due']}[/]")
         if t.get("streak"):
             bits.append(f"[{C['yellow']}]󰈸 {t['streak']}[/]")
+        for sp in (t.get("sprints") or []):
+            bits.append(f"[{C['accent']}]󰓾 {sp[len(H.SPRINT_PREFIX):]}[/]")
         if t.get("kind") == "habit":
             up = (f"[{C['green']}]＋{t['up_n']}[/]" if t.get("up")
                   else f"[{C['subtext']}]＋ —[/]")
@@ -181,8 +226,8 @@ class Card(Static, can_focus=True):
                 return                  # a click is not a drag
             self._dragging = True
             self.add_class("-dragging")
-        self.board.hover_column(
-            self.board.column_at(event.screen_x, event.screen_y))
+        self.board.hover_zone(self.board.zone_at(event.screen_x,
+                                                 event.screen_y))
 
     def on_mouse_up(self, event):
         if self._down is None:
@@ -193,10 +238,82 @@ class Card(Static, can_focus=True):
             return
         self._dragging = False
         self.remove_class("-dragging")
-        self.board.hover_column(None)
-        target = self.board.column_at(event.screen_x, event.screen_y)
-        if target:
-            self.board.move_card(self, target)
+        self.board.hover_zone(None)
+        zone = self.board.zone_at(event.screen_x, event.screen_y)
+        if zone is not None:
+            self.board.drop_card(self, zone.key)
+
+
+class DuePicker(ModalScreen):
+    """Setting a due date without leaving the board. Typing a full date is
+    the slowest of the ways you might want one, so it is not offered at
+    all — every option here is one keystroke."""
+
+    # BINDINGS, not on_key: an unstopped on_key still lets the App's own
+    # Enter binding fire, so picking a date also ticked the task off.
+    BINDINGS = [
+        Binding("escape", "dismiss_none", "Cancel", show=True),
+        Binding("down,j", "move(1)", "Down", show=True),
+        Binding("up,k", "move(-1)", "Up", show=False),
+        Binding("enter,space", "choose", "Set", show=True),
+    ]
+    CSS = f"""
+    DuePicker {{ align: center middle; background: {C['base']} 70%; }}
+    #box {{ width: 52; height: auto; padding: 1 2;
+            background: {C['base']}; border: round {C['accent']}; }}
+    #box Static {{ height: auto; }}
+    .opt {{ height: 1; padding: 0 1; color: {C['text']}; }}
+    .opt.-on {{ background: {C['accent']} 30%; color: {C['text']}; }}
+    """
+
+    def __init__(self, title):
+        super().__init__()
+        self.title_text = title
+        today = datetime.date.today()
+        end = H.sprint_dates(H.current_sprint())[1] or today
+        self.opts = [
+            ("today", iso(today)),
+            ("tomorrow", iso(today + datetime.timedelta(days=1))),
+            ("in 3 days", iso(today + datetime.timedelta(days=3))),
+            ("next Monday", iso(monday_of(today)
+                                + datetime.timedelta(days=7))),
+            ("end of this sprint", iso(end)),
+            ("clear the date", ""),
+        ]
+        self.at = 0
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="box"):
+            yield Static(f"[{C['accent']}]󰃭  Due date[/]\n"
+                         f"[{C['subtext']}]{self.title_text}[/]\n")
+            for i, (label, val) in enumerate(self.opts):
+                yield Static(f"{label}"
+                             + (f"   [{C['subtext']}]{val}[/]" if val else ""),
+                             classes="opt", id=f"opt-{i}")
+            yield Static(f"\n[{C['subtext']}]↑↓ then Enter · click one · "
+                         f"Esc cancels[/]")
+
+    def on_mount(self):
+        self._mark()
+
+    def _mark(self):
+        for i in range(len(self.opts)):
+            self.query_one(f"#opt-{i}").set_class(i == self.at, "-on")
+
+    def action_move(self, by):
+        self.at = (self.at + by) % len(self.opts)
+        self._mark()
+
+    def action_choose(self):
+        self.dismiss(self.opts[self.at][1])
+
+    def on_click(self, event):
+        w = getattr(event, "widget", None)
+        if w is not None and w.id and w.id.startswith("opt-"):
+            self.dismiss(self.opts[int(w.id.split("-")[1])][1])
+
+    def action_dismiss_none(self):
+        self.dismiss(None)
 
 
 class Board(App):
@@ -209,6 +326,7 @@ class Board(App):
     Screen {{ background: {C['base']}; color: {C['text']}; }}
     #hdr {{ height: 1; padding: 0 2; color: {C['accent']}; }}
     #stats {{ height: 1; padding: 0 2; color: {C['subtext']}; }}
+    #ctx {{ height: 1; padding: 0 2; color: {C['subtext']}; }}
     Tabs {{ background: transparent; }}
     Tab {{ color: {C['subtext']}; }}
     Tab.-active {{ color: {C['accent']}; text-style: bold; }}
@@ -220,9 +338,20 @@ class Board(App):
                            background: {C['accent']} 22%; }}
     Tabs:focus .underline--bar {{ background: {C['surface']}; }}
     TabPane {{ padding: 0; }}
-    #cols {{ height: 1fr; }}
+    .cols {{ height: 1fr; }}
+    /* eight columns share a width that fits four. Give the days a real
+       width and let the row scroll — a title chopped to one letter per
+       line is not a card. */
+    .weekcols {{ height: 1fr; overflow-x: auto; scrollbar-size-horizontal: 1;
+                 scrollbar-background: {C['base']};
+                 scrollbar-color: {C['surface']}; }}
+    .wcol {{ width: 24; }}
+    /* every undated task lives here until you drop it on a day, so it
+       carries the most text of the eight */
+    #wcol-none {{ width: 32; }}
     .col {{ width: 1fr; border: round {C['surface']}; margin: 0 1; }}
     .col.-drop {{ border: round {C['accent']}; background: {C['accent']} 12%; }}
+    .col.-today {{ border: round {C['yellow']}; }}
     .coltitle {{ padding: 0 1; color: {C['accent']}; height: 1; }}
     .cards {{ height: 1fr; padding: 0 1 1 1;
               scrollbar-size-vertical: 1;
@@ -236,28 +365,38 @@ class Board(App):
     /* the card you are carrying: still visible, clearly lifted off */
     .card.-dragging {{ border: round {C['accent']};
                        background: {C['accent']} 30%; text-style: dim; }}
+    .sect {{ padding: 1 1 0 1; height: auto; color: {C['accent']}; }}
     #msg {{ padding: 0 2; height: auto; color: {C['yellow']}; }}
     #setup {{ padding: 2 4; }}
     """
     BINDINGS = [
         Binding("enter", "tick", "Tick off", show=True),
         Binding("space", "tick", "Tick off", show=False),
-        Binding("right_square_bracket", "shift(1)", "→ column", show=True),
-        Binding("left_square_bracket", "shift(-1)", "← column", show=True),
-        Binding("plus,equals_sign", "habit(1)", "Habit ＋", show=True),
-        Binding("minus", "habit(-1)", "Habit −", show=True),
-        Binding("1", "goto_tab('tab-todos')", "To-Dos", show=True),
-        Binding("2", "goto_tab('tab-dailies')", "Dailies", show=True),
-        Binding("3", "goto_tab('tab-habits')", "Habits", show=True),
+        Binding("d", "due", "Due date", show=True),
+        Binding("right_square_bracket", "shift(1)", "→ col", show=True),
+        Binding("left_square_bracket", "shift(-1)", "← col", show=True),
+        Binding("greater_than_sign,period", "step(1)", "next", show=True),
+        Binding("less_than_sign,comma", "step(-1)", "prev", show=True),
+        Binding("plus,equals_sign", "habit(1)", "Habit ＋", show=False),
+        Binding("minus", "habit(-1)", "Habit −", show=False),
+        Binding("1", "goto_tab('tab-today')", "Today", show=True),
+        Binding("2", "goto_tab('tab-todos')", "To-Dos", show=True),
+        Binding("3", "goto_tab('tab-sprint')", "Sprint", show=True),
+        Binding("4", "goto_tab('tab-week')", "Week", show=True),
+        Binding("5", "goto_tab('tab-dailies')", "Dailies", show=False),
+        Binding("6", "goto_tab('tab-habits')", "Habits", show=False),
         Binding("r", "reload", "Refresh", show=True),
         Binding("q,escape", "quit", "Close", show=True),
     ]
 
     def __init__(self):
         super().__init__()
-        self.cols = {}
+        self.data = {}
         self._hover = None
+        self.sprint = H.current_sprint()
+        self.week = monday_of(datetime.date.today())
 
+    # ---------- layout ----------
     def compose(self) -> ComposeResult:
         yield Static("", id="hdr")
         yield Static("", id="stats")
@@ -272,15 +411,36 @@ class Board(App):
                 f"dotfiles repo.[/]", id="setup")
             yield Footer()
             return
-        with TabbedContent(id="tabs", initial="tab-todos"):
+        yield Static("", id="ctx")
+        with TabbedContent(id="tabs", initial="tab-today"):
+            with TabPane("󰃭  Today", id="tab-today"):
+                yield VerticalScroll(classes="cards", id="lv-today")
             with TabPane("󰄲  To-Dos", id="tab-todos"):
-                with Horizontal(id="cols"):
+                with Horizontal(classes="cols"):
                     for key, title in COLUMNS:
                         with Vertical(classes="col", id=f"col-{key}"):
                             yield Static(title, classes="coltitle",
                                          id=f"t-{key}")
-                            yield VerticalScroll(classes="cards",
-                                                 id=f"lv-{key}")
+                            yield DropZone(f"col:{key}", classes="cards",
+                                           id=f"lv-{key}")
+            with TabPane("󰓾  Sprint", id="tab-sprint"):
+                with Horizontal(classes="cols"):
+                    for key, title in SPRINT_COLUMNS:
+                        with Vertical(classes="col", id=f"scol-{key}"):
+                            yield Static(title, classes="coltitle",
+                                         id=f"st-{key}")
+                            yield DropZone(f"sprint:{key}", classes="cards",
+                                           id=f"slv-{key}")
+            with TabPane("󰸗  Week", id="tab-week"):
+                with Horizontal(classes="weekcols"):
+                    with Vertical(classes="col wcol", id="wcol-none"):
+                        yield Static("󰅖  No date", classes="coltitle",
+                                     id="wt-none")
+                        yield DropZone("due:", classes="cards", id="wlv-none")
+                    for i in range(7):
+                        with Vertical(classes="col wcol", id=f"wcol-{i}"):
+                            yield Static("", classes="coltitle", id=f"wt-{i}")
+                            yield DropZone("", classes="cards", id=f"wlv-{i}")
             with TabPane("󰃭  Dailies", id="tab-dailies"):
                 yield VerticalScroll(classes="cards", id="lv-dailies")
             with TabPane("󰓾  Habits", id="tab-habits"):
@@ -291,9 +451,8 @@ class Board(App):
     def on_mount(self):
         self.query_one("#hdr", Static).update(
             f"[bold {C['accent']}]󰄲  Habitica board[/]"
-            f"   [{C['subtext']}]drag a card, or [ ] to move it · "
-            f"Enter or double-click ticks · 1 2 3 tabs · r refresh · "
-            f"q closes[/]")
+            f"   [{C['subtext']}]drag a card · Enter or double-click ticks · "
+            f"d sets a due date · 1…6 tabs · r refresh · q closes[/]")
         if secrets.configured("habitica", "user_id", "api_token"):
             self.run_worker(self.reload(), exclusive=True)
             # Habitica allows roughly 30 requests a minute and one refresh
@@ -313,6 +472,10 @@ class Board(App):
         except Exception:
             pass
 
+    def _todos(self):
+        return (self.data.get("todo", []) + self.data.get("doing", [])
+                + self.data.get("done", []))
+
     async def reload(self, fresh=True):
         try:
             data = await self._thread(lambda: H.board(fresh=fresh))
@@ -323,12 +486,25 @@ class Board(App):
         except Exception as e:                      # never take the UI down
             self.say(f"󰀦  {e}", "red")
             return
-        self.cols = data
+        self.data = data
         self.query_one("#stats", Static).update(
             f"[{C['green']}]lv {st['level']}[/]  "
             f"[{C['red']}]{st['hp']}/{st['maxhp']} hp[/]  "
             f"[{C['yellow']}]{st['gold']} gp[/]  "
             f"[{C['subtext']}]{st['exp']}/{st['next']} xp[/]")
+        await self.repaint()
+        n = len(self._todos())
+        dl = data.get("dailies", [])
+        done = sum(1 for d in dl if d.get("completed"))
+        self.say(f"{n} to-dos · {done}/{len(dl)} dailies done today · "
+                 f"{len(data.get('habits', []))} habits   ·   refreshed "
+                 f"{datetime.datetime.now().strftime('%H:%M:%S')}, again in "
+                 f"{REFRESH_SECS // 60} min (r for now)")
+
+    async def repaint(self):
+        """Every tab, from self.data — no network. The sprint picker and
+        the week arrows both just change what this draws."""
+        data = self.data
         for key, title in COLUMNS:
             items = data.get(key, [])
             self.query_one(f"#t-{key}", Static).update(
@@ -336,20 +512,90 @@ class Board(App):
             await self._fill(
                 f"#lv-{key}", items,
                 note=("Habitica hands back roughly the last 30 finished "
-                      "to-dos — this is recent history, not everything."
+                      "to-dos — recent history, not everything."
                       if key == "done" and items else ""))
-        await self._fill("#lv-dailies", data.get("dailies", []))
+        await self._paint_sprint()
+        await self._paint_week()
+        await self._paint_today()
+        await self._fill("#lv-dailies", data.get("dailies", []),
+                         draggable=False)
         await self._fill("#lv-habits", data.get("habits", []),
                          draggable=False)
-        dl, hb = data.get("dailies", []), data.get("habits", [])
-        done = sum(1 for d in dl if d.get("completed"))
-        n = sum(len(data.get(k, [])) for k, _ in COLUMNS)
-        from datetime import datetime
-        self.say(f"{n} to-dos · {done}/{len(dl)} dailies done today · "
-                 f"{len(hb)} habits   ·   refreshed "
-                 f"{datetime.now().strftime('%H:%M:%S')}, again in "
-                 f"{REFRESH_SECS // 60} min (r for now)")
+        self._paint_context()
         self._focus_visible_card()
+
+    async def _paint_sprint(self):
+        buckets = {k: [] for k, _t in SPRINT_COLUMNS}
+        for t in self._todos():
+            col = H.board_column(t, self.sprint)
+            if col:
+                buckets[col].append(t)
+        for key, title in SPRINT_COLUMNS:
+            self.query_one(f"#st-{key}", Static).update(
+                f"{title}  [{C['subtext']}]{len(buckets[key])}[/]")
+            await self._fill(f"#slv-{key}", buckets[key])
+
+    async def _paint_week(self):
+        today = datetime.date.today()
+        by_day, undated = {}, []
+        for t in self._todos():
+            if t.get("completed"):
+                continue
+            if not t.get("due"):
+                undated.append(t)
+                continue
+            by_day.setdefault(t["due"], []).append(t)
+        self.query_one("#wt-none", Static).update(
+            f"󰅖  No date  [{C['subtext']}]{len(undated)}[/]")
+        await self._fill("#wlv-none", undated)
+        for i in range(7):
+            d = self.week + datetime.timedelta(days=i)
+            items = by_day.get(iso(d), [])
+            self.query_one(f"#wlv-{i}", DropZone).key = f"due:{iso(d)}"
+            self.query_one(f"#wcol-{i}").set_class(d == today, "-today")
+            mark = "●" if d == today else " "
+            self.query_one(f"#wt-{i}", Static).update(
+                f"[{C['yellow'] if d == today else C['accent']}]{mark}"
+                f"{DAYS[i]} {d.day:02d}[/]  [{C['subtext']}]{len(items)}[/]")
+            await self._fill(f"#wlv-{i}", items)
+
+    async def _paint_today(self):
+        today = iso(datetime.date.today())
+        overdue, due, doing = [], [], []
+        for t in self._todos():
+            if t.get("completed"):
+                continue
+            if t.get("doing"):
+                doing.append(t)
+            if not t.get("due"):
+                continue
+            if t["due"] < today:
+                overdue.append(t)
+            elif t["due"] == today:
+                due.append(t)
+        overdue.sort(key=lambda t: t["due"])
+        dl = self.data.get("dailies", [])
+        box = self.query_one("#lv-today", VerticalScroll)
+        await box.remove_children()
+        done_n = sum(1 for d in dl if d.get("completed"))
+        blocks = [("󰀦  Overdue", overdue, "red", str(len(overdue))),
+                  ("󰃭  Due today", due, "yellow", str(len(due))),
+                  ("󰥔  Doing", doing, "accent", str(len(doing))),
+                  ("󰄰  Dailies", dl, "accent", f"{done_n}/{len(dl)} today")]
+        empty = True
+        for title, items, ink, count in blocks:
+            if not items:
+                continue
+            empty = False
+            await box.mount(Static(f"[bold {C[ink]}]{title}[/]  "
+                                   f"[{C['subtext']}]{count}[/]",
+                                   classes="sect"))
+            await box.mount_all([Card(t, self, draggable=False)
+                                 for t in items])
+        if empty:
+            await box.mount(Static(
+                f"[{C['green']}]nothing overdue, nothing due today, "
+                f"no dailies left.[/]"))
 
     async def _fill(self, sel, items, draggable=True, note=""):
         box = self.query_one(sel, VerticalScroll)
@@ -361,78 +607,184 @@ class Board(App):
         if note:
             await box.mount(Static(f"[{C['subtext']}]{note}[/]"))
 
+    def _paint_context(self):
+        """The one line that says what the visible tab is showing.
+
+        NOT _context(): App._context() is Textual's own and shadowing it
+        crashes the app before it draws anything. Third time this class of
+        bug has bitten here, after Widget._render() and ListItem.task."""
+        tab = self._tab()
+        if tab == "tab-sprint":
+            a, b = H.sprint_dates(self.sprint)
+            span = (f"{a.strftime('%d %b')} – {b.strftime('%d %b')}"
+                    if a else "no dates")
+            known = self.data.get("sprints", [])
+            live = ("" if self.sprint in known else
+                    "  (not started — move a card out of Backlog to start)")
+            txt = (f"[{C['accent']}]󰓾 {self.sprint}[/]  "
+                   f"[{C['subtext']}]{span}{live}  ·  < > other sprints[/]")
+        elif tab == "tab-week":
+            end = self.week + datetime.timedelta(days=6)
+            txt = (f"[{C['accent']}]󰸗 {self.week.strftime('%d %b')} – "
+                   f"{end.strftime('%d %b %Y')}[/]  "
+                   f"[{C['subtext']}]drop a card on a day to set its due "
+                   f"date  ·  < > other weeks[/]")
+        elif tab == "tab-today":
+            txt = (f"[{C['subtext']}]"
+                   f"{datetime.date.today().strftime('%A %d %B %Y')}[/]")
+        else:
+            txt = ""
+        try:
+            self.query_one("#ctx", Static).update(txt)
+        except Exception:
+            pass
+
+    def _tab(self):
+        try:
+            return self.query_one("#tabs", TabbedContent).active
+        except Exception:
+            return ""
+
     # ---------- drag and drop ----------
-    def column_at(self, x, y):
-        for key, _t in COLUMNS:
+    def zone_at(self, x, y):
+        for z in self.query(DropZone):
+            if not z.key or not z.display:
+                continue
             try:
-                if self.query_one(f"#col-{key}").region.contains(x, y):
-                    return key
+                if z.parent.region.contains(x, y):
+                    return z
             except Exception:
                 continue
         return None
 
-    def hover_column(self, key):
+    def hover_zone(self, zone):
+        key = zone.key if zone is not None else None
         if key == self._hover:
             return
         self._hover = key
-        for k, _t in COLUMNS:
+        for z in self.query(DropZone):
             try:
-                self.query_one(f"#col-{k}").set_class(k == key, "-drop")
+                z.parent.set_class(z is zone, "-drop")
             except Exception:
                 pass
 
-    def move_card(self, card, key):
-        task = card.todo
-        if task.get("col") == key:
-            return
-        self.run_worker(self._move(card, key), exclusive=True)
+    def drop_card(self, card, key):
+        kind, _, val = key.partition(":")
+        if kind == "due":
+            self.run_worker(self._set_due(card, val), exclusive=True)
+        elif kind == "sprint":
+            self.run_worker(self._move(card, val, sprint=self.sprint),
+                            exclusive=True)
+        elif kind == "col":
+            self.run_worker(self._move(card, val), exclusive=True)
 
-    async def _move(self, card, key):
+    async def _move(self, card, key, sprint=""):
         task = card.todo
+        if task.get("kind") != "todo":
+            self.say("only a To-Do moves between columns")
+            return
+        if not sprint and task.get("col") == key:
+            return
         title = emoji(task.get("text") or "")[:38]
-        label = dict(COLUMNS)[key].split("  ")[-1]
-        # move it NOW so the gesture lands, then reconcile with Habitica —
-        # a card that hangs in place for a second reads as a failed drag
-        try:
-            box = self.query_one(f"#lv-{key}", VerticalScroll)
-            await card.remove()
-            new = Card({**task, "col": key}, self)
-            await box.mount(new)
-            new.focus()
-            card = new
-        except Exception:
-            pass
+        label = dict(SPRINT_COLUMNS)[key].split("  ")[-1]
         self.say(f"moving “{title}” → {label}…")
         try:
-            said = await self._thread(lambda: H.set_column(task, key))
+            said = await self._thread(
+                lambda: H.set_column(task, key, sprint))
         except H.HabiticaError as e:
             self.say(f"󰀦  {e}", "red")
             await self.reload(fresh=True)       # put it back where it lives
             return
-        # no reload: the card has already moved and Habitica has agreed.
-        # A refresh here would spend five more of the ~30 requests a minute
-        # Habitica allows, and three drags in a row would hit the wall.
-        card.todo["col"] = key
-        card.todo["completed"] = (key == "done")
-        card.todo["doing"] = (key == "doing")
-        self._recount()
+        # keep the local copy honest, then redraw every tab from it — no
+        # refetch, because Habitica allows ~30 requests a minute and one
+        # refresh spends five
+        task["col"] = "todo" if key == "backlog" else key
+        task["completed"] = (key == "done")
+        task["doing"] = (key == "doing")
+        if sprint:
+            sp = set(task.get("sprints") or [])
+            sp.discard(sprint) if key == "backlog" else sp.add(sprint)
+            task["sprints"] = sorted(sp)
+            if sprint not in self.data.get("sprints", []):
+                self.data.setdefault("sprints", []).append(sprint)
+        self._rebucket(task)
+        await self.repaint()
         self.say(f"“{title}” → {label} — {said}", "green")
 
-    def _recount(self):
-        """Column headers, counted from what is actually on screen — the
-        board no longer refetches after every move."""
-        for key, title in COLUMNS:
-            try:
-                n = len(self.query(f"#lv-{key} Card"))
-                self.query_one(f"#t-{key}", Static).update(
-                    f"{title}  [{C['subtext']}]{n}[/]")
-            except Exception:
-                pass
+    async def _set_due(self, card, date):
+        task = card.todo
+        if task.get("kind") != "todo":
+            self.say("only a To-Do has a due date")
+            return
+        if (task.get("due") or "") == date:
+            return
+        title = emoji(task.get("text") or "")[:38]
+        self.say(f"setting the date on “{title}”…")
+        try:
+            await self._thread(lambda: H.set_due(task["id"], date))
+        except H.HabiticaError as e:
+            self.say(f"󰀦  {e}", "red")
+            await self.reload(fresh=True)
+            return
+        task["due"] = date
+        await self.repaint()
+        self.say(f"“{title}” due {date or '— cleared'}", "green")
+
+    def _rebucket(self, task):
+        """self.data keeps to-dos in three lists; a move has to put the
+        task in the right one or the next repaint draws it twice."""
+        for k in ("todo", "doing", "done"):
+            self.data[k] = [t for t in self.data.get(k, [])
+                            if t.get("id") != task.get("id")]
+        self.data.setdefault(task["col"], []).append(task)
 
     # ---------- keyboard ----------
     def _focused_card(self):
         w = self.focused
         return w if isinstance(w, Card) else None
+
+    def _pane_of(self, widget):
+        node = widget
+        while node is not None:
+            if isinstance(node, TabPane):
+                return node.id
+            node = node.parent
+        return None
+
+    def _focus_visible_card(self):
+        # It is not enough that the focused card still has a region — a
+        # card in a hidden pane does. TabbedContent activates whichever
+        # pane holds focus, so leaving focus behind snapped the tab
+        # straight back and 5 and 6 looked like dead keys.
+        if isinstance(self.focused, Card) \
+                and self._pane_of(self.focused) == self._tab():
+            return
+        sel = {"tab-today": "#lv-today", "tab-todos": "#lv-todo",
+               "tab-sprint": "#slv-backlog", "tab-week": "#wlv-none",
+               "tab-dailies": "#lv-dailies",
+               "tab-habits": "#lv-habits"}.get(self._tab())
+        if not sel:
+            return
+        cards = self.query(f"{sel} Card")
+        if not cards and self._tab() == "tab-sprint":
+            cards = self.query("#slv-todo Card")
+        if cards:
+            # scroll_visible would drag the list past the section heading
+            # the card sits under, which reads as a missing heading
+            cards.first().focus(scroll_visible=False)
+
+    def action_goto_tab(self, tab_id):
+        try:
+            self.query_one("#tabs", TabbedContent).active = tab_id
+        except Exception:
+            pass
+
+    def on_tabbed_content_tab_activated(self, event):
+        """Focus the new tab's first card. Without this the tab changes but
+        focus stays behind on a widget that is no longer visible, so Enter
+        does nothing at all and says nothing about why."""
+        self._paint_context()
+        self.call_after_refresh(self._focus_visible_card)
 
     def action_shift(self, by):
         card = self._focused_card()
@@ -440,11 +792,38 @@ class Board(App):
             self.say("focus a To-Do card first — [ ] moves it between "
                      "columns")
             return
-        keys = [k for k, _t in COLUMNS]
-        i = keys.index(card.todo.get("col", "todo")) + by
+        sprint = self.sprint if self._tab() == "tab-sprint" else ""
+        cols = SPRINT_COLUMNS if sprint else COLUMNS
+        keys = [k for k, _t in cols]
+        now = H.board_column(card.todo, sprint)
+        i = (keys.index(now) if now in keys else 0) + by
         if not 0 <= i < len(keys):
             return
-        self.move_card(card, keys[i])
+        self.run_worker(self._move(card, keys[i], sprint=sprint),
+                        exclusive=True)
+
+    def action_step(self, by):
+        """< and > mean "the one before/after this", whatever the tab is
+        showing — a sprint on the sprint board, a week on the week view."""
+        tab = self._tab()
+        if tab == "tab-week":
+            self.week += datetime.timedelta(days=7 * by)
+            self.run_worker(self._repaint_only(), exclusive=True)
+        elif tab == "tab-sprint":
+            known = sorted(set(self.data.get("sprints", []))
+                           | {H.current_sprint(), self.sprint})
+            i = known.index(self.sprint) + by
+            if 0 <= i < len(known):
+                self.sprint = known[i]
+                self.run_worker(self._repaint_only(), exclusive=True)
+            else:
+                self.say("no sprint " + ("after" if by > 0 else "before")
+                         + " this one")
+        else:
+            self.say("< and > move between sprints and weeks")
+
+    async def _repaint_only(self):
+        await self.repaint()
 
     def action_tick(self):
         card = self._focused_card()
@@ -459,10 +838,14 @@ class Board(App):
     def tick_card(self, card):
         t = card.todo
         if t.get("kind") == "todo":
-            if t.get("col") == "done":
+            if t.get("completed"):
                 self.say("already done — [ moves it back")
                 return
-            self.move_card(card, "done")
+            self.run_worker(
+                self._move(card, "done",
+                           sprint=(self.sprint
+                                   if self._tab() == "tab-sprint" else "")),
+                exclusive=True)
             return
         if t.get("kind") == "habit":
             self.run_worker(self._score(t, "up"), exclusive=True)
@@ -471,6 +854,18 @@ class Board(App):
             self.say("already done today — untick it in Habitica")
             return
         self.run_worker(self._score(t, "up"), exclusive=True)
+
+    def action_due(self):
+        card = self._focused_card()
+        if card is None or card.todo.get("kind") != "todo":
+            self.say("focus a To-Do card first — d sets its due date")
+            return
+
+        def done(date):
+            if date is not None:
+                self.run_worker(self._set_due(card, date), exclusive=True)
+        self.push_screen(DuePicker(emoji(card.todo.get("text") or "")[:44]),
+                         done)
 
     def action_habit(self, direction):
         card = self._focused_card()
@@ -505,37 +900,6 @@ class Board(App):
                 c.todo.update(task)
                 c.refresh_face()
         self.say(f"“{title}” {'＋' if direction == 'up' else '−'}", "green")
-
-    def action_goto_tab(self, tab_id):
-        try:
-            self.query_one("#tabs", TabbedContent).active = tab_id
-        except Exception:
-            pass
-
-    def on_tabbed_content_tab_activated(self, event):
-        """Focus the new tab's first card. Without this the tab changes but
-        focus stays behind on a widget that is no longer visible, so Enter
-        does nothing at all and says nothing about why."""
-        self.call_after_refresh(self._focus_visible_card)
-
-    def _focus_visible_card(self):
-        if isinstance(self.focused, Card) and self.focused.display:
-            try:
-                if self.focused.region.area:
-                    return                 # still on screen: leave it alone
-            except Exception:
-                pass
-        try:
-            pane = self.query_one("#tabs", TabbedContent).active
-        except Exception:
-            return
-        sel = {"tab-todos": "#lv-todo", "tab-dailies": "#lv-dailies",
-               "tab-habits": "#lv-habits"}.get(pane)
-        if not sel:
-            return
-        cards = self.query(f"{sel} Card")
-        if cards:
-            cards.first().focus()
 
     def _auto_refresh(self):
         # never yank the board out from under a drag
