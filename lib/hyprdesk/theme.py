@@ -46,8 +46,16 @@ def colors():
         pass
     # derived ink hierarchy — keep in sync with card.lua M.colors()
     pal.setdefault("sub", _mix(pal["fg"], pal["bg"], 0.62))
-    pal.setdefault("good", "#8EC07C")
-    pal.setdefault("bad", "#E06C75")
+    # STATUS INK IS PINNED, NOT WALLPAPER-DERIVED.
+    # wallust maps wallpaper colours into ansi slots whose NAMES are a lie
+    # (@red has been a dark teal at 1.00:1 against the background). A state
+    # the user must be able to read cannot be left to that lottery, so
+    # good/bad/warn are constants everywhere on the machine — see
+    # ~/.config/wallust/templates/*.css, which emit the same three values
+    # into the GTK consumers.
+    pal.setdefault("good", "#8EC07C")   # 8.07:1 on the current ground
+    pal.setdefault("bad", "#E06C75")    # 5.31:1
+    pal.setdefault("warn", "#E0B25C")   # 9.06:1
     return pal
 
 

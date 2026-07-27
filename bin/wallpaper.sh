@@ -85,6 +85,9 @@ fi
 
 # --- recolor the desktop ---
 wallust run "$RECOLOR"
+# a new wallpaper can drop an unreadable colour into any ansi slot —
+# shout instead of shipping an invisible warning light
+"$HOME/.local/bin/check-contrast.sh" --quiet --notify || true
 hyprctl reload >/dev/null                       # window borders
 pkill -SIGUSR2 waybar 2>/dev/null || true       # waybar restyles in place
 swaync-client -rs 2>/dev/null || true           # swaync reloads css

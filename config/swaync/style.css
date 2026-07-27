@@ -29,7 +29,7 @@
   padding: 4px 10px;
 }
 .widget-title > button:hover {
-  background: @red;
+  background: @status-bad;
   color: @base;
 }
 
@@ -72,12 +72,12 @@
   border-radius: 999px;
 }
 .close-button:hover {
-  background: @red;
+  background: @status-bad;
   color: @base;
 }
 
 .notification.critical {
-  border: 1px solid @red;
+  border: 1px solid @status-bad;
 }
 
 .floating-notifications .notification {

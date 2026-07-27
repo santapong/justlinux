@@ -9,3 +9,13 @@
 @define-color yellow  {{color11}};
 @define-color magenta {{color10}};
 @define-color cyan    {{color14}};
+
+/* STATUS — pinned, NOT wallpaper-derived.
+   wallust's ansi slots are named after colours they are not: on
+   some wallpapers @red resolves to a dark teal measuring 1.00:1
+   against @base, i.e. invisible. Anything the user must be able
+   to READ uses these three instead. Keep in sync with
+   hyprdesk/theme.py. */
+@define-color status-good #8EC07C;
+@define-color status-bad  #E06C75;
+@define-color status-warn #E0B25C;

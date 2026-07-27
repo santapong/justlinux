@@ -38,14 +38,21 @@ window#waybar.hidden {
     padding: 0 10px;
 }
 
-#cpu      { color: @yellow; }
-#temperature { color: @magenta; }
-#temperature.critical { color: @red; }
-#memory   { color: @green; }
-#disk     { color: @cyan; }
-#network  { color: @cyan; }
-#pulseaudio { color: @magenta; }
-#clock    { color: @text; font-weight: bold; }
+/* Bar text uses @text / @subtext and the PINNED status trio — never a raw
+   ansi slot. Those slots are whatever wallust pulled out of the wallpaper:
+   on this very palette @red measures 1.00:1 and @magenta 1.80:1 against
+   @base, so #temperature and #pulseaudio were literally unreadable. A
+   module label is text the user has to read; it cannot ride a lottery.
+   Emphasis now comes from weight and the accent underline, not from
+   tinting each module a different unpredictable colour. */
+#cpu         { color: @subtext; }
+#temperature { color: @subtext; }
+#temperature.critical { color: @status-bad; font-weight: bold; }
+#memory      { color: @subtext; }
+#disk        { color: @subtext; }
+#network     { color: @subtext; }
+#pulseaudio  { color: @subtext; }
+#clock       { color: @text; font-weight: bold; }
 
 #custom-menu {
     color: @base;
@@ -73,8 +80,8 @@ window#waybar.hidden {
     padding: 0 8px;
     font-size: 15px;
 }
-#custom-firewall.on,  #custom-clamav.on  { color: @green; }
-#custom-firewall.off, #custom-clamav.off { color: @red; }
+#custom-firewall.on,  #custom-clamav.on  { color: @status-good; }
+#custom-firewall.off, #custom-clamav.off { color: @status-bad; }
 #custom-firewall:hover, #custom-clamav:hover {
     background: alpha(@accent, 0.25);
     border-radius: 6px;
@@ -102,11 +109,11 @@ window#waybar.hidden {
 }
 
 #custom-power {
-    color: @red;
+    color: @status-bad;
     padding: 0 12px;
     font-size: 15px;
 }
 #custom-power:hover {
-    background: alpha(@red, 0.25);
+    background: alpha(@status-bad, 0.25);
     border-radius: 6px;
 }
