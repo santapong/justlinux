@@ -667,8 +667,10 @@ def session_rows(clients=None):
         if not preview:
             continue                     # empty/aborted session: skip
         # past rows keep the DIRECTORY as their label — the studio tree
-        # groups projects by it, and the title is already in the detail
+        # groups projects by it. The title rides alongside for flat lists
+        # like the launcher, where 20 rows reading "~" help nobody.
         rows.append({"label": nice(cwd), "icon": "󰚩", "kind": "past",
                      "sid": f.stem, "cwd": cwd or home, "dir": nice(cwd),
+                     "title": session_title(f),
                      "detail": f"{ago(mtime)} — {preview}"})
     return rows

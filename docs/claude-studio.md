@@ -24,8 +24,10 @@ closing it would take the sidebar with it.
 | Key | Does |
 |---|---|
 | `Enter` | Open the highlighted conversation as its own tab |
+| `s` | Open it **beside** the one you are reading — two conversations, one screen |
 | `n` | New Claude session in the highlighted project's directory |
 | `t` | Plain terminal tab there — for the git/build/log half of the work |
+| `m` | The settings panel (MCP servers) as a tab |
 | `x` | Stop a 󰑮 background session (its transcript stays resumable) |
 | `r` | Refresh the tree |
 | `q` | Close the whole studio |
@@ -49,6 +51,8 @@ the directory. Before that, every session in `$HOME` opened a tab called
 `santapong` and the close buttons were a guessing game.
 
 - **✕** on a tab closes it. Middle-click anywhere on the tab does the same.
+- A tab holding several panes shows `·N` — its name only ever describes
+  the first one.
 - Closing a tab ends the *terminal*, not the conversation — it is still in
   the tree, still resumable.
 
@@ -73,6 +77,14 @@ a shell in the same repo.
 Splits inherit the current pane's directory, so a split next to a session
 lands in that session's repo.
 
+**`s` in the tree is the one you want for two conversations at once.** A
+bare split gives you a shell; `s` splits the tab you were last reading and
+runs `claude --resume` in the new pane, so the two sit side by side. If
+that conversation is already open it focuses its tab instead — a second
+`claude --resume` on one conversation is the duplicate the tab path
+already refuses. With nothing but the tree open there is nothing to sit
+beside, so it opens a tab.
+
 **The pane title line only appears once a window actually has two panes.**
 A `window-layout-changed` hook turns `pane-border-status` on and off, so a
 single-pane tab loses no rows. (`pane-exited` was tried first — it does not
@@ -82,6 +94,17 @@ fire for `kill-pane`.)
 tab 0 is selected opens a terminal *tab* instead: the tree is a Textual app
 that owns its whole window. That decision lives in `--split`, which the
 tab-bar buttons route through.
+
+## Why MCP settings are not a Studio feature
+
+The studio has no settings framework — it is a tmux session whose tab 0
+happens to run a Textual tree. Hypr Settings is the one with the sidebar,
+the panes and the `Card` class. Building a second settings surface inside
+the studio would mean maintaining two.
+
+But a studio tab is just a tmux window, and Hypr Settings is a terminal
+app like the sidebar — so `m` runs `hypr-settings integrations` as a tab.
+Same panel, same code, reachable without leaving the studio.
 
 ## Theme
 

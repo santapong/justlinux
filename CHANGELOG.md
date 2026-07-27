@@ -26,10 +26,25 @@ versioning is [SemVer](https://semver.org/spec/v2.0.0.html).
   An `https://` target is added as HTTP transport, anything else as a stdio
   command. The command field has a paste button, because `Ctrl+V` belongs
   to the terminal emulator and never reaches a TUI.
+- **`s` — open a conversation beside the one you are reading.** The point
+  of splits here: a bare split gives a shell, `s` runs `claude --resume` in
+  the new pane, so two conversations sit side by side. Already open, and it
+  focuses that tab instead of resuming a second copy.
+- **`m` — the settings panel as a Studio tab**, so MCP servers are
+  reachable without leaving the studio. A tab is just a tmux window and
+  Hypr Settings is a terminal app, so this is the same panel rather than a
+  second settings framework built inside the studio.
+- A tab holding several panes shows `·N` in the bar.
 - `docs/claude-studio.md`.
 
 ### Fixed
 
+- **A tab took the name of the wrong conversation** once it held two. The
+  rename walked every pane, so whichever it reached last won; a tab's
+  identity is its first pane.
+- **Names could render blank in the launcher.** The detail column was
+  `width: auto` against a `1fr` name, so a long detail starved the name to
+  nothing — two rows had no name at all. The name keeps its share now.
 - **Live sessions listed as `~`.** The session tree and the launcher named a
   running conversation by its directory, so everything started in `$HOME`
   read as `~` and told you nothing. They now use Claude's own title, with
@@ -37,7 +52,8 @@ versioning is [SemVer](https://semver.org/spec/v2.0.0.html).
   conversation a process is actually on — argv first, then time-paired
   transcripts — was worked out in the office and now lives in
   `claudesessions.py` where every session list can reach it, rather than
-  being duplicated.
+  being duplicated. Resumable rows carry their title too, so the launcher's
+  flat list no longer shows twenty rows reading `~`.
 
 ## [1.0.0] — 2026-07-27
 

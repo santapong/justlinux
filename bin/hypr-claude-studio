@@ -7,8 +7,10 @@ One kitty window running a tmux session:
   · TAB 0 "sessions": an expandable tree of conversations — 🟢 running,
     then projects → their resumable transcripts
   · Enter opens a session as its own tab (`claude --resume`); if it is
-    already open its tab is focused instead; n = new session in the
-    highlighted project; t = plain terminal there; r = refresh
+    already open its tab is focused instead; s opens it BESIDE the one
+    you are reading (two conversations, one screen); n = new session in
+    the highlighted project; t = plain terminal there; m = the settings
+    panel (MCP servers) as a tab; r = refresh
   · SPLITS: any tab holds several panes — C-b | side by side, C-b - stacked
     (C-b arrows to move between them, C-b z to zoom one full-screen), or
     click the | and — buttons at the right of the tab bar
@@ -33,6 +35,10 @@ KITTY_CLASS = "hyprclaudestudio"
 # window so the click handler knows WHICH tab the ✕ belonged to.
 CLOSE_X = ("#{?#{!=:#{window_index},0},"
            "#[range=user|x#{window_index}]✕#[norange],}")
+# a tab holding several panes shows its count — the name only ever
+# describes the first one
+# ⊞ was tried and sat next to the ✕ looking like a second button
+PANE_N = "#{?#{>:#{window_panes},1},·#{window_panes} ,}"
 # the two split buttons live in status-right, so they are not part of any
 # window's range and act on whatever tab is currently selected
 # the labels ARE the prefix keys that do the same thing, so the tab bar
@@ -129,10 +135,11 @@ def style_tmux():
         ("bind-key", "Right", "select-pane", "-R"),
         ("bind-key", "Up", "select-pane", "-U"),
         ("bind-key", "Down", "select-pane", "-D"),
-        ("set", "-g", "window-status-format", f" #I #W {CLOSE_X} "),
+        ("set", "-g", "window-status-format",
+         f" #I #W {PANE_N}{CLOSE_X} "),
         ("set", "-g", "window-status-current-format",
-         f"#[bg={acc},fg={bg},bold] #I #W {CLOSE_X}#[bg={acc},fg={bg}] "
-         "#[default]"),
+         f"#[bg={acc},fg={bg},bold] #I #W {PANE_N}{CLOSE_X}"
+         f"#[bg={acc},fg={bg}] #[default]"),
         ("set", "-g", "window-status-separator", ""),
         # browser-style tabs: click the ✕ to close one, middle-click
         # anywhere on the tab for the same thing. Left-click elsewhere
@@ -178,11 +185,17 @@ def rename_open_tabs():
     uuid = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
                       r"[0-9a-f]{4}-[0-9a-f]{12}")
     for line in tmux("list-panes", "-s", "-F",
-                     "#{window_index}|#{pane_current_path}|"
+                     "#{window_index}|#{pane_index}|#{pane_current_path}|"
                      "#{pane_start_command}", out=True).splitlines():
         idx, _, rest = line.partition("|")
+        pane, _, rest = rest.partition("|")
         cwd, _, cmd = rest.partition("|")
         if idx == "0":
+            continue
+        # a tab's identity is its FIRST pane. Without this, opening a
+        # second conversation beside the first renamed the whole tab to
+        # whichever pane the loop happened to reach last.
+        if pane != "0":
             continue
         m = uuid.search(cmd or "")
         if not m:
@@ -209,6 +222,61 @@ def new_session_tab(cwd):
     name = os.path.basename(cwd.rstrip("/")) or "~"
     tmux("new-window", "-t", f"{TMUX_SESSION}:", "-n", name, "-c", cwd,
          "claude")
+
+
+def _work_window():
+    """The tab a split should land in: the selected one, or the last one
+    you looked at. Never window 0 — the sidebar is a Textual app that owns
+    its whole window. None when the studio holds nothing but the tree."""
+    idx = tmux("display-message", "-p", "#{window_index}", out=True).strip()
+    if idx and idx != "0":
+        return idx
+    prev = tmux("display-message", "-p", "-t", "!", "#{window_index}",
+                out=True).strip()
+    if prev and prev != "0":
+        return prev
+    others = [l for l in tmux("list-windows", "-F", "#{window_index}",
+                              out=True).split() if l != "0"]
+    return others[-1] if others else None
+
+
+def open_session_beside(entry):
+    """Two conversations on screen at once — the reason splits exist here.
+    Returns what it did so the sidebar can say so."""
+    sid, cwd = entry["sid"], entry["cwd"]
+    for line in tmux("list-panes", "-s", "-F",
+                     "#{window_index}|#{pane_start_command}",
+                     out=True).splitlines():
+        idx, _, cmd = line.partition("|")
+        if sid in cmd:
+            # a second `claude --resume` on one conversation is the
+            # duplicate the tab path already refuses
+            tmux("select-window", "-t", idx)
+            return "focused"
+    target = _work_window()
+    if target is None:
+        open_session_tab(entry)          # nothing to sit beside yet
+        return "tab"
+    tmux("split-window", "-h", "-t", f"{TMUX_SESSION}:{target}",
+         "-c", cwd, f"claude --resume {sid}")
+    tmux("select-window", "-t", target)
+    return "split"
+
+
+def open_settings_tab(page="integrations"):
+    """Settings is a Textual app like the sidebar, so it runs happily as a
+    tab. This is how MCP reaches the studio without the studio growing a
+    second settings framework of its own."""
+    for line in tmux("list-panes", "-s", "-F",
+                     "#{window_index}|#{pane_start_command}",
+                     out=True).splitlines():
+        idx, _, cmd = line.partition("|")
+        if "hypr-settings" in cmd:
+            tmux("select-window", "-t", idx)
+            return
+    tmux("new-window", "-t", f"{TMUX_SESSION}:", "-n", "󰌘 settings",
+         "-c", str(Path.home()),
+         f"python3 {Path.home()}/.local/bin/hypr-settings {page}")
 
 
 def new_term_tab(cwd):
@@ -247,7 +315,9 @@ def sidebar():
         BINDINGS = [
             Binding("enter", "open", "Open tab", show=True),
             Binding("n", "new", "New session here", show=True),
+            Binding("s", "beside", "Open beside", show=True),
             Binding("t", "term", "Terminal here", show=True),
+            Binding("m", "mcp", "MCP / settings", show=True),
             Binding("x", "kill_bg", "Stop bg job", show=True),
             Binding("r", "refresh", "Refresh", show=True),
             Binding("q", "quit_studio", "Close studio", show=True),
@@ -263,7 +333,7 @@ def sidebar():
         def compose(self) -> ComposeResult:
             yield Static(
                 f"[bold {pal['accent']}]󰚩 Sessions[/] — Enter opens a tab"
-                " · t = terminal · C-b | ─ splits · middle-click closes",
+                " · s = beside it · t = terminal · m = MCP · C-b | ─ splits",
                 id="hint")
             yield Tree("sessions", id="tree")
             yield Footer()
@@ -368,6 +438,19 @@ def sidebar():
         def action_new(self):
             data = self._current() or {}
             new_session_tab(data.get("cwd") or str(Path.home()))
+
+        def action_beside(self):
+            data = self._current() or {}
+            if data.get("kind") != "past" or not data.get("sid"):
+                self.notify("Highlight a conversation to open it beside "
+                            "the one you are reading")
+                return
+            what = open_session_beside(data)
+            if what == "focused":
+                self.notify("Already open — focused its tab instead")
+
+        def action_mcp(self):
+            open_settings_tab("integrations")
 
         def action_term(self):
             data = self._current() or {}

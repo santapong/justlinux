@@ -466,7 +466,16 @@ def claude_entries():
                 {"label": "~/RoboLLM", "icon": "󰚩", "kind": "past",
                  "sid": "fake", "cwd": "~",
                  "detail": "2h ago — hand_follow grip detection"}]
-    return _session_rows()
+    rows = _session_rows()
+    # a FLAT list needs the conversation's name up front — the directory
+    # label only earns its place in the studio's tree, which groups by it
+    for r in rows:
+        if r.get("title"):
+            r["label"] = r["title"]
+            if r.get("kind") == "past" and r.get("dir"):
+                ago, sep, rest = r["detail"].partition(" — ")
+                r["detail"] = f"{ago} · {r['dir']}{sep}{rest}"
+    return rows
 
 
 def recall_entries(query):
@@ -762,8 +771,13 @@ class HyprLauncher(App):
     ListItem Label {{ height: 1; }}
     ListItem.-highlight {{ background: {C['surface']};
                            border-left: thick {C['accent']}; }}
-    .item-label {{ width: 1fr; }}
-    .item-detail {{ width: auto; }}
+    /* the detail was width:auto against a 1fr label, so a long one
+       starved the name to nothing — two rows rendered with no name at
+       all. The name is the point of the row; it keeps its share. */
+    .item-label {{ width: 1fr; min-width: 22; height: 1;
+                   text-overflow: ellipsis; }}
+    .item-detail {{ width: auto; max-width: 62%; height: 1;
+                    text-overflow: ellipsis; }}
 
     .hint {{ color: {C['subtext']}; padding: 0 3; height: 1; }}
     #wp-actions {{ height: 3; padding: 0 2; }}
