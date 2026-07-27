@@ -47,6 +47,18 @@ versioning is [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Nothing could be ticked off after switching tabs.** `1 2 3` changed the
+  visible tab but left focus behind on a card that was no longer on screen,
+  so Enter did nothing — and said nothing about why. Switching tabs now
+  hands you the first card in the new one, and Enter with nothing selected
+  says so instead of silently doing nothing. A **double-click** also ticks a
+  card, so the mouse can finish a task and not just move one.
+- **The board never refreshed by itself.** Work ticked off on the phone
+  never appeared. It now refreshes every 2 minutes — one refresh costs five
+  of the ~30 requests a minute Habitica allows, so that is 2.5/min and
+  leaves the rest for what you do. The status line says when it last ran and
+  when it will run again; `r` is still immediate; a refresh never lands
+  mid-drag.
 - **The Habitica board could never show Done, and Doing was a fiction.**
   Two separate faults. `GET /tasks/user?type=todos` returns only the
   *unfinished* to-dos, so ticking one made it vanish from the board rather

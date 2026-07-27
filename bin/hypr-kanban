@@ -69,6 +69,7 @@ def read_colors():
 
 C = read_colors()
 COLUMNS = [("todo", "󰄰  To do"), ("doing", "󰥔  Doing"), ("done", "󰄲  Done")]
+REFRESH_SECS = 120
 # Habitica difficulty, in its own words: trivial · easy · medium · hard
 DIFF = [(2.0, "hard", "red"), (1.5, "medium", "yellow"),
         (1.0, "easy", "green"), (0.0, "trivial", "subtext")]
@@ -153,6 +154,13 @@ class Card(Static, can_focus=True):
 
     def refresh_face(self):
         self.update(self._face())
+
+    def on_click(self, event):
+        # a Static has no checkbox to aim at, so the tick is the gesture
+        # everyone already knows. Single click only focuses — ticking a
+        # task by brushing past it would be worse than not being able to.
+        if getattr(event, "chain", 1) >= 2:
+            self.board.tick_card(self)
 
     # ----- drag -----
     def on_mouse_down(self, event):
@@ -284,9 +292,15 @@ class Board(App):
         self.query_one("#hdr", Static).update(
             f"[bold {C['accent']}]󰄲  Habitica board[/]"
             f"   [{C['subtext']}]drag a card, or [ ] to move it · "
-            f"Enter ticks · 1 2 3 tabs · r refresh · q closes[/]")
+            f"Enter or double-click ticks · 1 2 3 tabs · r refresh · "
+            f"q closes[/]")
         if secrets.configured("habitica", "user_id", "api_token"):
             self.run_worker(self.reload(), exclusive=True)
+            # Habitica allows roughly 30 requests a minute and one refresh
+            # spends five, so a two-minute poll costs 2.5/min and leaves
+            # the rest for what you actually do. It also catches work you
+            # ticked off on your phone.
+            self.set_interval(REFRESH_SECS, self._auto_refresh)
 
     # ---------- data ----------
     async def _thread(self, fn):
@@ -330,12 +344,12 @@ class Board(App):
         dl, hb = data.get("dailies", []), data.get("habits", [])
         done = sum(1 for d in dl if d.get("completed"))
         n = sum(len(data.get(k, [])) for k, _ in COLUMNS)
+        from datetime import datetime
         self.say(f"{n} to-dos · {done}/{len(dl)} dailies done today · "
-                 f"{len(hb)} habits")
-        if self.focused is None:
-            first = self.query("#lv-todo Card")
-            if first:
-                first.first().focus()
+                 f"{len(hb)} habits   ·   refreshed "
+                 f"{datetime.now().strftime('%H:%M:%S')}, again in "
+                 f"{REFRESH_SECS // 60} min (r for now)")
+        self._focus_visible_card()
 
     async def _fill(self, sel, items, draggable=True, note=""):
         box = self.query_one(sel, VerticalScroll)
@@ -435,13 +449,23 @@ class Board(App):
     def action_tick(self):
         card = self._focused_card()
         if card is None:
+            # this was a silent no-op, which is exactly what "I can not
+            # mark it done" looks like from the outside
+            self.say("nothing is selected — click a card first, or use the "
+                     "arrow keys")
             return
+        self.tick_card(card)
+
+    def tick_card(self, card):
         t = card.todo
         if t.get("kind") == "todo":
             if t.get("col") == "done":
                 self.say("already done — [ moves it back")
                 return
             self.move_card(card, "done")
+            return
+        if t.get("kind") == "habit":
+            self.run_worker(self._score(t, "up"), exclusive=True)
             return
         if t.get("completed"):
             self.say("already done today — untick it in Habitica")
@@ -487,6 +511,38 @@ class Board(App):
             self.query_one("#tabs", TabbedContent).active = tab_id
         except Exception:
             pass
+
+    def on_tabbed_content_tab_activated(self, event):
+        """Focus the new tab's first card. Without this the tab changes but
+        focus stays behind on a widget that is no longer visible, so Enter
+        does nothing at all and says nothing about why."""
+        self.call_after_refresh(self._focus_visible_card)
+
+    def _focus_visible_card(self):
+        if isinstance(self.focused, Card) and self.focused.display:
+            try:
+                if self.focused.region.area:
+                    return                 # still on screen: leave it alone
+            except Exception:
+                pass
+        try:
+            pane = self.query_one("#tabs", TabbedContent).active
+        except Exception:
+            return
+        sel = {"tab-todos": "#lv-todo", "tab-dailies": "#lv-dailies",
+               "tab-habits": "#lv-habits"}.get(pane)
+        if not sel:
+            return
+        cards = self.query(f"{sel} Card")
+        if cards:
+            cards.first().focus()
+
+    def _auto_refresh(self):
+        # never yank the board out from under a drag
+        for c in self.query(Card):
+            if c._dragging:
+                return
+        self.run_worker(self.reload(), exclusive=True)
 
     def action_reload(self):
         self.say("refreshing…")
