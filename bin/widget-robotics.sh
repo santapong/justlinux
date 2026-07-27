@@ -85,11 +85,35 @@ else:
     for name, _state, status in bad[:3]:
         lines.append((f"󰡨 {name[:16]}", status[:14], "bad",
                       f"${{color5}}󰡨 {name[:16]}${{color}}"))  # twin: bad key
-    if up or not bad:
-        exited = len(dockers) - len(up) - len(bad)
-        summary = f"{len(up)} up" + (f" · {exited} stopped" if exited else "")
-        lines.append(("󰡨 docker", summary or "idle",
-                      "good" if up else "sub"))
+    # NAME what is running. "0 up · 12 stopped" is a true sentence that
+    # tells you nothing — on this bench ROS lives in containers, so which
+    # ones are up IS the bench state.
+    for name, _state, status in up[:3]:
+        lines.append((f"󰡨 {name[:16]}", status[:14] or "up", "good"))
+    if not up and not bad:
+        stopped = len(dockers) - len(up) - len(bad)
+        lines.append(("󰡨 docker", f"idle · {stopped} stopped"
+                      if stopped else "idle", "sub"))
+    elif len(up) > 3:
+        lines.append(("󰡨 docker", f"+{len(up) - 3} more up", "sub"))
+
+# --- ROS 2 bench: the images the ros2-* wrappers launch ---
+# There is no /opt/ros on this host; the bench is containerised, so the
+# honest question is "which bench images exist and is one live", not
+# "is ROS installed".
+try:
+    r = subprocess.run(["docker", "images", "--format",
+                        "{{.Repository}}:{{.Tag}}"],
+                       capture_output=True, text=True, timeout=4)
+    imgs = [i for i in r.stdout.split() if i.startswith("ros2-")] \
+        if r.returncode == 0 else []
+except Exception:
+    imgs = []
+if imgs:
+    live = [l[0] for l in (up if dockers else [])]
+    lines.append(("󰚩 ros2 bench",
+                  f"{len(imgs)} images" + (" · running" if live else " · idle"),
+                  "good" if live else "sub"))
 
 # --- CAN controller states ---
 try:

@@ -37,10 +37,43 @@ def git(repo, *args):
         return None
 
 
+MAX_REPOS = 7        # same reason as the markets card: a glance, not a table
+
+
+def ago(epoch):
+    """Relative age of the last commit — the signal this card was missing.
+    A repo you touched an hour ago and one you abandoned in March looked
+    identical before, both just '✓ clean'."""
+    try:
+        d = int(time.time() - int(epoch))
+    except (TypeError, ValueError):
+        return ""
+    if d < 3600:
+        return f"{max(1, d // 60)}m"
+    if d < 86400:
+        return f"{d // 3600}h"
+    if d < 86400 * 30:
+        return f"{d // 86400}d"
+    return f"{d // (86400 * 30)}mo"
+
+
 if FIELDS:
     lines, n = [], 0
-    for repo in repos:
+    dropped = max(0, len(repos) - MAX_REPOS)
+    for repo in repos[:MAX_REPOS]:
+        if not repo.exists():
+            # SAY it. A path typo used to vanish silently, which looks
+            # exactly like a repo that is fine.
+            lines += [f"repo.{n}.name={repo.name[:14] or '?'}",
+                      f"repo.{n}.branch=—",
+                      f"repo.{n}.state=no such path", f"repo.{n}.slot=bad"]
+            n += 1
+            continue
         if not (repo / ".git").exists():
+            lines += [f"repo.{n}.name={repo.name[:14]}",
+                      f"repo.{n}.branch=—",
+                      f"repo.{n}.state=not a git repo", f"repo.{n}.slot=sub"]
+            n += 1
             continue
         branch = git(repo, "rev-parse", "--abbrev-ref", "HEAD") or "?"
         dirty = len((git(repo, "status", "--porcelain") or "").splitlines())
@@ -57,10 +90,20 @@ if FIELDS:
         # good/bad are STATUS ONLY; a dirty-but-synced repo is prominent
         # (fg), not colored — accent2 is title ink, never a status
         slot = "bad" if behind != "0" else ("fg" if marks else "good")
+        last = ago(git(repo, "log", "-1", "--format=%ct"))
+        state = " ".join(marks) or "clean"
+        if last:
+            state = f"{state} · {last}"
         lines += [f"repo.{n}.name={repo.name[:14]}",
                   f"repo.{n}.branch={branch[:12]}",
-                  f"repo.{n}.state={' '.join(marks) or '✓ clean'}",
+                  f"repo.{n}.state={state}",
                   f"repo.{n}.slot={slot}"]
+        n += 1
+    if dropped:
+        lines += [f"repo.{n}.name=+{dropped} more",
+                  f"repo.{n}.branch=—",
+                  f"repo.{n}.state=over the {MAX_REPOS} shown",
+                  f"repo.{n}.slot=sub"]
         n += 1
     if not n:
         lines = ["repo.0.name=add repos", "repo.0.branch=dev_repos=",
