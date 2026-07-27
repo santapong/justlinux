@@ -656,16 +656,21 @@ class HyprSettings(App):
                             yield Label("User ID")
                             yield Input(placeholder="from habitica.com → Settings → Site Data",
                                         id="hb_user")
+                            yield Button("󰅌", id="hb_paste_user", classes="small")
                         with Horizontal(classes="row"):
                             yield Label("API token")
                             yield Input(placeholder="kept hidden — paste it here",
                                         password=True, id="hb_token")
+                            yield Button("󰅌", id="hb_paste_token", classes="small")
                         with Horizontal(classes="row", id="btns"):
                             yield Button("󰄬 Test & save", id="hb_save",
                                          variant="primary")
                             yield Button("󰆴 Forget keys", id="hb_forget",
                                          variant="error")
                         yield Static(
+                            "󰅌 pastes from the clipboard — Ctrl+V does nothing "
+                            "in a terminal, that is the emulator's key "
+                            "(Ctrl+Shift+V in kitty), not the app's. "
                             "Keys are checked against Habitica before they are "
                             "saved, so a typo fails here instead of silently on "
                             "the board. They are written to "
@@ -881,6 +886,27 @@ class HyprSettings(App):
             event.button.label = nxt
             self.schedule_widget_restart()
             return
+        if bid in ("hb_paste_user", "hb_paste_token"):
+            # A terminal never delivers ctrl+v to the app — it is the
+            # emulator's own paste key. For a field whose whole purpose is
+            # receiving a pasted secret, a button beats knowing that.
+            target = "#hb_user" if bid.endswith("user") else "#hb_token"
+            try:
+                r = subprocess.run(["wl-paste", "-n"], capture_output=True,
+                                   text=True, timeout=4)
+                val = (r.stdout or "").strip()
+            except Exception as e:
+                self._hb_msg(f"clipboard unavailable: {e}", bad=True)
+                return
+            if not val:
+                self._hb_msg("clipboard is empty", bad=True)
+                return
+            self.query_one(target, Input).value = val
+            # never echo a secret back: say the shape, not the value
+            self._hb_msg(f"pasted {len(val)} characters into "
+                         f"{'User ID' if bid.endswith('user') else 'API token'}")
+            return
+
         if bid == "hb_save":
             uid = self.query_one("#hb_user", Input).value.strip()
             tok = self.query_one("#hb_token", Input).value.strip()
