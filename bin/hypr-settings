@@ -19,6 +19,7 @@ import sys
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 from textual.app import App, ComposeResult
@@ -38,6 +39,9 @@ TOOLS = str(HOME / ".local/bin/hypr-tools.sh")
 # A second `hypr-settings <page>` invocation writes the page here and focuses
 # the existing window; the running app polls the file and navigates to it.
 PAGE_FILE = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "hypr-settings.page"
+# `claude mcp list` costs ~3 s of CPU and 282 MB, so it is fetched on
+# entering the Integrations page and then reused. The button forces it.
+MCP_MAX_AGE = 300
 DRY = os.environ.get("HYPRSETTINGS_DRYRUN") == "1"
 
 # key -> (hyprctl option, config path, min, max, label)
@@ -540,6 +544,9 @@ class HyprSettings(App):
                                             background: transparent; }}
     """
 
+    _mcp_at = 0.0            # when the server list was last fetched
+    _mcp_busy = False        # a run is in flight
+
     def __init__(self, initial_page=None):
         super().__init__(ansi_color=True)
         self._initial_page = initial_page
@@ -794,12 +801,12 @@ class HyprSettings(App):
         # fix 4: a leftover page-note from a previous run must not hijack us
         if not self._initial_page:
             PAGE_FILE.unlink(missing_ok=True)
-        self.refresh_security()
-        self.refresh_wallpapers()
-        self._hb_refresh()
-        self.run_worker(self._mcp_refresh(), group="mcp", exclusive=True)
+        # only the page you actually land on — see _enter_pane
         if self._initial_page:
             self.goto_page(self._initial_page)
+        else:
+            self._enter_pane(
+                self.query_one("#content", ContentSwitcher).current)
         self._poll_tick = 0
         self.set_interval(0.5, self._poll_page_file)
 
@@ -834,15 +841,33 @@ class HyprSettings(App):
             return
         pane = "pane-" + (event.item.id or "").removeprefix("nav-")
         self.query_one("#content", ContentSwitcher).current = pane
-        self.refresh_security()
-        self.refresh_wallpapers()
-        self._hb_refresh()
-        self.run_worker(self._mcp_refresh(), group="mcp", exclusive=True)
-        self._refreshing = True
-        try:
-            self.query_one("#sw_autohide", Switch).value = autohide_on()
-        finally:
-            self._refreshing = False
+        self._enter_pane(pane)
+
+    def _enter_pane(self, pane):
+        """Refresh what THIS page shows, and nothing else.
+
+        Every one of these used to run on every page switch. Three of them
+        are sub-millisecond so nobody noticed — but the fourth spawns
+        `claude mcp list`, which is Node, health-checks every server over
+        the network for ~12 s, and peaks at 282 MB. Arrowing down the
+        seven-item sidebar once left SEVEN of them running at 1.5 GB.
+        """
+        if pane == "pane-security":
+            self.refresh_security()
+        elif pane == "pane-wallpaper":
+            self.refresh_wallpapers()
+        elif pane == "pane-bar":
+            self._refreshing = True
+            try:
+                self.query_one("#sw_autohide", Switch).value = autohide_on()
+            finally:
+                self._refreshing = False
+        elif pane == "pane-integrations":
+            self._hb_refresh()                       # local file, instant
+            # health is only worth re-checking if it could have changed
+            if time.time() - self._mcp_at > MCP_MAX_AGE:
+                self.run_worker(self._mcp_refresh(), group="mcp",
+                                exclusive=True)
 
     # ---------- dynamic labels ----------
     def refresh_security(self):
@@ -976,6 +1001,14 @@ class HyprSettings(App):
 
     async def _mcp_refresh(self):
         import asyncio
+        # exclusive=True cancels the previous WORKER, but that worker is
+        # parked in to_thread around subprocess.run and the Node process
+        # it already started runs to completion regardless. Only a flag
+        # actually stops them stacking up.
+        if self._mcp_busy:
+            return
+        self._mcp_busy = True
+        self._mcp_at = time.time()
         self._mcp_msg("checking server health… (network, can take ~20 s)")
         try:
             servers = await asyncio.to_thread(mcp_list)
@@ -985,6 +1018,8 @@ class HyprSettings(App):
         except Exception as e:
             self._mcp_msg(f"could not list servers: {e}", bad=True)
             return
+        finally:
+            self._mcp_busy = False
         try:
             box = self.query_one("#mcp_rows", Vertical)
         except Exception:
@@ -1082,6 +1117,7 @@ class HyprSettings(App):
             self.schedule_widget_restart()
             return
         if bid == "mcp_refresh":
+            self._mcp_at = 0.0                       # an explicit ask wins
             self.run_worker(self._mcp_refresh(), group="mcp", exclusive=True)
             return
 

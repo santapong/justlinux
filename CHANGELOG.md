@@ -4,6 +4,31 @@ All notable changes to this desktop. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.4] — 2026-07-27
+
+### Performance
+
+- **Hypr Settings spawned a Node process on every page switch.** The
+  Integrations page lists MCP servers, and `claude mcp list` health-checks
+  every configured server over the network: ~12 s wall, **3.1 s of CPU**,
+  **282 MB** peak, and 136% of a core at its worst. It ran from
+  `on_list_view_highlighted` — so it fired on *every* page, not just its
+  own. Arrowing once down the seven-item sidebar left **seven of them
+  running at 1.5 GB**, and `exclusive=True` did not help: it cancels the
+  worker, but that worker is parked in `to_thread` around
+  `subprocess.run` and the process it already started runs to completion.
+
+  Each page now refreshes only what it shows. The server list is fetched
+  on entering Integrations, reused for 5 minutes, and forced by the
+  Re-check button; a flag stops runs overlapping at all. Walking the whole
+  sidebar now spawns **nothing** unless you open Integrations, and then
+  exactly one.
+
+  Measured on a single clean instance afterwards: **0.00–0.38% CPU on
+  every page, 55 MB RSS**. Three other mount-time refreshes were checked
+  and left alone — `firewall_on`, `service_active`, `current_wallpapers`
+  and `autohide_on` are all under 0.1 ms.
+
 ## [1.1.3] — 2026-07-27
 
 ### Fixed
