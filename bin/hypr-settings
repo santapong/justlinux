@@ -450,6 +450,29 @@ class Confirm(ModalScreen[bool]):
         self.dismiss(False)
 
 
+class LazyPane(VerticalScroll):
+    """A settings pane whose contents are built when it is mounted.
+
+    Textual's `with Card(...)` blocks only work inside a compose() call —
+    they push onto the app's compose stack — so a pane body cannot simply
+    be called later and mounted. Wrapping it in a widget whose compose()
+    yields it puts the body back inside that machinery, and mounting the
+    pane itself late is what makes it lazy.
+
+    Subclassing VerticalScroll rather than wrapping one keeps the DOM
+    identical: Textual matches a CSS type selector against the whole MRO,
+    so `#content VerticalScroll` still applies, and no extra level appears
+    between the pane and its cards.
+    """
+
+    def __init__(self, build, **kwargs):
+        super().__init__(**kwargs)
+        self._build = build
+
+    def compose(self) -> ComposeResult:
+        yield from self._build()
+
+
 class HyprSettings(App):
     TITLE = "Hypr Settings"
     ENABLE_COMMAND_PALETTE = False
@@ -579,223 +602,245 @@ class HyprSettings(App):
                   for pane, icon, name in NAV],
                 id="sidebar")
             with ContentSwitcher(initial="pane-appearance", id="content"):
-                with VerticalScroll(id="pane-appearance"):
-                    with Card("Layout · applies live as you click"):
-                        for key, (_, _, _, _, label) in INTS.items():
-                            with Horizontal(classes="row"):
-                                yield Label(label)
-                                if key in self.multi:
-                                    yield Static(
-                                        f"[{C['subtext']}]{self.multi[key]} · "
-                                        f"per-side — edit in config[/]",
-                                        classes="multival")
-                                else:
-                                    yield stepper("-", f"dec_{key}")
-                                    yield Static(gauge_markup(key, self.ints[key],
-                                                              self.limits[key]),
-                                                 id=f"gauge_{key}", classes="gauge")
-                                    yield Static(str(self.ints[key]),
-                                                 id=f"val_{key}", classes="val")
-                                    yield stepper("+", f"inc_{key}")
-                    with Card("Effects"):
-                        for key, (_, _, label) in BOOLS.items():
-                            with Horizontal(classes="row"):
-                                yield Label(label)
-                                yield Switch(value=self.bools[key], id=f"sw_{key}")
-                    with Card("Keep your changes"):
-                        with Horizontal(classes="row"):
-                            yield Button("󰆓 Save (survives reboot)", id="save",
-                                         variant="primary")
-                            yield Button("󰑓 Revert to saved", id="revert")
-                        yield Static("Live tweaks are lost at logout unless saved.",
-                                     classes="hint")
-                with VerticalScroll(id="pane-bar"):
-                    with Card("Top bar (waybar)"):
-                        with Horizontal(classes="row"):
-                            yield Label("Auto-hide (reveal at top edge)")
-                            yield Switch(value=autohide_on(), id="sw_autohide")
-                        with Horizontal(classes="row"):
-                            yield Button("󰊠 Hide / show now", id="bar_toggle")
-                            yield Button("󰑓 Restart bar", id="bar_restart")
-                    with Card("Layout"):
-                        with Horizontal(classes="row"):
-                            yield Button("󰜬 Reorder bar buttons…", id="bar_reorder")
-                        yield Static("Opens the pick-and-place chooser.", classes="hint")
-                with VerticalScroll(id="pane-wallpaper"):
-                    with Card("Current wallpapers"):
-                        yield Static("", id="wp_list", classes="status")
-                    with Card("Change"):
-                        with Horizontal(classes="row"):
-                            yield Button("󰒝 Random wallpaper", id="wp_random")
-                            yield Button("󰋩 Pick image / folder…", id="wp_pick")
-                        yield Static("Every change recolors the whole desktop.\n"
-                                     "This panel wears the new colors next time it opens.",
-                                     classes="hint")
-                with VerticalScroll(id="pane-widgets"):
-                    with Card("Desktop widgets · changes apply right away"):
-                        for key, label in widget_list():
-                            with Horizontal(classes="row"):
-                                yield Label(label)
-                                onoff = self.widgets.get(
-                                    ONOFF_KEY.get(key, key),
-                                    ONOFF_DEFAULT.get(key, "on"))
-                                yield Switch(value=onoff == "on",
-                                            id=f"sw_w_{key}")
-                        with Horizontal(classes="row"):
-                            yield Button("󰀻 Choose dock apps…", id="dock_pick")
-                            yield Button("＋ Add widget…", id="wg_add")
-                        yield Static("Pick which apps sit on this monitor + "
-                                     "workspace's dock (each monitor has its "
-                                     "own sets; slide to the screen-bottom "
-                                     "edge to reveal a dock).",
-                                     classes="hint")
-                    with Card("Layout · where each widget sits"):
-                        for key, label in widget_list():
-                            pos = self.widgets.get(
-                                f"{key}_pos", DEFAULT_POS.get(key, ("top_left",))[0])
-                            with Horizontal(classes="row"):
-                                yield Label(label)
-                                b = Button(pos.replace("_", " "),
-                                           id=f"pos_{key}", classes="posbtn")
-                                b.active_effect_duration = 0
-                                yield b
-                                yield stepper("-", f"xm_{key}")
-                                yield Static(self.widgets.get(f"{key}_x", "0"),
-                                             id=f"xv_{key}", classes="val")
-                                yield stepper("+", f"xp_{key}")
-                                yield stepper("-", f"ym_{key}")
-                                yield Static(self.widgets.get(f"{key}_y", "0"),
-                                             id=f"yv_{key}", classes="val")
-                                yield stepper("+", f"yp_{key}")
-                        yield Static("Click the position name to cycle corners; "
-                                     "-/+ pairs nudge X then Y by 12 px. "
-                                     "Widgets restart a moment after you stop.",
-                                     classes="hint")
-                    with Card("Depth · what a surface sits in front of"):
-                        for key in LAYER_KEYS:
-                            with Horizontal(classes="row"):
-                                yield Label(WIDGET_LABELS.get(key, key))
-                                lb = Button(
-                                    self.widgets.get(f"{key}_layer",
-                                                     LAYER_DEFAULT[key]),
-                                    id=f"layer_{key}", classes="posbtn")
-                                lb.active_effect_duration = 0
-                                yield lb
-                        yield Static("bottom = on the desktop, windows cover "
-                                     "it (like the cards) · top = in front of "
-                                     "your windows · overlay = in front of "
-                                     "everything, even fullscreen. Changing "
-                                     "depth restarts that surface.",
-                                     classes="hint")
-                    with Card("Style"):
-                        with Horizontal(classes="row"):
-                            yield Label("Card look (border + background)")
-                            yield Switch(value=self.widgets["cards"] == "on",
-                                         id="sw_w_cards")
-                        with Horizontal(classes="row"):
-                            yield Label("Color theme")
-                            tb = Button(self.widgets.get("theme", "wallust"),
-                                        id="theme_btn", classes="posbtn")
-                            tb.active_effect_duration = 0
-                            yield tb
-                        yield Static("wallust follows the wallpaper; drop more "
-                                     "palettes in ~/.config/conky/themes/.",
-                                     classes="hint")
-                    with Card("Pet 󰄛"):
-                        with Horizontal(classes="row"):
-                            yield Label("Show the pixel cat")
-                            yield Switch(value=self.widgets["pet"] == "on",
-                                         id="sw_w_pet")
-                        with Horizontal(classes="row"):
-                            yield Label("Clawd (Claude mascot)")
-                            yield Switch(value=self.widgets["claude_pet"] == "on",
-                                         id="sw_w_claude_pet")
-                        with Horizontal(classes="row"):
-                            yield Label("Walk above windows too")
-                            yield Switch(value=self.widgets["pet_layer"] == "top",
-                                         id="sw_w_petlayer")
-                        yield Static("Off = the cat stays on the desktop layer, "
-                                     "under your windows.", classes="hint")
-                    with Card("Maintenance"):
-                        with Horizontal(classes="row"):
-                            yield Button("󰆾 Arrange on screen…", id="wg_arrange",
-                                         variant="primary")
-                            yield Button("󰑓 Restart widgets", id="wg_restart")
-                        yield Static("Widgets recolor with every wallpaper change.\n"
-                                     "Files live in ~/.config/conky/widgets/.",
-                                     classes="hint")
-                with VerticalScroll(id="pane-security"):
-                    with Card("Firewall · ufw"):
-                        yield Static("", id="fw_status", classes="status")
-                        with Horizontal(classes="row"):
-                            yield Button("󰕥 Enable / disable", id="fw_toggle")
-                            yield Button("󰈙 View rules", id="fw_rules")
-                    with Card("Antivirus · ClamAV"):
-                        yield Static("", id="av_status", classes="status")
-                        with Horizontal(classes="row"):
-                            yield Button("󰃤 Scan Downloads", id="av_scan")
-                            yield Button("󰖟 Open ClamTk", id="av_gui")
-                            yield Button("󰚰 Update definitions", id="av_update")
-                with VerticalScroll(id="pane-integrations"):
-                    with Card("Habitica · the task board (ALT+CTRL+K)"):
-                        yield Static("", id="hb_status", classes="status")
-                        with Horizontal(classes="row"):
-                            yield Label("User ID")
-                            yield Input(placeholder="from habitica.com → Settings → Site Data",
-                                        id="hb_user")
-                            yield Button("󰅌", id="hb_paste_user", classes="small")
-                        with Horizontal(classes="row"):
-                            yield Label("API token")
-                            yield Input(placeholder="kept hidden — paste it here",
-                                        password=True, id="hb_token")
-                            yield Button("󰅌", id="hb_paste_token", classes="small")
-                        with Horizontal(classes="row", id="btns"):
-                            yield Button("󰄬 Test & save", id="hb_save",
-                                         variant="primary")
-                            yield Button("󰆴 Forget keys", id="hb_forget",
-                                         variant="error")
-                        yield Static(
-                            "󰅌 pastes from the clipboard — Ctrl+V does nothing "
-                            "in a terminal, that is the emulator's key "
-                            "(Ctrl+Shift+V in kitty), not the app's. "
-                            "Keys are checked against Habitica before they are "
-                            "saved, so a typo fails here instead of silently on "
-                            "the board. They are written to "
-                            "~/.config/hyprdesk/secrets.json (0600) — never to "
-                            "widgets.conf, which is in a public repo.",
-                            classes="hint")
-                    with Card("MCP servers · Claude Code"):
-                        yield Static("", id="mcp_status", classes="status")
-                        yield Vertical(id="mcp_rows")
-                        with Horizontal(classes="row"):
-                            yield Label("Name")
-                            yield Input(placeholder="e.g. sentry",
-                                        id="mcp_name")
-                        with Horizontal(classes="row"):
-                            yield Label("Command / URL")
-                            yield Input(placeholder="https://… (HTTP) or a "
-                                        "command line (stdio)", id="mcp_cmd")
-                            yield Button("󰅌", id="mcp_paste", classes="small")
-                        with Horizontal(classes="row"):
-                            yield Button("＋ Add server", id="mcp_add",
-                                         variant="primary")
-                            yield Button("󰑓 Re-check health", id="mcp_refresh")
-                        yield Static(
-                            "Servers marked claude.ai are managed by your "
-                            "account at claude.ai — this panel can only show "
-                            "their health. Locally added ones (user scope, "
-                            "~/.claude.json) get a ✕. An https:// target is "
-                            "added as HTTP transport; anything else runs as "
-                            "a stdio command.", classes="hint")
-                with VerticalScroll(id="pane-power"):
-                    with Card("Session"):
-                        yield Button("󰌾 Lock screen", id="p_lock")
-                        yield Button("󰤄 Suspend (sleep)", id="p_suspend")
-                    with Card("Danger zone · asks before acting", classes="danger"):
-                        yield Button("󰍃 Logout", id="p_logout", variant="warning")
-                        yield Button("󰜉 Reboot", id="p_reboot", variant="warning")
-                        yield Button("⏻ Shutdown", id="p_shutdown", variant="error")
+                yield LazyPane(self._build_appearance, id="pane-appearance")
         yield Footer()
+
+    def _build_appearance(self):
+        """Body of the appearance pane, moved verbatim out of
+        compose() so it is built on first show."""
+        with Card("Layout · applies live as you click"):
+            for key, (_, _, _, _, label) in INTS.items():
+                with Horizontal(classes="row"):
+                    yield Label(label)
+                    if key in self.multi:
+                        yield Static(
+                            f"[{C['subtext']}]{self.multi[key]} · "
+                            f"per-side — edit in config[/]",
+                            classes="multival")
+                    else:
+                        yield stepper("-", f"dec_{key}")
+                        yield Static(gauge_markup(key, self.ints[key],
+                                                  self.limits[key]),
+                                     id=f"gauge_{key}", classes="gauge")
+                        yield Static(str(self.ints[key]),
+                                     id=f"val_{key}", classes="val")
+                        yield stepper("+", f"inc_{key}")
+        with Card("Effects"):
+            for key, (_, _, label) in BOOLS.items():
+                with Horizontal(classes="row"):
+                    yield Label(label)
+                    yield Switch(value=self.bools[key], id=f"sw_{key}")
+        with Card("Keep your changes"):
+            with Horizontal(classes="row"):
+                yield Button("󰆓 Save (survives reboot)", id="save",
+                             variant="primary")
+                yield Button("󰑓 Revert to saved", id="revert")
+            yield Static("Live tweaks are lost at logout unless saved.",
+                         classes="hint")
+
+    def _build_bar(self):
+        """Body of the bar pane, moved verbatim out of
+        compose() so it is built on first show."""
+        with Card("Top bar (waybar)"):
+            with Horizontal(classes="row"):
+                yield Label("Auto-hide (reveal at top edge)")
+                yield Switch(value=autohide_on(), id="sw_autohide")
+            with Horizontal(classes="row"):
+                yield Button("󰊠 Hide / show now", id="bar_toggle")
+                yield Button("󰑓 Restart bar", id="bar_restart")
+        with Card("Layout"):
+            with Horizontal(classes="row"):
+                yield Button("󰜬 Reorder bar buttons…", id="bar_reorder")
+            yield Static("Opens the pick-and-place chooser.", classes="hint")
+
+    def _build_wallpaper(self):
+        """Body of the wallpaper pane, moved verbatim out of
+        compose() so it is built on first show."""
+        with Card("Current wallpapers"):
+            yield Static("", id="wp_list", classes="status")
+        with Card("Change"):
+            with Horizontal(classes="row"):
+                yield Button("󰒝 Random wallpaper", id="wp_random")
+                yield Button("󰋩 Pick image / folder…", id="wp_pick")
+            yield Static("Every change recolors the whole desktop.\n"
+                         "This panel wears the new colors next time it opens.",
+                         classes="hint")
+
+    def _build_widgets(self):
+        """Body of the widgets pane, moved verbatim out of
+        compose() so it is built on first show."""
+        with Card("Desktop widgets · changes apply right away"):
+            for key, label in widget_list():
+                with Horizontal(classes="row"):
+                    yield Label(label)
+                    onoff = self.widgets.get(
+                        ONOFF_KEY.get(key, key),
+                        ONOFF_DEFAULT.get(key, "on"))
+                    yield Switch(value=onoff == "on",
+                                id=f"sw_w_{key}")
+            with Horizontal(classes="row"):
+                yield Button("󰀻 Choose dock apps…", id="dock_pick")
+                yield Button("＋ Add widget…", id="wg_add")
+            yield Static("Pick which apps sit on this monitor + "
+                         "workspace's dock (each monitor has its "
+                         "own sets; slide to the screen-bottom "
+                         "edge to reveal a dock).",
+                         classes="hint")
+        with Card("Layout · where each widget sits"):
+            for key, label in widget_list():
+                pos = self.widgets.get(
+                    f"{key}_pos", DEFAULT_POS.get(key, ("top_left",))[0])
+                with Horizontal(classes="row"):
+                    yield Label(label)
+                    b = Button(pos.replace("_", " "),
+                               id=f"pos_{key}", classes="posbtn")
+                    b.active_effect_duration = 0
+                    yield b
+                    yield stepper("-", f"xm_{key}")
+                    yield Static(self.widgets.get(f"{key}_x", "0"),
+                                 id=f"xv_{key}", classes="val")
+                    yield stepper("+", f"xp_{key}")
+                    yield stepper("-", f"ym_{key}")
+                    yield Static(self.widgets.get(f"{key}_y", "0"),
+                                 id=f"yv_{key}", classes="val")
+                    yield stepper("+", f"yp_{key}")
+            yield Static("Click the position name to cycle corners; "
+                         "-/+ pairs nudge X then Y by 12 px. "
+                         "Widgets restart a moment after you stop.",
+                         classes="hint")
+        with Card("Depth · what a surface sits in front of"):
+            for key in LAYER_KEYS:
+                with Horizontal(classes="row"):
+                    yield Label(WIDGET_LABELS.get(key, key))
+                    lb = Button(
+                        self.widgets.get(f"{key}_layer",
+                                         LAYER_DEFAULT[key]),
+                        id=f"layer_{key}", classes="posbtn")
+                    lb.active_effect_duration = 0
+                    yield lb
+            yield Static("bottom = on the desktop, windows cover "
+                         "it (like the cards) · top = in front of "
+                         "your windows · overlay = in front of "
+                         "everything, even fullscreen. Changing "
+                         "depth restarts that surface.",
+                         classes="hint")
+        with Card("Style"):
+            with Horizontal(classes="row"):
+                yield Label("Card look (border + background)")
+                yield Switch(value=self.widgets["cards"] == "on",
+                             id="sw_w_cards")
+            with Horizontal(classes="row"):
+                yield Label("Color theme")
+                tb = Button(self.widgets.get("theme", "wallust"),
+                            id="theme_btn", classes="posbtn")
+                tb.active_effect_duration = 0
+                yield tb
+            yield Static("wallust follows the wallpaper; drop more "
+                         "palettes in ~/.config/conky/themes/.",
+                         classes="hint")
+        with Card("Pet 󰄛"):
+            with Horizontal(classes="row"):
+                yield Label("Show the pixel cat")
+                yield Switch(value=self.widgets["pet"] == "on",
+                             id="sw_w_pet")
+            with Horizontal(classes="row"):
+                yield Label("Clawd (Claude mascot)")
+                yield Switch(value=self.widgets["claude_pet"] == "on",
+                             id="sw_w_claude_pet")
+            with Horizontal(classes="row"):
+                yield Label("Walk above windows too")
+                yield Switch(value=self.widgets["pet_layer"] == "top",
+                             id="sw_w_petlayer")
+            yield Static("Off = the cat stays on the desktop layer, "
+                         "under your windows.", classes="hint")
+        with Card("Maintenance"):
+            with Horizontal(classes="row"):
+                yield Button("󰆾 Arrange on screen…", id="wg_arrange",
+                             variant="primary")
+                yield Button("󰑓 Restart widgets", id="wg_restart")
+            yield Static("Widgets recolor with every wallpaper change.\n"
+                         "Files live in ~/.config/conky/widgets/.",
+                         classes="hint")
+
+    def _build_security(self):
+        """Body of the security pane, moved verbatim out of
+        compose() so it is built on first show."""
+        with Card("Firewall · ufw"):
+            yield Static("", id="fw_status", classes="status")
+            with Horizontal(classes="row"):
+                yield Button("󰕥 Enable / disable", id="fw_toggle")
+                yield Button("󰈙 View rules", id="fw_rules")
+        with Card("Antivirus · ClamAV"):
+            yield Static("", id="av_status", classes="status")
+            with Horizontal(classes="row"):
+                yield Button("󰃤 Scan Downloads", id="av_scan")
+                yield Button("󰖟 Open ClamTk", id="av_gui")
+                yield Button("󰚰 Update definitions", id="av_update")
+
+    def _build_integrations(self):
+        """Body of the integrations pane, moved verbatim out of
+        compose() so it is built on first show."""
+        with Card("Habitica · the task board (ALT+CTRL+K)"):
+            yield Static("", id="hb_status", classes="status")
+            with Horizontal(classes="row"):
+                yield Label("User ID")
+                yield Input(placeholder="from habitica.com → Settings → Site Data",
+                            id="hb_user")
+                yield Button("󰅌", id="hb_paste_user", classes="small")
+            with Horizontal(classes="row"):
+                yield Label("API token")
+                yield Input(placeholder="kept hidden — paste it here",
+                            password=True, id="hb_token")
+                yield Button("󰅌", id="hb_paste_token", classes="small")
+            with Horizontal(classes="row", id="btns"):
+                yield Button("󰄬 Test & save", id="hb_save",
+                             variant="primary")
+                yield Button("󰆴 Forget keys", id="hb_forget",
+                             variant="error")
+            yield Static(
+                "󰅌 pastes from the clipboard — Ctrl+V does nothing "
+                "in a terminal, that is the emulator's key "
+                "(Ctrl+Shift+V in kitty), not the app's. "
+                "Keys are checked against Habitica before they are "
+                "saved, so a typo fails here instead of silently on "
+                "the board. They are written to "
+                "~/.config/hyprdesk/secrets.json (0600) — never to "
+                "widgets.conf, which is in a public repo.",
+                classes="hint")
+        with Card("MCP servers · Claude Code"):
+            yield Static("", id="mcp_status", classes="status")
+            yield Vertical(id="mcp_rows")
+            with Horizontal(classes="row"):
+                yield Label("Name")
+                yield Input(placeholder="e.g. sentry",
+                            id="mcp_name")
+            with Horizontal(classes="row"):
+                yield Label("Command / URL")
+                yield Input(placeholder="https://… (HTTP) or a "
+                            "command line (stdio)", id="mcp_cmd")
+                yield Button("󰅌", id="mcp_paste", classes="small")
+            with Horizontal(classes="row"):
+                yield Button("＋ Add server", id="mcp_add",
+                             variant="primary")
+                yield Button("󰑓 Re-check health", id="mcp_refresh")
+            yield Static(
+                "Servers marked claude.ai are managed by your "
+                "account at claude.ai — this panel can only show "
+                "their health. Locally added ones (user scope, "
+                "~/.claude.json) get a ✕. An https:// target is "
+                "added as HTTP transport; anything else runs as "
+                "a stdio command.", classes="hint")
+
+    def _build_power(self):
+        """Body of the power pane, moved verbatim out of
+        compose() so it is built on first show."""
+        with Card("Session"):
+            yield Button("󰌾 Lock screen", id="p_lock")
+            yield Button("󰤄 Suspend (sleep)", id="p_suspend")
+        with Card("Danger zone · asks before acting", classes="danger"):
+            yield Button("󰍃 Logout", id="p_logout", variant="warning")
+            yield Button("󰜉 Reboot", id="p_reboot", variant="warning")
+            yield Button("⏻ Shutdown", id="p_shutdown", variant="error")
 
     def on_mount(self):
         # fix 4: a leftover page-note from a previous run must not hijack us
@@ -840,7 +885,39 @@ class HyprSettings(App):
         if event.item is None:
             return
         pane = "pane-" + (event.item.id or "").removeprefix("nav-")
-        self.query_one("#content", ContentSwitcher).current = pane
+        # _show_pane calls _enter_pane once the pane exists
+        self._show_pane(pane)
+
+    # ------------------------------------------------------------------
+    # Lazy panes: startup built all seven (374 widgets, ~730 ms of CPU)
+    # when six of them were off screen. Only the pane you land on is built
+    # now; the others are mounted the first time they are shown.
+    # ------------------------------------------------------------------
+    def _show_pane(self, pane):
+        """Make `pane` the visible one, building it if this is its first
+        showing. ContentSwitcher.add_content mounts it hidden inside a
+        batch_update and switches in the same pass, so no frame renders a
+        pane that is not finished."""
+        switcher = self.query_one("#content", ContentSwitcher)
+        built = getattr(self, "_built", None)
+        if built is None:
+            # here rather than __init__ so this does not depend on the
+            # App's constructor signature
+            built = self._built = {"appearance"}
+        name = pane.removeprefix("pane-")
+        build = getattr(self, f"_build_{name}", None)
+        if name in built or build is None:
+            switcher.current = pane
+            self._enter_pane(pane)
+            return
+        built.add(name)
+        # add_content mounts asynchronously, so the page's own refresh has
+        # to wait for it — running it now would query widgets that do not
+        # exist yet
+        self.run_worker(self._mount_pane(switcher, pane, build))
+
+    async def _mount_pane(self, switcher, pane, build):
+        await switcher.add_content(LazyPane(build, id=pane), set_current=True)
         self._enter_pane(pane)
 
     def _enter_pane(self, pane):

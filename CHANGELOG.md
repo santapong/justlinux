@@ -4,6 +4,31 @@ All notable changes to this desktop. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.5] — 2026-07-27
+
+### Performance
+
+- **Hypr Settings built all seven pages before showing you one.**
+  `compose()` constructed every pane at mount — **374 widgets, ~655 ms of
+  CPU and ~750 ms of wall time** before the window was usable — when six of
+  those pages were off screen. Each pane body now lives in a `_build_<name>`
+  generator and is mounted the first time that page is opened, through
+  `ContentSwitcher.add_content()` (which mounts hidden inside a
+  `batch_update`, so no frame ever shows a half-built page).
+
+  **Startup: 750 → 398 ms wall, 655 → 347 ms CPU, 374 → 61 widgets.**
+
+  The pane bodies were moved verbatim, and the whole widget tree — every
+  type, id, class, rendered text, switch value and ordering, 373 lines of
+  it — is byte-identical before and after.
+
+  Tab switches are **not** improved: a page's cost is its layout, Textual
+  charges that on first *display* rather than on mount, and the Widgets
+  page is expensive because it genuinely contains ~200 widgets (17 rows of
+  ~10 controls). Warm switches measure 10–70 ms in a real terminal. An idle
+  prebuild of the off-screen pages was tried and dropped — it cost 60 ms of
+  startup and saved nothing, for exactly that reason.
+
 ## [1.1.4] — 2026-07-27
 
 ### Performance
