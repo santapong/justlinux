@@ -4,3 +4,6 @@ __pycache__/
 # credentials live outside the repo, but never risk it
 secrets.json
 .config/hyprdesk/
+
+# generated per-wallpaper, like colors.css
+tokens.css

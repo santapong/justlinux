@@ -83,6 +83,15 @@ def main():
             style = style_css.read_text()
         except OSError:
             continue
+        # tokens.css holds the contrast-corrected ok-* twins. Read it too —
+        # a slot this checker cannot RESOLVE is skipped silently, so leaving
+        # it out would blind the check to exactly the colours it is meant to
+        # be guarding.
+        tokens = colors_css.parent / "tokens.css"
+        try:
+            C.update(defined(tokens.read_text()))
+        except OSError:
+            pass
         base = C.get("base") or C.get("background")
         if not base:
             continue
@@ -91,7 +100,11 @@ def main():
         seen = set()
         for fg, bg, sel in text_pairs(style):
             col, ground = C.get(fg), C.get(bg) if bg else base
-            if not col or not ground:
+            if not col:
+                problems.append(f"{colors_css.parent.name}: @{fg} is used as "
+                                f"text but never defined  ({sel})")
+                continue
+            if not ground:
                 continue
             key = (fg, bg)
             if key in seen:

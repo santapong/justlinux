@@ -85,8 +85,10 @@ fi
 
 # --- recolor the desktop ---
 wallust run "$RECOLOR"
-# a new wallpaper can drop an unreadable colour into any ansi slot —
-# shout instead of shipping an invisible warning light
+# the wallpaper's own hues, lightness-corrected so a module tint can follow
+# the wallpaper without ever going invisible
+"$HOME/.local/bin/gen-readable-colors.sh" --quiet || true
+# and verify it: a slot used as text that still fails is a bug, not a taste
 "$HOME/.local/bin/check-contrast.sh" --quiet --notify || true
 hyprctl reload >/dev/null                       # window borders
 pkill -SIGUSR2 waybar 2>/dev/null || true       # waybar restyles in place

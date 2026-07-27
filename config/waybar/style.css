@@ -1,4 +1,7 @@
 @import "colors.css";
+/* contrast-corrected twins of the wallust slots (gen-readable-colors.sh):
+   same hue as the wallpaper, lightness lifted until it is readable */
+@import "tokens.css";
 
 * {
     font-family: "JetBrainsMono Nerd Font", "Font Awesome 6 Free";
@@ -38,20 +41,20 @@ window#waybar.hidden {
     padding: 0 10px;
 }
 
-/* Bar text uses @text / @subtext and the PINNED status trio — never a raw
-   ansi slot. Those slots are whatever wallust pulled out of the wallpaper:
-   on this very palette @red measures 1.00:1 and @magenta 1.80:1 against
-   @base, so #temperature and #pulseaudio were literally unreadable. A
-   module label is text the user has to read; it cannot ride a lottery.
-   Emphasis now comes from weight and the accent underline, not from
-   tinting each module a different unpredictable colour. */
-#cpu         { color: @subtext; }
-#temperature { color: @subtext; }
+/* Module tints use the ok-* twins, NEVER the raw ansi slots. wallust's
+   slots carry the wallpaper's hues — which is what makes the bar feel
+   matched — but their lightness is whatever the photo contained: @red has
+   landed at 1.00:1 and @magenta at 1.80:1 against @base, leaving
+   #temperature and #pulseaudio invisible. gen-readable-colors.sh keeps the
+   hue and lifts only the lightness, so the bar still follows the wallpaper
+   and can no longer disappear. Status stays on the pinned trio. */
+#cpu         { color: @ok-yellow; }
+#temperature { color: @ok-magenta; }
 #temperature.critical { color: @status-bad; font-weight: bold; }
-#memory      { color: @subtext; }
-#disk        { color: @subtext; }
-#network     { color: @subtext; }
-#pulseaudio  { color: @subtext; }
+#memory      { color: @ok-green; }
+#disk        { color: @ok-cyan; }
+#network     { color: @ok-cyan; }
+#pulseaudio  { color: @ok-magenta; }
 #clock       { color: @text; font-weight: bold; }
 
 #custom-menu {
