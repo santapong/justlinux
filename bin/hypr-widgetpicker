@@ -28,7 +28,7 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Gdk, GLib
 
 sys.path.insert(0, str(Path.home() / ".local/lib"))
-from hyprdesk import conf, colors, css_rgba
+from hyprdesk import conf, colors, css_rgba, rgb
 from hyprdesk import cardspec, rows, grid
 from hyprdesk.confwrite import conf_set, conf_delete
 import json
@@ -283,7 +283,9 @@ class Preview(Gtk.DrawingArea):
             rows.render_card(cr, self.template.rows, self.ctx())
         except Exception as e:
             cr.identity_matrix()
-            cr.set_source_rgba(1, .4, .4, .9)
+            # pinned status ink, not a hardcoded red — 'bad' is guaranteed
+            # readable on any wallpaper, an ad-hoc rgba is not
+            cr.set_source_rgba(*rgb(self.pal["bad"]), .9)
             cr.select_font_face(rows.FONT)
             cr.set_font_size(11)
             cr.move_to(8, 24)
@@ -305,7 +307,7 @@ class Picker(Gtk.Window):
             window {{ background-color: {css_rgba(self.pal['bg'], 0.97)}; }}
             label {{ color: {self.pal['fg']}; }}
             .tile {{ background: {css_rgba(self.pal['fg'], 0.06)};
-                     border-radius: 10px; padding: 8px;
+                     border-radius: 12px; padding: 8px;
                      border: 1px solid {css_rgba(self.pal['accent2'], 0.15)}; }}
             .tile:hover {{ background: {css_rgba(self.pal['accent'], 0.15)}; }}
             .tile-broken {{ border: 1px solid {css_rgba(self.pal['bad'], 0.7)}; }}
@@ -314,7 +316,7 @@ class Picker(Gtk.Window):
             .hint {{ color: {self.pal['sub']}; }}
             button {{ background: {css_rgba(self.pal['fg'], 0.08)};
                       color: {self.pal['fg']}; border: none;
-                      border-radius: 8px; padding: 6px 14px; }}
+                      border-radius: 6px; padding: 6px 14px; }}
             button:hover {{ background: {css_rgba(self.pal['accent'], 0.25)}; }}
             entry {{ background: {css_rgba(self.pal['fg'], 0.08)};
                      color: {self.pal['fg']}; border: none;

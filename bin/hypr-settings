@@ -34,7 +34,6 @@ from hyprdesk.confwrite import conf_set as _conf_set   # atomic writer
 HOME = Path.home()
 CONF = HOME / ".config/hypr/hyprland.conf"
 HYPRPAPER = HOME / ".config/hypr/hyprpaper.conf"
-COLORS_CSS = HOME / ".config/waybar/colors.css"
 TOOLS = str(HOME / ".local/bin/hypr-tools.sh")
 # A second `hypr-settings <page>` invocation writes the page here and focuses
 # the existing window; the running app polls the file and navigates to it.
@@ -190,17 +189,30 @@ GAUGE_SLOTS = 12
 
 
 def read_colors():
-    colors = {
-        "base": "#1e1e2e", "surface": "#45475a", "text": "#cdd6f4",
-        "subtext": "#a6adc8", "accent": "#89b4fa", "red": "#f38ba8",
-        "green": "#a6e3a1", "yellow": "#f9e2af", "cyan": "#94e2d5",
-    }
+    """The CARD palette, not waybar's raw wallust slots.
+
+    Parsing ~/.config/waybar/colors.css is the obvious move and it is wrong:
+    those are wallust's UNPINNED ansi slots whose names lie. On the current
+    wallpaper @red is #494949 (grey) and @yellow #8D8D8D — a danger button
+    inked in them reads as "disabled", not "destructive". hyprdesk.colors()
+    is the same wallpaper-driven palette the cards use, with good/bad/warn
+    PINNED to readable constants, so status stays legible whatever the
+    wallpaper does.
+    """
+    fallback = {"base": "#1e1e2e", "surface": "#45475a", "text": "#cdd6f4",
+                "subtext": "#a6adc8", "accent": "#89b4fa", "title": "#b4befe",
+                "red": "#f38ba8", "green": "#a6e3a1", "yellow": "#f9e2af"}
     try:
-        for m in re.finditer(r"@define-color\s+(\w+)\s+(#[0-9a-fA-F]{6})", COLORS_CSS.read_text()):
-            colors[m.group(1)] = m.group(2)
-    except OSError:
-        pass
-    return colors
+        from hyprdesk import colors
+        p = colors()
+        # accent = interactive (focus, hover, selection); title = accent2.
+        # muted is a SURFACE colour — borders and troughs only, never text.
+        return {"base": p["bg"], "surface": p["muted"], "text": p["fg"],
+                "subtext": p["sub"], "accent": p["accent"],
+                "title": p["accent2"], "red": p["bad"], "green": p["good"],
+                "yellow": p["warn"]}
+    except Exception:
+        return fallback
 
 
 def hyprctl_get(option, default):
@@ -313,10 +325,10 @@ def current_wallpapers():
 
 C = read_colors()
 
-# Destructive actions must READ as red. Wallust maps palette slots by
-# wallpaper, so C["red"] can come out blue/brown — fall back to a real red.
-_r, _g, _b = (int(C["red"][i:i + 2], 16) for i in (1, 3, 5))
-DANGER = C["red"] if _r > _g and _r > _b else "#d9536f"
+# Destructive actions must READ as red. C["red"] is now the PINNED bad ink,
+# so no luminance guessing is needed — kept as a name because the danger
+# zone reads better spelled out at the ~10 call sites below.
+DANGER = C["red"]
 
 
 def stepper(label, bid):
@@ -413,7 +425,7 @@ class HyprSettings(App):
     #content > * {{ background: transparent; }}
     Card {{
         border: round {C['surface']};
-        border-title-color: {C['accent']}; border-title-style: bold;
+        border-title-color: {C['title']}; border-title-style: bold;
         padding: 1 2; margin-bottom: 1; height: auto; background: transparent;
     }}
     Card.danger {{ border: round {DANGER}; border-title-color: {DANGER}; }}
@@ -444,6 +456,18 @@ class HyprSettings(App):
     Button.-warning {{ color: {C['yellow']}; border: round {C['yellow']};
                              background: transparent; }}
     Button.-warning:hover {{ background: {C['yellow']}; color: {C['base']}; }}
+
+    /* Integrations' text boxes were the only controls left on Textual's
+       stock skin — a `tall` border in the built-in theme's blue, next to
+       round wallust-toned buttons. Same border language as Button. */
+    Input {{ background: transparent; border: round {C['surface']};
+             color: {C['text']}; height: 3; }}
+    Input:focus {{ border: round {C['accent']}; background: transparent; }}
+    Input:hover {{ border: round {C['accent']}; background: transparent; }}
+    Input > .input--placeholder {{ color: {C['subtext']}; text-style: none; }}
+    Input > .input--cursor {{ background: {C['accent']}; color: {C['base']}; }}
+    Input > .input--selection {{ background: {C['accent']} 40%;
+                                 color: {C['text']}; }}
 
     Switch {{ background: transparent; border: round {C['surface']}; }}
     Switch:focus {{ border: round {C['accent']}; background: transparent; }}
@@ -483,7 +507,7 @@ class HyprSettings(App):
     # ---------- layout ----------
     def compose(self) -> ComposeResult:
         yield Static(
-            f"[bold {C['accent']}]󰒓  Hypr Settings[/]"
+            f"[bold {C['title']}]󰒓  Hypr Settings[/]"
             f"[{C['subtext']}]   click, or ↑↓ Tab Enter — no typing needed[/]",
             id="hdr")
         with Horizontal(id="body"):
@@ -807,23 +831,10 @@ class HyprSettings(App):
                                 "restart"))
 
     # ---------- integrations ----------
-    # C comes from waybar/colors.css — wallust's UNPINNED ansi slots. On the
-    # current wallpaper C["red"] measures 1.00:1 against the background, so
-    # an error painted in it is invisible. Status here uses the card
-    # palette's pinned good/bad instead, which stay legible whatever the
-    # wallpaper does.
-    @staticmethod
-    def _status_ink():
-        try:
-            from hyprdesk import colors
-            p = colors()
-            return p["bad"], p["good"], p["sub"]
-        except Exception:
-            return "#E06C75", "#8EC07C", C["subtext"]
-
     def _hb_msg(self, text, bad=False, good=False):
-        red, green, sub = self._status_ink()
-        col = red if bad else (green if good else sub)
+        # C["red"]/["green"] are the pinned status inks now, so this no
+        # longer needs its own private palette lookup
+        col = C["red"] if bad else (C["green"] if good else C["subtext"])
         try:
             self.query_one("#hb_status", Static).update(f"[{col}]{text}[/]")
         except Exception:

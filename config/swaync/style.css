@@ -25,7 +25,7 @@
   background: @surface;
   color: @text;
   border: none;
-  border-radius: 8px;
+  border-radius: 6px;  /* control inside a surface — 12/6 family */
   padding: 4px 10px;
 }
 .widget-title > button:hover {
@@ -47,7 +47,8 @@
 
 .notification {
   background: @surface;
-  border-radius: 10px;
+  /* a notification is a card, i.e. a surface — 12, not a third value */
+  border-radius: 12px;
   margin: 4px;
   padding: 4px;
   border: 1px solid alpha(@accent, 0.2);

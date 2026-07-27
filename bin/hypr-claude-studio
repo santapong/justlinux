@@ -82,13 +82,16 @@ def style_tmux():
     pal = colors()
     bg, fg = pal["bg"], pal["fg"]
     acc, sub = pal["accent"], pal["sub"]
+    # ink hierarchy: accent2 titles the bar, accent stays on the selected
+    # tab so "what this is" never wears the same colour as "where you are"
+    acc2 = pal["accent2"]
     for args in (
         ("set", "-g", "status-position", "top"),
         ("set", "-g", "mouse", "on"),
         ("set", "-g", "status-interval", "5"),
         ("set", "-g", "status-style", f"bg={bg},fg={sub}"),
         ("set", "-g", "status-left",
-         f"#[fg={acc},bold] 󰚩 Claude Studio #[default] "),
+         f"#[fg={acc2},bold] 󰚩 Claude Studio #[default] "),
         ("set", "-g", "status-left-length", "22"),
         ("set", "-g", "status-right", f"#[fg={sub}] #S "),
         ("set", "-g", "window-status-format", f" #I #W {CLOSE_X} "),

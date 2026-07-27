@@ -27,6 +27,8 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+sys.path.insert(0, str(Path.home() / ".local/lib"))  # hyprdesk (fleet palette)
+
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
@@ -74,7 +76,6 @@ except Exception:
     Image = None
 
 HOME = Path.home()
-COLORS_CSS = HOME / ".config/waybar/colors.css"
 HYPRPAPER = HOME / ".config/hypr/hyprpaper.conf"
 WALLPAPER_SH = str(HOME / ".local/bin/wallpaper.sh")
 CACHE = HOME / ".cache/hypr-launcher"
@@ -120,17 +121,27 @@ def load_state():
 
 
 def read_colors():
-    colors = {
-        "base": "#1e1e2e", "surface": "#45475a", "text": "#cdd6f4",
-        "subtext": "#a6adc8", "accent": "#89b4fa", "red": "#f38ba8",
-        "green": "#a6e3a1", "yellow": "#f9e2af", "cyan": "#94e2d5",
-    }
+    """The fleet palette, not waybar's raw wallust slots.
+
+    Parsing ~/.config/waybar/colors.css is the obvious move and it is wrong:
+    those are wallust's unpinned ANSI slots whose names are a lie — @red has
+    measured 1.00:1 against the background on this wallpaper, i.e. invisible.
+    hyprdesk.colors() is the same wallpaper-driven palette the cards use, with
+    good/bad/warn PINNED, a real 'sub' tier (~7:1) instead of a near-white
+    subtext, and the accent (interactive) / accent2 (titles) ink split.
+    """
+    fallback = {"base": "#1e1e2e", "surface": "#45475a", "text": "#cdd6f4",
+                "subtext": "#a6adc8", "accent": "#89b4fa", "accent2": "#cba6f7",
+                "good": "#a6e3a1", "bad": "#f38ba8", "warn": "#f9e2af"}
     try:
-        for m in re.finditer(r"@define-color\s+(\w+)\s+(#[0-9a-fA-F]{6})", COLORS_CSS.read_text()):
-            colors[m.group(1)] = m.group(2)
-    except OSError:
-        pass
-    return colors
+        from hyprdesk import colors
+        p = colors()
+        return {"base": p["bg"], "surface": p["muted"], "text": p["fg"],
+                "subtext": p["sub"], "accent": p["accent"],
+                "accent2": p["accent2"], "good": p["good"], "bad": p["bad"],
+                "warn": p["warn"]}
+    except Exception:
+        return fallback
 
 
 C = read_colors()
@@ -725,8 +736,9 @@ class HyprLauncher(App):
     .tilegrid {{ layout: grid; grid-size: {COLS}; grid-gutter: 0 1;
              height: auto; background: transparent; }}
     #gridwrap {{ height: auto; background: transparent; }}
+    /* ink hierarchy: accent2 = titles, accent = interactive/focus state */
     .section {{ height: 1; padding: 0 1; margin: 1 0 0 0;
-                color: {C['accent']}; text-style: bold; }}
+                color: {C['accent2']}; text-style: bold; }}
     .section:hover {{ background: {C['surface']} 40%; }}
     Screen.mode-apps .tile-img {{ height: 3; }}
     .tile {{ height: auto; background: transparent;
@@ -793,7 +805,7 @@ class HyprLauncher(App):
                   "claude": ("󰚩", "Claude sessions — 🟢 running · 🕒 resume"),
                   "recall": ("󰍉", "Recall — search every past Claude conversation")}
         icon, title = titles[self.mode]
-        yield Static(f"[bold {C['accent']}]{icon}  {title}[/]", id="hdr")
+        yield Static(f"[bold {C['accent2']}]{icon}  {title}[/]", id="hdr")
         if self.mode in ("apps", "menu"):
             yield FilterInput(placeholder="filter…  (Enter open · right-click a box = ★ favorite · Esc close)",
                               id="filter")
@@ -1158,7 +1170,7 @@ class HyprLauncher(App):
         where = self.wp_target or "all monitors"
         pretty = str(self.cwd).replace(str(HOME), "~")
         self.query_one("#wp-where", Static).update(
-            f"[{C['accent']}]{where}[/] · {pretty} — select previews live · "
+            f"[{C['accent2']}]{where}[/] · {pretty} — select previews live · "
             f"Enter keeps it · Esc restores")
         await self.fill_grid(folder_contents(self.cwd))
 

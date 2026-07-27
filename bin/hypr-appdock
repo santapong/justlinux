@@ -598,13 +598,13 @@ class Manager:
         css.load_from_data(f"""
             #dock {{
                 background-color: {css_rgba(pal["bg"], 0.80)};
-                border-radius: 14px;
+                border-radius: 12px;
                 border: 1px solid {css_rgba(pal["accent2"], 0.18)};
                 padding: 6px 10px;
             }}
             #dock button {{
                 background: transparent; border: none; box-shadow: none;
-                padding: 5px; border-radius: 10px; min-width: 0;
+                padding: 5px; border-radius: 6px; min-width: 0;
             }}
             #dock button:hover {{
                 background: {css_rgba(pal["accent"], 0.25)};

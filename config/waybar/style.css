@@ -70,12 +70,12 @@ window#waybar.hidden {
 }
 
 #custom-wallpaper, #custom-keybinds {
-    color: @cyan;
+    color: @ok-cyan;
     padding: 0 10px;
     font-size: 15px;
 }
 #custom-wallpaper:hover, #custom-keybinds:hover {
-    background: alpha(@cyan, 0.25);
+    background: alpha(@ok-cyan, 0.25);
     border-radius: 6px;
 }
 
