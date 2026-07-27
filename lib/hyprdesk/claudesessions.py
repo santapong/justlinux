@@ -297,6 +297,30 @@ def _argv(pid):
         return []
 
 
+def _pids_named(name):
+    """PIDs whose comm is exactly `name`, read straight from /proc.
+
+    This replaced `pgrep -x`, which cost a fork+exec every call — ~18ms,
+    and the office calls it twice a second, which made it the single
+    largest CPU consumer in the whole widget fleet. Reading /proc costs
+    no process at all.
+    """
+    out = []
+    try:
+        for entry in os.scandir("/proc"):
+            if not entry.name.isdigit():
+                continue
+            try:
+                with open(f"/proc/{entry.name}/comm") as f:
+                    if f.read().rstrip("\n") == name:
+                        out.append(entry.name)
+            except OSError:
+                continue          # died between scandir and open
+    except OSError:
+        pass
+    return out
+
+
 def claude_procs():
     """[(pid, cwd, interactive, tty)] for live claude CLI sessions.
     Claude Code's own plumbing — the supervisor (`claude daemon run`)
@@ -304,11 +328,7 @@ def claude_procs():
     is always alive, so listing it painted a phantom everlasting
     background job in every picker."""
     out = []
-    try:
-        pids = subprocess.run(["pgrep", "-x", "claude"], capture_output=True,
-                              text=True).stdout.split()
-    except Exception:
-        pids = []
+    pids = _pids_named("claude")
     for p in pids:
         argv = _argv(p)
         if any(a in CLAUDE_INFRA for a in argv[1:3]) or "--bg-spare" in argv:
@@ -328,11 +348,15 @@ def daemon_hosted():
     close a studio tab or a kitty window and the session lives on until
     finished or killed, which reads as a task running non-stop."""
     out = []
+    # cmdline scan rather than `pgrep -f`: same reason as _pids_named — no
+    # fork, and we already have to read every cmdline below anyway
+    pids = []
     try:
-        pids = subprocess.run(["pgrep", "-f", "bg-pty-host"],
-                              capture_output=True, text=True).stdout.split()
-    except Exception:
-        pids = []
+        for entry in os.scandir("/proc"):
+            if entry.name.isdigit() and "bg-pty-host" in " ".join(_argv(entry.name)):
+                pids.append(entry.name)
+    except OSError:
+        pass
     for p in pids:
         argv = _argv(p)
         if "--session-id" not in argv:

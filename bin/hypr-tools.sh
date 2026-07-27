@@ -543,6 +543,7 @@ launcher() {
         wallpaper) title="Hypr Wallpaper" ;;
         menu)      title="Hypr Tools" ;;
         claude)    title="Hypr Claude" ;;
+        recall)    title="Hypr Recall" ;;
         *)         title="Hypr Apps" ;;
     esac
     local addr

@@ -1007,8 +1007,30 @@ class Office(LayerWindow):
 
     # ----- render -----
     def _tick(self):
+        """Redraw only as fast as something is actually moving.
+
+        This used to repaint the whole scene every 160ms forever — 6 full
+        cairo passes a second with every desk asleep, which measured 4% CPU
+        on an idle desktop, three quarters of the entire widget fleet. The
+        frame counter still advances (so phase is continuous), but the
+        expensive part is rate-limited to what the scene needs:
+
+          typing, or a subagent swarm   every frame   — code scrolls, sprites hop
+          reading / attention / idle    every 4th     — the 2-frame Clawd breathe
+          all asleep, or empty          every 12th    — nothing moves at all
+        """
         self.frame += 1
-        if self.get_visible():
+        if not self.get_visible():
+            return True
+        busy = any(w.get("state") == "typing" or w.get("agents")
+                   for w in self.workers)
+        if busy:
+            every = 1
+        elif any(w.get("state") != "sleep" for w in self.workers):
+            every = 4
+        else:
+            every = 12
+        if self.frame % every == 0:
             self.queue_draw()
         return True
 
