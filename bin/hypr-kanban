@@ -266,11 +266,12 @@ class DuePicker(ModalScreen):
     .opt.-on {{ background: {C['accent']} 30%; color: {C['text']}; }}
     """
 
-    def __init__(self, title):
+    def __init__(self, title, sprint=""):
         super().__init__()
         self.title_text = title
         today = datetime.date.today()
-        end = H.sprint_dates(H.current_sprint())[1] or today
+        # the sprint you are LOOKING at, not whichever one today is in
+        end = H.sprint_dates(sprint or H.current_sprint())[1] or today
         self.opts = [
             ("today", iso(today)),
             ("tomorrow", iso(today + datetime.timedelta(days=1))),
@@ -504,6 +505,13 @@ class Board(App):
     async def repaint(self):
         """Every tab, from self.data — no network. The sprint picker and
         the week arrows both just change what this draws."""
+        # every Card is destroyed and rebuilt below, so the focused one
+        # stops existing. Remember WHICH TASK was selected, not which
+        # widget: without this the 2-minute poll threw your selection
+        # back to the first card, and a pending Enter or d would then
+        # land on the wrong task.
+        keep = (self.focused.todo.get("id")
+                if isinstance(self.focused, Card) else None)
         data = self.data
         for key, title in COLUMNS:
             items = data.get(key, [])
@@ -522,7 +530,7 @@ class Board(App):
         await self._fill("#lv-habits", data.get("habits", []),
                          draggable=False)
         self._paint_context()
-        self._focus_visible_card()
+        self._focus_visible_card(prefer=keep)
 
     async def _paint_sprint(self):
         buckets = {k: [] for k, _t in SPRINT_COLUMNS}
@@ -647,8 +655,17 @@ class Board(App):
 
     # ---------- drag and drop ----------
     def zone_at(self, x, y):
+        """A drop target in the VISIBLE tab only.
+
+        Every pane occupies the same rectangle, and `display` is True for
+        a widget in a hidden pane — the guard that used to be here never
+        fired. It worked because Textual gives hidden panes a zero-area
+        region, which is not a promise worth resting a data-changing
+        gesture on: matching the wrong zone would move the card in a tab
+        you cannot see."""
+        tab = self._tab()
         for z in self.query(DropZone):
-            if not z.key or not z.display:
+            if not z.key or self._pane_of(z) != tab:
                 continue
             try:
                 if z.parent.region.contains(x, y):
@@ -751,12 +768,12 @@ class Board(App):
             node = node.parent
         return None
 
-    def _focus_visible_card(self):
+    def _focus_visible_card(self, prefer=None):
         # It is not enough that the focused card still has a region — a
         # card in a hidden pane does. TabbedContent activates whichever
         # pane holds focus, so leaving focus behind snapped the tab
         # straight back and 5 and 6 looked like dead keys.
-        if isinstance(self.focused, Card) \
+        if prefer is None and isinstance(self.focused, Card) \
                 and self._pane_of(self.focused) == self._tab():
             return
         sel = {"tab-today": "#lv-today", "tab-todos": "#lv-todo",
@@ -765,13 +782,22 @@ class Board(App):
                "tab-habits": "#lv-habits"}.get(self._tab())
         if not sel:
             return
+        # a remembered card may be in ANY list of the visible pane — the
+        # column it sits in is exactly what a move changes
+        pane_sel = f"TabPane#{self._tab()}"
         cards = self.query(f"{sel} Card")
         if not cards and self._tab() == "tab-sprint":
             cards = self.query("#slv-todo Card")
-        if cards:
-            # scroll_visible would drag the list past the section heading
-            # the card sits under, which reads as a missing heading
-            cards.first().focus(scroll_visible=False)
+        if not cards:
+            return
+        if prefer is not None:
+            for c in self.query(f"{pane_sel} Card"):
+                if c.todo.get("id") == prefer:
+                    c.focus(scroll_visible=False)
+                    return
+        # scroll_visible would drag the list past the section heading
+        # the card sits under, which reads as a missing heading
+        cards.first().focus(scroll_visible=False)
 
     def action_goto_tab(self, tab_id):
         try:
@@ -864,8 +890,9 @@ class Board(App):
         def done(date):
             if date is not None:
                 self.run_worker(self._set_due(card, date), exclusive=True)
-        self.push_screen(DuePicker(emoji(card.todo.get("text") or "")[:44]),
-                         done)
+        self.push_screen(
+            DuePicker(emoji(card.todo.get("text") or "")[:44], self.sprint),
+            done)
 
     def action_habit(self, direction):
         card = self._focused_card()

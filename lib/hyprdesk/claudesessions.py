@@ -301,21 +301,18 @@ CLAUDE_SUBCOMMANDS = frozenset((
 
 
 def _subcommand(argv):
-    """The first bare word after the binary, or "" for a session. Values
-    that belong to a preceding flag (`--resume <sid>`) are skipped, so a
-    resumed session is never mistaken for a subcommand."""
-    skip = False
+    """The first bare word after the binary, for membership-testing
+    against CLAUDE_SUBCOMMANDS.
+
+    It deliberately does NOT try to skip a flag's value. Guessing which
+    flags take one meant a boolean flag swallowed the word after it, so
+    `claude --verbose doctor` read as a session. Since the result is only
+    ever tested for membership, returning a flag's value instead is
+    harmless — a session id is not a subcommand — while missing a real
+    subcommand paints a phantom desk."""
     for a in argv[1:]:
-        if skip:
-            skip = False
-            continue
-        if a.startswith("-"):
-            # long flags may take a value; short ones here do too
-            skip = "=" not in a and a not in (
-                "-c", "--continue", "-d", "--debug", "--dangerously-skip-"
-                "permissions", "-v", "--version", "-h", "--help")
-            continue
-        return a
+        if not a.startswith("-"):
+            return a
     return ""
 
 

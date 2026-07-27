@@ -4,6 +4,29 @@ All notable changes to this desktop. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.3] — 2026-07-27
+
+### Fixed
+
+- **The board's 2-minute refresh stole your selection.** Every card is
+  rebuilt on a repaint, so the focused one stopped existing and focus fell
+  back to the first card in the tab. If you were about to press Enter or
+  `d`, it would have landed on the wrong task. The refresh now remembers
+  which *task* was selected, not which widget, and puts focus back on it.
+- **`claude --verbose doctor` still counted as a session.** The
+  subcommand check tried to guess which flags take a value, so a boolean
+  flag swallowed the word after it. It no longer guesses: the result is
+  only ever membership-tested, so reading a flag's value by mistake is
+  harmless, while missing a real subcommand paints a phantom desk.
+- **Drop targets were only correct by accident.** `zone_at` filtered on
+  `display`, which is `True` for a widget in a hidden tab — the guard
+  never fired. It worked because Textual gives hidden panes a zero-area
+  region. Matching the wrong zone would have moved a card in a tab you
+  cannot see, which is not a thing to leave resting on an implementation
+  detail; it now checks the pane explicitly.
+- **"end of this sprint"** in the due-date picker meant whichever sprint
+  *today* falls in, even while you were looking at a different one.
+
 ## [1.1.2] — 2026-07-27
 
 ### Fixed
