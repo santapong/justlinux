@@ -23,7 +23,14 @@ setting() {   # setting <key> <default>
 # every daemon below is spawned with 9>&-: an inherited fd keeps the lock
 # held for the daemon's whole life and bricks every later invocation.
 exec 9>"${XDG_RUNTIME_DIR:-/tmp}/desktop-widgets.lock"
-flock 9 2>/dev/null || true
+# -w, NOT an unbounded wait. Serialisation here is best-effort: the cost of
+# two overlapping starts is a duplicate daemon, but the cost of waiting
+# forever is that the whole fleet stops responding. A daemon that leaks fd 9
+# (one spawned without 9>&- by an older build, or by hand) holds this lock
+# for its entire life — that had hypr-appdock and serial-watch from a
+# previous boot wedging every `start`, which silently killed the pet during
+# a wallpaper change because wallpaper.sh runs under `set -e`.
+flock -w 10 9 2>/dev/null || echo "desktop-widgets: lock busy, proceeding" >&2
 
 viz_up() { pgrep -xf "python3 $VIZ" >/dev/null 2>&1; }
 
