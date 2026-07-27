@@ -1,0 +1,263 @@
+#!/usr/bin/env python3
+"""hypr-kanban — the Habitica board, in the fleet's TUI style.
+
+    To do  ·  Doing  ·  Done        columns, from your Habitica To-Dos
+    Dailies                          a separate strip, because they recur
+
+Habitica has four task types and none of them are columns. Rather than
+inventing a mapping, the columns come from a signal Habitica really has:
+an unstarted To-Do has no checklist item ticked, a started one has some,
+a finished one is marked complete. Dailies are kept apart — "done" for a
+Daily means "done today", which is not the same claim.
+
+    Enter / Space   tick the selected task off (scores it in Habitica)
+    Tab / ←→        move between columns
+    r               refresh          q / Esc   close
+
+Credentials live in ~/.config/hyprdesk/secrets.json (0600), never in
+widgets.conf — that file is in a public repo.
+"""
+import os
+import re
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path.home() / ".local/lib"))
+
+from textual.app import App, ComposeResult          # noqa: E402
+from textual.binding import Binding                 # noqa: E402
+from textual.containers import Horizontal, Vertical, VerticalScroll  # noqa: E402
+from textual.widgets import Footer, Label, ListItem, ListView, Static  # noqa: E402
+
+from hyprdesk import habitica as H                  # noqa: E402
+from hyprdesk import secrets                        # noqa: E402
+
+def read_colors():
+    """The CARD palette, not waybar's raw wallust slots.
+
+    The obvious move is to parse ~/.config/waybar/colors.css like the other
+    panels do — and it is wrong. Those are wallust's unpinned ANSI slots, and
+    on the current wallpaper @red measures 1.00:1 against the background:
+    identical luminance, literally not rendered. A HP bar inked in it would
+    be invisible. hyprdesk.colors() is the same wallpaper-driven palette the
+    14 cards use, with good/bad PINNED to readable constants — so status
+    stays legible whatever the wallpaper does.
+    """
+    fallback = {"base": "#1e1e2e", "surface": "#45475a", "text": "#cdd6f4",
+                "subtext": "#a6adc8", "accent": "#89b4fa", "red": "#f38ba8",
+                "green": "#a6e3a1", "yellow": "#f9e2af"}
+    try:
+        from hyprdesk import colors
+        p = colors()
+        return {"base": p["bg"], "surface": p["muted"], "text": p["fg"],
+                "subtext": p["sub"], "accent": p["accent2"],
+                "red": p["bad"], "green": p["good"], "yellow": p["accent"]}
+    except Exception:
+        return fallback
+
+
+C = read_colors()
+COLUMNS = [("todo", "󰄰  To do"), ("doing", "󰥔  Doing"), ("done", "󰄲  Done")]
+
+
+class Card(ListItem):
+    # NOT `self.task` — ListItem already defines a `task` property and
+    # assigning over it raises "property has no setter" at first render
+    def __init__(self, task):
+        self.todo = task
+        text = task["text"] or "(untitled)"
+        bits = []
+        if task["total_n"]:
+            bits.append(f"{task['done_n']}/{task['total_n']}")
+        if task.get("due"):
+            bits.append(task["due"])
+        pri = float(task.get("pri") or 1)
+        if pri >= 2:
+            bits.append("!!" if pri >= 2 else "!")
+        sub = "  ·  ".join(bits)
+        rows = [Label(f"[{C['text']}]{text}[/]")]
+        if sub:
+            rows.append(Label(f"[{C['subtext']}]{sub}[/]"))
+        # a bare Vertical is height:1fr, so one card would stretch to fill
+        # the whole column — the classed one is height:auto in the CSS
+        super().__init__(Vertical(*rows, classes="cardbody"), classes="card")
+
+
+class Board(App):
+    CSS = f"""
+    Screen {{ background: {C['base']}; color: {C['text']}; }}
+    #hdr {{ height: 1; padding: 0 2; color: {C['accent']}; }}
+    #stats {{ height: 1; padding: 0 2; color: {C['subtext']}; }}
+    #cols {{ height: 1fr; }}
+    .col {{ width: 1fr; border: round {C['surface']}; margin: 0 1; }}
+    .col.-active {{ border: round {C['accent']}; }}
+    .coltitle {{ padding: 0 1; color: {C['accent']}; height: 1; }}
+    .card {{ padding: 0 1; height: auto; }}
+    .cardbody {{ height: auto; }}
+    .cardbody Label {{ height: auto; width: 1fr; }}
+    ListView {{ background: transparent; scrollbar-size-vertical: 1; }}
+    ListView > ListItem {{ height: auto; background: transparent; }}
+    /* Textual 8.x names it `-highlight` with ONE dash. With two it silently
+       never matches and the default blue block paints over the column. */
+    ListView > ListItem.-highlight {{ background: {C['accent']} 30%; }}
+    ListView:focus > ListItem.-highlight {{ background: {C['accent']} 45%; }}
+    ListView > ListItem.-hovered {{ background: {C['surface']} 40%; }}
+    ListView > .listview--scrollbar,
+    ListView {{ scrollbar-background: {C['base']};
+                scrollbar-color: {C['surface']};
+                scrollbar-color-hover: {C['accent']}; }}
+    #dailies {{ height: auto; max-height: 7; border: round {C['surface']};
+                margin: 0 1 1 1; }}
+    #msg {{ padding: 1 2; color: {C['yellow']}; }}
+    #setup {{ padding: 2 4; }}
+    """
+    BINDINGS = [
+        Binding("enter", "tick", "Complete", show=True),
+        Binding("space", "tick", "Complete", show=False),
+        Binding("right,tab", "next_col", "Next column", show=True),
+        Binding("left,shift+tab", "prev_col", "Prev", show=False),
+        Binding("r", "reload", "Refresh", show=True),
+        Binding("q,escape", "quit", "Close", show=True),
+    ]
+
+    def __init__(self):
+        super().__init__()
+        self.cols = {}
+        self.active = 0
+        self.error = ""
+
+    def compose(self) -> ComposeResult:
+        yield Static("", id="hdr")
+        yield Static("", id="stats")
+        if not secrets.configured("habitica", "user_id", "api_token"):
+            yield Static(
+                f"[{C['yellow']}]Habitica is not set up yet.[/]\n\n"
+                f"Open [{C['accent']}]Hypr Settings → Integrations[/] "
+                f"(ALT+X) and paste your\nUser ID and API token from "
+                f"[{C['accent']}]habitica.com → Settings → Site Data[/].\n\n"
+                f"[{C['subtext']}]They are stored in "
+                f"~/.config/hyprdesk/secrets.json (0600), never in the "
+                f"dotfiles repo.[/]", id="setup")
+            yield Footer()
+            return
+        with Horizontal(id="cols"):
+            for key, title in COLUMNS:
+                with Vertical(classes="col", id=f"col-{key}"):
+                    yield Static(title, classes="coltitle")
+                    yield ListView(id=f"lv-{key}")
+        yield VerticalScroll(id="dailies")
+        yield Static("", id="msg")
+        yield Footer()
+
+    def on_mount(self):
+        self.query_one("#hdr", Static).update(
+            f"[bold {C['accent']}]󰄲  Habitica board[/]"
+            f"   [{C['subtext']}]Enter ticks · r refresh · q closes[/]")
+        if secrets.configured("habitica", "user_id", "api_token"):
+            self.run_worker(self.reload(), exclusive=True)
+
+    # ---------- data ----------
+    async def reload(self, fresh=True):
+        try:
+            data = await self._thread(lambda: H.board(fresh=fresh))
+            st = await self._thread(lambda: H.stats(fresh=fresh))
+        except H.HabiticaError as e:
+            self.error = str(e)
+            self.query_one("#msg", Static).update(f"[{C['red']}]󰀦  {e}[/]")
+            return
+        except Exception as e:                      # never take the UI down
+            self.query_one("#msg", Static).update(f"[{C['red']}]󰀦  {e}[/]")
+            return
+        self.error = ""
+        self.cols = data
+        self.query_one("#stats", Static).update(
+            f"[{C['green']}]lv {st['level']}[/]  "
+            f"[{C['red']}]{st['hp']}/{st['maxhp']} hp[/]  "
+            f"[{C['yellow']}]{st['gold']} gp[/]  "
+            f"[{C['subtext']}]{st['exp']}/{st['next']} xp[/]")
+        for key, _t in COLUMNS:
+            lv = self.query_one(f"#lv-{key}", ListView)
+            await lv.clear()
+            for t in data.get(key, []):
+                await lv.append(Card(t))
+        box = self.query_one("#dailies", VerticalScroll)
+        await box.remove_children()
+        dl = data.get("dailies", [])
+        if dl:
+            done = sum(1 for d in dl if d.get("completed"))
+            await box.mount(Static(
+                f"[{C['accent']}]󰃭  Dailies[/] "
+                f"[{C['subtext']}]{done}/{len(dl)} today[/]"))
+            for d in dl:
+                mark = "󰄲" if d.get("completed") else "󰄰"
+                ink = C["subtext"] if d.get("completed") else C["text"]
+                await box.mount(Static(f"  [{ink}]{mark}  {d['text']}[/]"))
+        n = sum(len(data.get(k, [])) for k, _ in COLUMNS)
+        self.query_one("#msg", Static).update(
+            f"[{C['subtext']}]{n} to-dos · {len(dl)} dailies due[/]"
+            if n or dl else f"[{C['subtext']}]nothing on the board[/]")
+        self._mark_active()
+
+    async def _thread(self, fn):
+        import asyncio
+        return await asyncio.to_thread(fn)
+
+    # ---------- interaction ----------
+    def _mark_active(self):
+        for i, (key, _t) in enumerate(COLUMNS):
+            self.query_one(f"#col-{key}").set_class(i == self.active, "-active")
+
+    def action_next_col(self):
+        self.active = (self.active + 1) % len(COLUMNS)
+        self._focus_active()
+
+    def action_prev_col(self):
+        self.active = (self.active - 1) % len(COLUMNS)
+        self._focus_active()
+
+    def _focus_active(self):
+        self._mark_active()
+        try:
+            self.query_one(f"#lv-{COLUMNS[self.active][0]}", ListView).focus()
+        except Exception:
+            pass
+
+    def action_reload(self):
+        self.run_worker(self.reload(), exclusive=True)
+
+    def action_tick(self):
+        key = COLUMNS[self.active][0]
+        try:
+            lv = self.query_one(f"#lv-{key}", ListView)
+        except Exception:
+            return
+        item = lv.highlighted_child
+        if not isinstance(item, Card):
+            return
+        task = item.todo
+        # Done -> Enter would un-complete it; that is a real Habitica action
+        # but a surprising one from a board, so it is refused out loud
+        if key == "done":
+            self.query_one("#msg", Static).update(
+                f"[{C['subtext']}]already done — untick it in Habitica[/]")
+            return
+        self.run_worker(self._tick(task), exclusive=True)
+
+    async def _tick(self, task):
+        self.query_one("#msg", Static).update(
+            f"[{C['subtext']}]ticking “{task['text'][:40]}”…[/]")
+        try:
+            await self._thread(lambda: H.score(task["id"], "up"))
+        except H.HabiticaError as e:
+            self.query_one("#msg", Static).update(f"[{C['red']}]󰀦  {e}[/]")
+            return
+        await self.reload(fresh=True)
+
+
+def main():
+    os.environ.setdefault("TEXTUAL_COLOR_SYSTEM", "truecolor")
+    Board().run()
+
+
+if __name__ == "__main__":
+    main()

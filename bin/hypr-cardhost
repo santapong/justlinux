@@ -322,6 +322,10 @@ class CardWindow(LayerWindow):
                          namespace=f"hypr-card-{inst_id}")
         self.host, self.id, self.template = host, inst_id, template
         self.mon_name = mon_name
+        # opt-in click target: `action = "cmd"` in the template, overridable
+        # per instance with <id>_action in widgets.conf
+        self.action = str(c.get(f"{inst_id}_action",
+                                getattr(template, "action", "") or "")).strip()
         self.geo = gdk_mon.get_geometry()
         try:
             self.scale = max(0.5, min(2.0, float(c.get(f"{inst_id}_scale", 1))))
@@ -380,6 +384,13 @@ class CardWindow(LayerWindow):
         self.area = Gtk.DrawingArea()
         self.area.connect("draw", self.on_draw)
         self.add(self.area)
+        if self.action:
+            from gi.repository import Gdk as _Gdk
+            # masks go on BOTH the toplevel and the covering child, or the
+            # press never arrives (a GDK gotcha this fleet has hit before)
+            self.add_events(_Gdk.EventMask.BUTTON_PRESS_MASK)
+            self.area.add_events(_Gdk.EventMask.BUTTON_PRESS_MASK)
+            self.connect("button-press-event", self.on_card_click)
         self.resize_to_content()
         self.connect("map-event", self.on_map)
         self.show_all()
@@ -410,11 +421,34 @@ class CardWindow(LayerWindow):
         self.set_size_request(self.card_w, self.card_h)
 
     def on_map(self, *_):
-        # display-only surface: NEVER eat desktop clicks
+        # Display-only by default: a card must NEVER eat desktop clicks.
+        # A template can opt IN with `action = "<shell command>"`, and only
+        # then does the card claim its own rectangle — the rest of the
+        # desktop stays click-through either way.
         gdk_win = self.get_window()
-        if gdk_win:
+        if not gdk_win:
+            return False
+        if self.action:
+            gdk_win.input_shape_combine_region(
+                cairo.Region(cairo.RectangleInt(
+                    x=0, y=0, width=max(1, int(self.card_w)),
+                    height=max(1, int(self.card_h)))), 0, 0)
+        else:
             gdk_win.input_shape_combine_region(cairo.Region(), 0, 0)
         return False
+
+    def on_card_click(self, *_):
+        """Run the template's action. Detached, so a slow tool never blocks
+        the render loop of the other 13 cards."""
+        if not self.action:
+            return False
+        try:
+            subprocess.Popen(self.action, shell=True, start_new_session=True,
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+        return True
 
     def on_draw(self, _w, cr):
         try:

@@ -1,2 +1,6 @@
 __pycache__/
 *.pyc
+
+# credentials live outside the repo, but never risk it
+secrets.json
+.config/hyprdesk/

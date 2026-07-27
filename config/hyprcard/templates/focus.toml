@@ -5,6 +5,8 @@ icon = "󰐰"
 description = "Deep-work countdown: DND while it runs (ALT+SHIFT+F)"
 default_width = 300
 default_pos = "top_left"
+# click the card to open the Habitica board
+action = "kitty --class hyprkanban -e ~/.local/bin/hypr-kanban"
 
 [source]
 cmd = "~/.local/bin/widget-focus.sh --fields"

@@ -49,6 +49,9 @@ class Template:
         except (TypeError, ValueError) as e:
             raise TemplateError(f"default_width must be an integer: {e}")
         self.default_pos = t.get("default_pos", "top_left")
+        # optional click target — a card with an action stops being purely
+        # display-only and claims its own rectangle (hypr-cardhost.on_map)
+        self.action = str(t.get("action", "") or "").strip()
 
         self.params = {}
         for pname, p in (data.get("params") or {}).items():
