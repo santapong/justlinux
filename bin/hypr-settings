@@ -230,6 +230,13 @@ def _esc(s):
     return str(s).replace("[", r"\[")
 
 
+def _col(text, w):
+    """Fixed-width column. Server names and URLs vary wildly in length —
+    left ragged they wrap and orphan the status note on its own line."""
+    t = str(text)
+    return (t[:w - 1] + "…") if len(t) > w else t.ljust(w)
+
+
 def mcp_list():
     """[(name, target, state, note, managed)] from `claude mcp list`.
     state: good | warn | bad. Raises RuntimeError with a human message."""
@@ -985,12 +992,14 @@ class HyprSettings(App):
         await box.remove_children()
         self._mcp_rm = {}
         ink = {"good": C["green"], "warn": C["yellow"], "bad": C["red"]}
-        mark = {"good": "●", "warn": "◐", "bad": "○"}
+        # ◐ was tried for warn and rendered blank — these three are all
+        # plain Geometric Shapes and differ in FORM, not only in colour
+        mark = {"good": "●", "warn": "◆", "bad": "○"}
         for i, (name, target, state, note, managed) in enumerate(servers):
             line = (f"[{ink[state]}]{mark[state]}[/] "
-                    f"[{C['text']}]{_esc(name)}[/]  "
-                    f"[{C['subtext']}]{_esc(target[:44])}"
-                    f"{' — ' + _esc(note) if note else ''}[/]")
+                    f"[{C['text']}]{_esc(_col(name, 26))}[/] "
+                    f"[{C['subtext']}]{_esc(_col(target, 34))} "
+                    f"{_esc(_col(note, 20))}[/]")
             if managed:
                 await box.mount(Static(line, classes="mcprow"))
             else:
