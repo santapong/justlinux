@@ -4,6 +4,33 @@ All notable changes to this desktop. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] — 2026-07-27
+
+### Documentation
+
+- **Every diagram is now generated.** `docs/diagrams/gen_c4.py` emits all
+  seven SVGs from short declarations; the `.svg` files are output and
+  should not be hand-edited. They were hand-authored once and the cost of
+  editing SVG by hand was high enough that they stopped being updated — a
+  box is four numbers and three strings now.
+- **Three new C4 component diagrams**: Claude Studio, the 2D office, and
+  the Habitica board. The office's Mermaid flowchart and the Studio's
+  ASCII sketch were replaced by real C4 diagrams; nothing in `docs/` uses
+  Mermaid any more.
+- **Context and container diagrams brought up to date** — they predated
+  the Studio, the office, the board, the secrets store and MCP. The
+  container diagram was also re-laid-out: connectors used to run straight
+  through four boxes each.
+- `docs/habitica-board.md` — the tag trick behind Doing and sprints, the
+  ~30 requests-a-minute budget that shapes the board, and the two faults
+  that made the old one look broken.
+- README opens with the context diagram and indexes all four docs.
+
+### Removed
+
+- `ros2/` leftovers on disk — one gitignored `.pyc` whose source had
+  already gone. The package itself is untouched in `~/ros2_ws`.
+
 ## [1.1.0] — 2026-07-27
 
 ### Added
