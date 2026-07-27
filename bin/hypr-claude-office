@@ -43,7 +43,7 @@ sys.path.insert(0, str(Path.home() / ".local/lib"))
 from hyprdesk import colors, conf_get, rgb
 from hyprdesk.layer import LayerWindow
 from hyprdesk.claudesessions import (CLAUDE_PROJECTS, _argv, _sid_key,
-                                     session_title,
+                                     session_title, transcript_for,
                                      active_subagents, claude_procs,
                                      daemon_roster, job_state, proc_cpu_ticks,
                                      recent_transcripts, session_meta,
@@ -199,109 +199,6 @@ def _load_theme():
 
 
 _load_theme()
-
-
-def _boot_epoch():
-    try:
-        with open("/proc/stat") as f:
-            for line in f:
-                if line.startswith("btime"):
-                    return int(line.split()[1])
-    except (OSError, ValueError, IndexError):
-        pass
-    return 0
-
-
-BOOT = _boot_epoch()
-try:
-    HZ = os.sysconf("SC_CLK_TCK") or 100
-except (ValueError, OSError):
-    HZ = 100
-
-
-def _proc_start(pid):
-    """Wall-clock start of a pid, or None. Pairing a session to its
-    transcript by iteration order handed desks each other's
-    conversations — a plain `claude` writes its first line seconds after
-    it starts, so time is the honest signal."""
-    if not BOOT:
-        return None
-    try:
-        with open(f"/proc/{pid}/stat") as f:
-            data = f.read()
-        # comm can contain spaces/parens: everything after the LAST ')'
-        fields = data[data.rindex(")") + 2:].split()
-        return BOOT + int(fields[19]) / HZ
-    except (OSError, ValueError, IndexError):
-        return None
-
-
-def _is_sid(s):
-    return len(s) >= 32 and all(c in "0123456789abcdef-" for c in s.lower())
-
-
-def _argv_sid(pid):
-    """The session a process was TOLD to run, from its own argv — the one
-    hard fact about which conversation a desk belongs to. A fork resumes
-    into a NEW id, so its argv names nothing we can bind to."""
-    argv = _argv(pid)
-    if "--fork-session" in argv:
-        return ""
-    for i, a in enumerate(argv):
-        if a in ("--resume", "-r", "--session-id"):
-            nxt = argv[i + 1] if i + 1 < len(argv) else ""
-            if _is_sid(nxt):
-                return nxt
-    return ""
-
-
-_TX_START = {}                 # path -> epoch of its first timestamped line
-
-
-def _tx_start(path):
-    """When a transcript's conversation began. The first lines are
-    untimestamped bookkeeping, so scan a few; degrade to None."""
-    key = str(path)
-    if key in _TX_START:
-        return _TX_START[key]
-    out = None
-    try:
-        with open(path, errors="replace") as f:
-            for i, line in enumerate(f):
-                if i > 12:
-                    break
-                try:
-                    ts = json.loads(line).get("timestamp")
-                except (ValueError, AttributeError):
-                    continue
-                if not ts:
-                    continue
-                try:
-                    out = datetime.fromisoformat(
-                        str(ts).replace("Z", "+00:00")).timestamp()
-                except (TypeError, ValueError):
-                    out = None
-                break
-    except OSError:
-        pass
-    if len(_TX_START) > 200:
-        _TX_START.clear()
-    _TX_START[key] = out
-    return out
-
-
-def _tx_for_sid(sid, txs):
-    """Path of a known session id — from the listing we already have,
-    else straight off disk (an old resumed session is not "recent")."""
-    for _mt, f in txs:
-        if f.stem == sid:
-            return str(f)
-    try:
-        for f in CLAUDE_PROJECTS.glob(f"*/{sid}.jsonl"):
-            return str(f)
-    except OSError:
-        pass
-    return ""
 
 
 def _tail_awaiting(path, nbytes=16384):
@@ -745,36 +642,10 @@ class Office(LayerWindow):
 
     # ----- data -----
     def _transcript_for(self, pid, cwd, taken, txs):
-        """Which conversation this process is really on. argv wins when it
-        names the session (`claude --resume <sid>`) — no guessing beats a
-        fact. Otherwise pair unclaimed cwd-matching transcripts by TIME:
-        handing them out newest-first while pids arrive oldest-first bound
-        desks to each other's sessions. Resolved ONCE per pid: re-resolving
-        every worker made two sessions in the same repo trade desks."""
-        sid = _argv_sid(pid)
-        if sid:
-            # argv is fact — if its file has not appeared yet, wait for it
-            # (unbound desks retry every poll) rather than pair it wrong
-            return _tx_for_sid(sid, txs)
-        started = _proc_start(pid)
-        best, best_gap = "", None
-        for mt, f in txs:
-            if str(f) in taken:
-                continue
-            meta_cwd, _ = session_meta(f, max_lines=15)
-            if meta_cwd != cwd:
-                continue
-            if started is None:      # no clock: newest-first, as before
-                return str(f)
-            if mt < started - 5:
-                continue             # untouched since the process began
-            gap = abs((_tx_start(f) or mt) - started)
-            if best_gap is None or gap < best_gap:
-                best, best_gap = str(f), gap
-        # an unbounded best wins by default, so a brand-new `claude` with no
-        # transcript yet would adopt a SIBLING session's file in the same cwd.
-        # An unbound desk retries every poll — waiting beats adopting.
-        return best if best_gap is not None and best_gap <= 120 else ""
+        """Which conversation this process is really on. The rule was
+        worked out here and now lives in claudesessions, because every
+        session list needs it — see transcript_for()."""
+        return transcript_for(pid, cwd, taken, txs)
 
     def _awaiting(self, w, mtime):
         """_tail_awaiting, re-read only when the transcript actually grew —

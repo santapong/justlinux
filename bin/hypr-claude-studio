@@ -290,7 +290,12 @@ def sidebar():
                     f"[bold]🟢 Running ({len(running)})[/]", expand=True)
                 for r in running:
                     icon = "🟢" if r["kind"] == "run" else "󰑮"
-                    sec.add_leaf(f"{icon} {r['label']}", data=r)
+                    # the name says what it IS, the dim path says where —
+                    # every session in $HOME used to read just "~"
+                    where = r.get("dir", "")
+                    sec.add_leaf(f"{icon} {r['label']}"
+                                 + (f"  [dim]{where}[/]" if where else ""),
+                                 data=r)
             projects = {}
             for r in past:
                 projects.setdefault(r["label"], []).append(r)

@@ -12,6 +12,7 @@ import json
 import os
 import subprocess
 import time
+from datetime import datetime
 from pathlib import Path
 
 CLAUDE_PROJECTS = Path.home() / ".claude/projects"
@@ -470,6 +471,148 @@ def active_subagents(max_age=20):
     return out
 
 
+# ---------- binding a process to its conversation ----------
+# Worked out in the office, which needs a desk to name the conversation
+# its process is ACTUALLY on; shared now because every session list has
+# the same problem. argv is the one hard fact — the rest is careful
+# guessing, and waiting beats guessing wrong.
+
+
+def _boot_epoch():
+    try:
+        with open("/proc/stat") as f:
+            for line in f:
+                if line.startswith("btime"):
+                    return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
+
+
+BOOT = _boot_epoch()
+try:
+    HZ = os.sysconf("SC_CLK_TCK") or 100
+except (ValueError, OSError):
+    HZ = 100
+
+
+def _proc_start(pid):
+    """Wall-clock start of a pid, or None. Pairing a session to its
+    transcript by iteration order handed desks each other's
+    conversations — a plain `claude` writes its first line seconds after
+    it starts, so time is the honest signal."""
+    if not BOOT:
+        return None
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            data = f.read()
+        # comm can contain spaces/parens: everything after the LAST ')'
+        fields = data[data.rindex(")") + 2:].split()
+        return BOOT + int(fields[19]) / HZ
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _is_sid(s):
+    return len(s) >= 32 and all(c in "0123456789abcdef-" for c in s.lower())
+
+
+def _argv_sid(pid):
+    """The session a process was TOLD to run, from its own argv — the one
+    hard fact about which conversation a desk belongs to. A fork resumes
+    into a NEW id, so its argv names nothing we can bind to."""
+    argv = _argv(pid)
+    if "--fork-session" in argv:
+        return ""
+    for i, a in enumerate(argv):
+        if a in ("--resume", "-r", "--session-id"):
+            nxt = argv[i + 1] if i + 1 < len(argv) else ""
+            if _is_sid(nxt):
+                return nxt
+    return ""
+
+
+_TX_START = {}                 # path -> epoch of its first timestamped line
+
+
+def _tx_start(path):
+    """When a transcript's conversation began. The first lines are
+    untimestamped bookkeeping, so scan a few; degrade to None."""
+    key = str(path)
+    if key in _TX_START:
+        return _TX_START[key]
+    out = None
+    try:
+        with open(path, errors="replace") as f:
+            for i, line in enumerate(f):
+                if i > 12:
+                    break
+                try:
+                    ts = json.loads(line).get("timestamp")
+                except (ValueError, AttributeError):
+                    continue
+                if not ts:
+                    continue
+                try:
+                    out = datetime.fromisoformat(
+                        str(ts).replace("Z", "+00:00")).timestamp()
+                except (TypeError, ValueError):
+                    out = None
+                break
+    except OSError:
+        pass
+    if len(_TX_START) > 200:
+        _TX_START.clear()
+    _TX_START[key] = out
+    return out
+
+
+def _tx_for_sid(sid, txs):
+    """Path of a known session id — from the listing we already have,
+    else straight off disk (an old resumed session is not "recent")."""
+    for _mt, f in txs:
+        if f.stem == sid:
+            return str(f)
+    try:
+        for f in CLAUDE_PROJECTS.glob(f"*/{sid}.jsonl"):
+            return str(f)
+    except OSError:
+        pass
+    return ""
+
+
+def transcript_for(pid, cwd, taken, txs):
+    """Which conversation this process is really on. argv wins when it
+    names the session (`claude --resume <sid>`) — no guessing beats a
+    fact. Otherwise pair unclaimed cwd-matching transcripts by TIME:
+    handing them out newest-first while pids arrive oldest-first bound
+    desks to each other's sessions. Callers add the winner to `taken`."""
+    sid = _argv_sid(pid)
+    if sid:
+        # argv is fact — if its file has not appeared yet, wait for it
+        # rather than pair it wrong
+        return _tx_for_sid(sid, txs)
+    started = _proc_start(pid)
+    best, best_gap = "", None
+    for mt, f in txs:
+        if str(f) in taken:
+            continue
+        meta_cwd, _ = session_meta(f, max_lines=15)
+        if meta_cwd != cwd:
+            continue
+        if started is None:      # no clock: newest-first, as before
+            return str(f)
+        if mt < started - 5:
+            continue             # untouched since the process began
+        gap = abs((_tx_start(f) or mt) - started)
+        if best_gap is None or gap < best_gap:
+            best, best_gap = str(f), gap
+    # an unbounded best wins by default, so a brand-new `claude` with no
+    # transcript yet would adopt a SIBLING session's file in the same cwd.
+    # Waiting beats adopting — an unbound row retries on the next poll.
+    return best if best_gap is not None and best_gap <= 120 else ""
+
+
 def session_rows(clients=None):
     """Flat entry list for pickers: running first, then bg jobs, then
     resumable transcripts. Same dict shape the launcher's Item expects."""
@@ -486,25 +629,46 @@ def session_rows(clients=None):
         return (p or "?").replace(home, "~") or "~"
 
     rows = []
+    txs = recent_transcripts()
+    # a live session is named by what it IS, not where it runs: every
+    # session in $HOME used to list as "~". The directory moves to the
+    # detail line, so neither fact is lost.
+    taken = set()
     for pid, cwd, interactive, tty in claude_procs():
+        tx = transcript_for(pid, cwd, taken, txs)
+        if tx:
+            taken.add(tx)
+        title = session_title(tx) if tx else ""
+        sid = Path(tx).stem if tx else ""
+        where = nice(cwd)
         if interactive:
-            rows.append({"label": nice(cwd), "icon": "󰚩", "kind": "run",
+            rows.append({"label": title or where, "icon": "󰚩", "kind": "run",
                          "addr": window_of_pid(pid, clients), "cwd": cwd,
-                         "pid": pid, "tty": tty,
-                         "detail": "🟢 running — Enter focuses its terminal"})
+                         "pid": pid, "tty": tty, "sid": sid, "dir": where,
+                         "detail": f"🟢 running in {where} — Enter focuses"
+                                   " its terminal"})
         else:
-            rows.append({"label": nice(cwd), "icon": "󰚩", "kind": "bg",
-                         "cwd": cwd, "pid": pid,
-                         "detail": "󰑮 background job — view on claude.ai"})
+            rows.append({"label": title or where, "icon": "󰚩", "kind": "bg",
+                         "cwd": cwd, "pid": pid, "sid": sid, "dir": where,
+                         "detail": f"󰑮 background job in {where} —"
+                                   " view on claude.ai"})
     for pid, sid, cwd in daemon_hosted():
-        rows.append({"label": nice(cwd), "icon": "󰚩", "kind": "bg",
-                     "cwd": cwd, "pid": pid, "sid": sid,
-                     "detail": "󰑮 daemon-hosted — outlives its terminal"})
-    for mtime, f in recent_transcripts():
+        where = nice(cwd)
+        tx = _tx_for_sid(sid, txs)
+        if tx:
+            taken.add(tx)
+        rows.append({"label": (session_title(tx) if tx else "") or where,
+                     "icon": "󰚩", "kind": "bg",
+                     "cwd": cwd, "pid": pid, "sid": sid, "dir": where,
+                     "detail": f"󰑮 daemon-hosted in {where} —"
+                               " outlives its terminal"})
+    for mtime, f in txs:
         cwd, preview = session_meta(f)
         if not preview:
             continue                     # empty/aborted session: skip
+        # past rows keep the DIRECTORY as their label — the studio tree
+        # groups projects by it, and the title is already in the detail
         rows.append({"label": nice(cwd), "icon": "󰚩", "kind": "past",
-                     "sid": f.stem, "cwd": cwd or home,
+                     "sid": f.stem, "cwd": cwd or home, "dir": nice(cwd),
                      "detail": f"{ago(mtime)} — {preview}"})
     return rows

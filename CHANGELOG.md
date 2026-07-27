@@ -28,6 +28,17 @@ versioning is [SemVer](https://semver.org/spec/v2.0.0.html).
   to the terminal emulator and never reaches a TUI.
 - `docs/claude-studio.md`.
 
+### Fixed
+
+- **Live sessions listed as `~`.** The session tree and the launcher named a
+  running conversation by its directory, so everything started in `$HOME`
+  read as `~` and told you nothing. They now use Claude's own title, with
+  the directory kept on the detail line. The rule for deciding which
+  conversation a process is actually on — argv first, then time-paired
+  transcripts — was worked out in the office and now lives in
+  `claudesessions.py` where every session list can reach it, rather than
+  being duplicated.
+
 ## [1.0.0] — 2026-07-27
 
 First tagged release. The desktop has been in daily use throughout; this
