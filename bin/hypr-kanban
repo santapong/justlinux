@@ -1,36 +1,47 @@
 #!/usr/bin/env python3
 """hypr-kanban — the Habitica board, in the fleet's TUI style.
 
-    To do  ·  Doing  ·  Done        columns, from your Habitica To-Dos
-    Dailies                          a separate strip, because they recur
+Three tabs, because Habitica has three kinds of task and they are not the
+same kind of thing:
 
-Habitica has four task types and none of them are columns. Rather than
-inventing a mapping, the columns come from a signal Habitica really has:
-an unstarted To-Do has no checklist item ticked, a started one has some,
-a finished one is marked complete. Dailies are kept apart — "done" for a
-Daily means "done today", which is not the same claim.
+    To-Dos    a board — To do · Doing · Done. Drag a card between them.
+    Dailies   things that recur; "done" means done TODAY
+    Habits    a + / − you press; there is nothing to finish
 
-    Enter / Space   tick the selected task off (scores it in Habitica)
-    Tab / ←→        move between columns
-    r               refresh          q / Esc   close
+"Doing" is not a state Habitica has. Checklist progress was tried as a
+stand-in and was wrong for real use — almost no to-do has a checklist, so
+Doing and Done sat empty forever. It is now a TAG called `doing`, which is
+the one place Habitica lets you say something it did not think of, and it
+shows up on the phone and the website too. The tag is created the first
+time you move something into Doing, never just by opening the board.
+
+    drag a card       move it between columns
+    [ ]               same thing from the keyboard
+    Enter / Space     tick the focused task off
+    + / -             score the focused Habit
+    1 2 3             the three tabs (Tab itself moves focus, as usual)
+    r refresh         q / Esc close
 
 Credentials live in ~/.config/hyprdesk/secrets.json (0600), never in
 widgets.conf — that file is in a public repo.
 """
 import os
-import re
 import sys
+import unicodedata
 from pathlib import Path
 
 sys.path.insert(0, str(Path.home() / ".local/lib"))
 
-from textual.app import App, ComposeResult          # noqa: E402
-from textual.binding import Binding                 # noqa: E402
-from textual.containers import Horizontal, Vertical, VerticalScroll  # noqa: E402
-from textual.widgets import Footer, Label, ListItem, ListView, Static  # noqa: E402
+from textual.app import App, ComposeResult            # noqa: E402
+from textual.binding import Binding                   # noqa: E402
+from textual.containers import (Horizontal, Vertical,  # noqa: E402
+                                VerticalScroll)
+from textual.widgets import (Footer, Static, TabbedContent,  # noqa: E402
+                             TabPane)
 
-from hyprdesk import habitica as H                  # noqa: E402
-from hyprdesk import secrets                        # noqa: E402
+from hyprdesk import habitica as H                    # noqa: E402
+from hyprdesk import secrets                          # noqa: E402
+
 
 def read_colors():
     """The CARD palette, not waybar's raw wallust slots.
@@ -58,64 +69,178 @@ def read_colors():
 
 C = read_colors()
 COLUMNS = [("todo", "󰄰  To do"), ("doing", "󰥔  Doing"), ("done", "󰄲  Done")]
+# Habitica difficulty, in its own words: trivial · easy · medium · hard
+DIFF = [(2.0, "hard", "red"), (1.5, "medium", "yellow"),
+        (1.0, "easy", "green"), (0.0, "trivial", "subtext")]
 
 
-class Card(ListItem):
-    # NOT `self.task` — ListItem already defines a `task` property and
-    # assigning over it raises "property has no setter" at first render
-    def __init__(self, task):
-        self.todo = task
-        text = task["text"] or "(untitled)"
-        bits = []
-        if task["total_n"]:
-            bits.append(f"{task['done_n']}/{task['total_n']}")
-        if task.get("due"):
-            bits.append(task["due"])
-        pri = float(task.get("pri") or 1)
-        if pri >= 2:
-            bits.append("!!" if pri >= 2 else "!")
-        sub = "  ·  ".join(bits)
-        rows = [Label(f"[{C['text']}]{text}[/]")]
-        if sub:
-            rows.append(Label(f"[{C['subtext']}]{sub}[/]"))
-        # a bare Vertical is height:1fr, so one card would stretch to fill
-        # the whole column — the classed one is height:auto in the CSS
-        super().__init__(Vertical(*rows, classes="cardbody"), classes="card")
+def emoji(text):
+    """Habitica stores :shortcodes: in task titles. Unicode names them
+    almost the same way, so most resolve with no table to maintain; the
+    ones that do not are left exactly as written rather than dropped."""
+    out, i = [], 0
+    while True:
+        a = text.find(":", i)
+        if a < 0:
+            out.append(text[i:])
+            break
+        b = text.find(":", a + 1)
+        if b < 0:
+            out.append(text[i:])
+            break
+        name = text[a + 1:b]
+        try:
+            out.append(text[i:a] + unicodedata.lookup(
+                name.replace("_", " ").upper()))
+        except (KeyError, ValueError):
+            out.append(text[i:b])
+            b -= 1                      # that ':' may open the next code
+        i = b + 1
+    return "".join(out).strip()
+
+
+def difficulty(pri):
+    for floor, name, ink in DIFF:
+        if float(pri or 1) >= floor:
+            return name, ink
+    return "trivial", "subtext"
+
+
+class Card(Static, can_focus=True):
+    """One task, as a card you can pick up.
+
+    Terminals have no drag ghost to float under the cursor, so the drag is
+    shown the honest way: the card you are carrying dims and the column
+    that will take it lights up. Press, move, release — the gesture is the
+    same, only the feedback differs.
+    """
+
+    def __init__(self, task, board, draggable=True):
+        self.todo = task            # NOT self.task: ListItem-era name clash
+        self.board = board
+        self.draggable = draggable
+        self._down = None
+        self._dragging = False
+        super().__init__(self._face(), classes="card")
+
+    def _face(self):
+        # NOT _render(): Widget._render() is Textual's own, and overriding
+        # it with something returning a str breaks height calculation with
+        # "'str' object has no attribute 'get_height'". Same trap as
+        # ListItem.task.
+        t = self.todo
+        name, ink = difficulty(t.get("pri"))
+        bits = [f"[{C[ink]}]●[/] [{C['subtext']}]{name}[/]"]
+        if t.get("total_n"):
+            done = t["done_n"] == t["total_n"]
+            bits.append(f"[{C['green'] if done else C['subtext']}]"
+                        f"☑ {t['done_n']}/{t['total_n']}[/]")
+        if t.get("due"):
+            bits.append(f"[{C['subtext']}]󰃭 {t['due']}[/]")
+        if t.get("streak"):
+            bits.append(f"[{C['yellow']}]󰈸 {t['streak']}[/]")
+        if t.get("kind") == "habit":
+            up = (f"[{C['green']}]＋{t['up_n']}[/]" if t.get("up")
+                  else f"[{C['subtext']}]＋ —[/]")
+            dn = (f"[{C['red']}]−{t['down_n']}[/]" if t.get("down")
+                  else f"[{C['subtext']}]− —[/]")
+            bits.append(f"{up}  {dn}")
+        head = emoji(t.get("text") or "") or "(untitled)"
+        if t.get("kind") == "daily":
+            head = ("󰄲  " if t.get("completed") else "󰄰  ") + head
+        ink_head = C["subtext"] if t.get("completed") else C["text"]
+        return f"[{ink_head}]{head}[/]\n" + "  ".join(bits)
+
+    def refresh_face(self):
+        self.update(self._face())
+
+    # ----- drag -----
+    def on_mouse_down(self, event):
+        self.focus()
+        if not self.draggable:
+            return
+        self._down = (event.screen_x, event.screen_y)
+        self._dragging = False
+        self.capture_mouse()
+
+    def on_mouse_move(self, event):
+        if self._down is None:
+            return
+        dx = abs(event.screen_x - self._down[0])
+        dy = abs(event.screen_y - self._down[1])
+        if not self._dragging:
+            if dx + dy < 2:
+                return                  # a click is not a drag
+            self._dragging = True
+            self.add_class("-dragging")
+        self.board.hover_column(
+            self.board.column_at(event.screen_x, event.screen_y))
+
+    def on_mouse_up(self, event):
+        if self._down is None:
+            return
+        self.release_mouse()
+        self._down = None
+        if not self._dragging:
+            return
+        self._dragging = False
+        self.remove_class("-dragging")
+        self.board.hover_column(None)
+        target = self.board.column_at(event.screen_x, event.screen_y)
+        if target:
+            self.board.move_card(self, target)
 
 
 class Board(App):
+    TITLE = "Habitica"
+    # cards mount after the first paint, and Textual hands focus to the
+    # first focusable thing it sees — which pulled the whole TabbedContent
+    # over to whichever Daily happened to land first. We choose instead.
+    AUTO_FOCUS = None
     CSS = f"""
     Screen {{ background: {C['base']}; color: {C['text']}; }}
     #hdr {{ height: 1; padding: 0 2; color: {C['accent']}; }}
     #stats {{ height: 1; padding: 0 2; color: {C['subtext']}; }}
+    Tabs {{ background: transparent; }}
+    Tab {{ color: {C['subtext']}; }}
+    Tab.-active {{ color: {C['accent']}; text-style: bold; }}
+    Underline > .underline--bar {{ color: {C['accent']};
+                                   background: {C['surface']}; }}
+    /* Textual paints the focused tab with $block-cursor-background — a
+       theme blue that has nothing to do with the wallpaper. */
+    Tabs:focus .-active {{ color: {C['accent']}; text-style: bold;
+                           background: {C['accent']} 22%; }}
+    Tabs:focus .underline--bar {{ background: {C['surface']}; }}
+    TabPane {{ padding: 0; }}
     #cols {{ height: 1fr; }}
     .col {{ width: 1fr; border: round {C['surface']}; margin: 0 1; }}
-    .col.-active {{ border: round {C['accent']}; }}
+    .col.-drop {{ border: round {C['accent']}; background: {C['accent']} 12%; }}
     .coltitle {{ padding: 0 1; color: {C['accent']}; height: 1; }}
-    .card {{ padding: 0 1; height: auto; }}
-    .cardbody {{ height: auto; }}
-    .cardbody Label {{ height: auto; width: 1fr; }}
-    ListView {{ background: transparent; scrollbar-size-vertical: 1; }}
-    ListView > ListItem {{ height: auto; background: transparent; }}
-    /* Textual 8.x names it `-highlight` with ONE dash. With two it silently
-       never matches and the default blue block paints over the column. */
-    ListView > ListItem.-highlight {{ background: {C['accent']} 30%; }}
-    ListView:focus > ListItem.-highlight {{ background: {C['accent']} 45%; }}
-    ListView > ListItem.-hovered {{ background: {C['surface']} 40%; }}
-    ListView > .listview--scrollbar,
-    ListView {{ scrollbar-background: {C['base']};
-                scrollbar-color: {C['surface']};
-                scrollbar-color-hover: {C['accent']}; }}
-    #dailies {{ height: auto; max-height: 7; border: round {C['surface']};
-                margin: 0 1 1 1; }}
-    #msg {{ padding: 1 2; color: {C['yellow']}; }}
+    .cards {{ height: 1fr; padding: 0 1 1 1;
+              scrollbar-size-vertical: 1;
+              scrollbar-background: {C['base']};
+              scrollbar-color: {C['surface']};
+              scrollbar-color-hover: {C['accent']}; }}
+    .card {{ height: auto; padding: 0 1; margin-bottom: 1;
+             border: round {C['surface']}; background: transparent; }}
+    .card:focus {{ border: round {C['accent']}; background: {C['accent']} 18%; }}
+    .card:hover {{ border: round {C['accent']} 60%; }}
+    /* the card you are carrying: still visible, clearly lifted off */
+    .card.-dragging {{ border: round {C['accent']};
+                       background: {C['accent']} 30%; text-style: dim; }}
+    #msg {{ padding: 0 2; height: auto; color: {C['yellow']}; }}
     #setup {{ padding: 2 4; }}
     """
     BINDINGS = [
-        Binding("enter", "tick", "Complete", show=True),
-        Binding("space", "tick", "Complete", show=False),
-        Binding("right,tab", "next_col", "Next column", show=True),
-        Binding("left,shift+tab", "prev_col", "Prev", show=False),
+        Binding("enter", "tick", "Tick off", show=True),
+        Binding("space", "tick", "Tick off", show=False),
+        Binding("right_square_bracket", "shift(1)", "→ column", show=True),
+        Binding("left_square_bracket", "shift(-1)", "← column", show=True),
+        Binding("plus,equals_sign", "habit(1)", "Habit ＋", show=True),
+        Binding("minus", "habit(-1)", "Habit −", show=True),
+        Binding("1", "goto_tab('tab-todos')", "To-Dos", show=True),
+        Binding("2", "goto_tab('tab-dailies')", "Dailies", show=True),
+        Binding("3", "goto_tab('tab-habits')", "Habits", show=True),
         Binding("r", "reload", "Refresh", show=True),
         Binding("q,escape", "quit", "Close", show=True),
     ]
@@ -123,8 +248,7 @@ class Board(App):
     def __init__(self):
         super().__init__()
         self.cols = {}
-        self.active = 0
-        self.error = ""
+        self._hover = None
 
     def compose(self) -> ComposeResult:
         yield Static("", id="hdr")
@@ -140,118 +264,233 @@ class Board(App):
                 f"dotfiles repo.[/]", id="setup")
             yield Footer()
             return
-        with Horizontal(id="cols"):
-            for key, title in COLUMNS:
-                with Vertical(classes="col", id=f"col-{key}"):
-                    yield Static(title, classes="coltitle")
-                    yield ListView(id=f"lv-{key}")
-        yield VerticalScroll(id="dailies")
+        with TabbedContent(id="tabs", initial="tab-todos"):
+            with TabPane("󰄲  To-Dos", id="tab-todos"):
+                with Horizontal(id="cols"):
+                    for key, title in COLUMNS:
+                        with Vertical(classes="col", id=f"col-{key}"):
+                            yield Static(title, classes="coltitle",
+                                         id=f"t-{key}")
+                            yield VerticalScroll(classes="cards",
+                                                 id=f"lv-{key}")
+            with TabPane("󰃭  Dailies", id="tab-dailies"):
+                yield VerticalScroll(classes="cards", id="lv-dailies")
+            with TabPane("󰓾  Habits", id="tab-habits"):
+                yield VerticalScroll(classes="cards", id="lv-habits")
         yield Static("", id="msg")
         yield Footer()
 
     def on_mount(self):
         self.query_one("#hdr", Static).update(
             f"[bold {C['accent']}]󰄲  Habitica board[/]"
-            f"   [{C['subtext']}]Enter ticks · r refresh · q closes[/]")
+            f"   [{C['subtext']}]drag a card, or [ ] to move it · "
+            f"Enter ticks · 1 2 3 tabs · r refresh · q closes[/]")
         if secrets.configured("habitica", "user_id", "api_token"):
             self.run_worker(self.reload(), exclusive=True)
 
     # ---------- data ----------
+    async def _thread(self, fn):
+        import asyncio
+        return await asyncio.to_thread(fn)
+
+    def say(self, text, ink="subtext"):
+        try:
+            self.query_one("#msg", Static).update(f"[{C[ink]}]{text}[/]")
+        except Exception:
+            pass
+
     async def reload(self, fresh=True):
         try:
             data = await self._thread(lambda: H.board(fresh=fresh))
             st = await self._thread(lambda: H.stats(fresh=fresh))
         except H.HabiticaError as e:
-            self.error = str(e)
-            self.query_one("#msg", Static).update(f"[{C['red']}]󰀦  {e}[/]")
+            self.say(f"󰀦  {e}", "red")
             return
         except Exception as e:                      # never take the UI down
-            self.query_one("#msg", Static).update(f"[{C['red']}]󰀦  {e}[/]")
+            self.say(f"󰀦  {e}", "red")
             return
-        self.error = ""
         self.cols = data
         self.query_one("#stats", Static).update(
             f"[{C['green']}]lv {st['level']}[/]  "
             f"[{C['red']}]{st['hp']}/{st['maxhp']} hp[/]  "
             f"[{C['yellow']}]{st['gold']} gp[/]  "
             f"[{C['subtext']}]{st['exp']}/{st['next']} xp[/]")
-        for key, _t in COLUMNS:
-            lv = self.query_one(f"#lv-{key}", ListView)
-            await lv.clear()
-            for t in data.get(key, []):
-                await lv.append(Card(t))
-        box = self.query_one("#dailies", VerticalScroll)
-        await box.remove_children()
-        dl = data.get("dailies", [])
-        if dl:
-            done = sum(1 for d in dl if d.get("completed"))
-            await box.mount(Static(
-                f"[{C['accent']}]󰃭  Dailies[/] "
-                f"[{C['subtext']}]{done}/{len(dl)} today[/]"))
-            for d in dl:
-                mark = "󰄲" if d.get("completed") else "󰄰"
-                ink = C["subtext"] if d.get("completed") else C["text"]
-                await box.mount(Static(f"  [{ink}]{mark}  {d['text']}[/]"))
+        for key, title in COLUMNS:
+            items = data.get(key, [])
+            self.query_one(f"#t-{key}", Static).update(
+                f"{title}  [{C['subtext']}]{len(items)}[/]")
+            await self._fill(
+                f"#lv-{key}", items,
+                note=("Habitica hands back roughly the last 30 finished "
+                      "to-dos — this is recent history, not everything."
+                      if key == "done" and items else ""))
+        await self._fill("#lv-dailies", data.get("dailies", []))
+        await self._fill("#lv-habits", data.get("habits", []),
+                         draggable=False)
+        dl, hb = data.get("dailies", []), data.get("habits", [])
+        done = sum(1 for d in dl if d.get("completed"))
         n = sum(len(data.get(k, [])) for k, _ in COLUMNS)
-        self.query_one("#msg", Static).update(
-            f"[{C['subtext']}]{n} to-dos · {len(dl)} dailies due[/]"
-            if n or dl else f"[{C['subtext']}]nothing on the board[/]")
-        self._mark_active()
+        self.say(f"{n} to-dos · {done}/{len(dl)} dailies done today · "
+                 f"{len(hb)} habits")
+        if self.focused is None:
+            first = self.query("#lv-todo Card")
+            if first:
+                first.first().focus()
 
-    async def _thread(self, fn):
-        import asyncio
-        return await asyncio.to_thread(fn)
+    async def _fill(self, sel, items, draggable=True, note=""):
+        box = self.query_one(sel, VerticalScroll)
+        await box.remove_children()
+        if not items:
+            await box.mount(Static(f"[{C['subtext']}]nothing here[/]"))
+            return
+        await box.mount_all([Card(t, self, draggable) for t in items])
+        if note:
+            await box.mount(Static(f"[{C['subtext']}]{note}[/]"))
 
-    # ---------- interaction ----------
-    def _mark_active(self):
-        for i, (key, _t) in enumerate(COLUMNS):
-            self.query_one(f"#col-{key}").set_class(i == self.active, "-active")
+    # ---------- drag and drop ----------
+    def column_at(self, x, y):
+        for key, _t in COLUMNS:
+            try:
+                if self.query_one(f"#col-{key}").region.contains(x, y):
+                    return key
+            except Exception:
+                continue
+        return None
 
-    def action_next_col(self):
-        self.active = (self.active + 1) % len(COLUMNS)
-        self._focus_active()
+    def hover_column(self, key):
+        if key == self._hover:
+            return
+        self._hover = key
+        for k, _t in COLUMNS:
+            try:
+                self.query_one(f"#col-{k}").set_class(k == key, "-drop")
+            except Exception:
+                pass
 
-    def action_prev_col(self):
-        self.active = (self.active - 1) % len(COLUMNS)
-        self._focus_active()
+    def move_card(self, card, key):
+        task = card.todo
+        if task.get("col") == key:
+            return
+        self.run_worker(self._move(card, key), exclusive=True)
 
-    def _focus_active(self):
-        self._mark_active()
+    async def _move(self, card, key):
+        task = card.todo
+        title = emoji(task.get("text") or "")[:38]
+        label = dict(COLUMNS)[key].split("  ")[-1]
+        # move it NOW so the gesture lands, then reconcile with Habitica —
+        # a card that hangs in place for a second reads as a failed drag
         try:
-            self.query_one(f"#lv-{COLUMNS[self.active][0]}", ListView).focus()
+            box = self.query_one(f"#lv-{key}", VerticalScroll)
+            await card.remove()
+            new = Card({**task, "col": key}, self)
+            await box.mount(new)
+            new.focus()
+            card = new
+        except Exception:
+            pass
+        self.say(f"moving “{title}” → {label}…")
+        try:
+            said = await self._thread(lambda: H.set_column(task, key))
+        except H.HabiticaError as e:
+            self.say(f"󰀦  {e}", "red")
+            await self.reload(fresh=True)       # put it back where it lives
+            return
+        # no reload: the card has already moved and Habitica has agreed.
+        # A refresh here would spend five more of the ~30 requests a minute
+        # Habitica allows, and three drags in a row would hit the wall.
+        card.todo["col"] = key
+        card.todo["completed"] = (key == "done")
+        card.todo["doing"] = (key == "doing")
+        self._recount()
+        self.say(f"“{title}” → {label} — {said}", "green")
+
+    def _recount(self):
+        """Column headers, counted from what is actually on screen — the
+        board no longer refetches after every move."""
+        for key, title in COLUMNS:
+            try:
+                n = len(self.query(f"#lv-{key} Card"))
+                self.query_one(f"#t-{key}", Static).update(
+                    f"{title}  [{C['subtext']}]{n}[/]")
+            except Exception:
+                pass
+
+    # ---------- keyboard ----------
+    def _focused_card(self):
+        w = self.focused
+        return w if isinstance(w, Card) else None
+
+    def action_shift(self, by):
+        card = self._focused_card()
+        if card is None or card.todo.get("kind") != "todo":
+            self.say("focus a To-Do card first — [ ] moves it between "
+                     "columns")
+            return
+        keys = [k for k, _t in COLUMNS]
+        i = keys.index(card.todo.get("col", "todo")) + by
+        if not 0 <= i < len(keys):
+            return
+        self.move_card(card, keys[i])
+
+    def action_tick(self):
+        card = self._focused_card()
+        if card is None:
+            return
+        t = card.todo
+        if t.get("kind") == "todo":
+            if t.get("col") == "done":
+                self.say("already done — [ moves it back")
+                return
+            self.move_card(card, "done")
+            return
+        if t.get("completed"):
+            self.say("already done today — untick it in Habitica")
+            return
+        self.run_worker(self._score(t, "up"), exclusive=True)
+
+    def action_habit(self, direction):
+        card = self._focused_card()
+        if card is None or card.todo.get("kind") != "habit":
+            self.say("focus a Habit card first — + and − score it")
+            return
+        t = card.todo
+        if direction > 0 and not t.get("up"):
+            self.say("that habit has no ＋ side")
+            return
+        if direction < 0 and not t.get("down"):
+            self.say("that habit has no − side")
+            return
+        self.run_worker(self._score(t, "up" if direction > 0 else "down"),
+                        exclusive=True)
+
+    async def _score(self, task, direction):
+        title = emoji(task.get("text") or "")[:38]
+        self.say(f"scoring “{title}”…")
+        try:
+            await self._thread(lambda: H.score(task["id"], direction))
+        except H.HabiticaError as e:
+            self.say(f"󰀦  {e}", "red")
+            return
+        # same reason as _move: adjust in place instead of refetching
+        if task.get("kind") == "habit":
+            task["up_n" if direction == "up" else "down_n"] += 1
+        else:
+            task["completed"] = (direction == "up")
+        for c in self.query(Card):
+            if c.todo.get("id") == task.get("id"):
+                c.todo.update(task)
+                c.refresh_face()
+        self.say(f"“{title}” {'＋' if direction == 'up' else '−'}", "green")
+
+    def action_goto_tab(self, tab_id):
+        try:
+            self.query_one("#tabs", TabbedContent).active = tab_id
         except Exception:
             pass
 
     def action_reload(self):
+        self.say("refreshing…")
         self.run_worker(self.reload(), exclusive=True)
-
-    def action_tick(self):
-        key = COLUMNS[self.active][0]
-        try:
-            lv = self.query_one(f"#lv-{key}", ListView)
-        except Exception:
-            return
-        item = lv.highlighted_child
-        if not isinstance(item, Card):
-            return
-        task = item.todo
-        # Done -> Enter would un-complete it; that is a real Habitica action
-        # but a surprising one from a board, so it is refused out loud
-        if key == "done":
-            self.query_one("#msg", Static).update(
-                f"[{C['subtext']}]already done — untick it in Habitica[/]")
-            return
-        self.run_worker(self._tick(task), exclusive=True)
-
-    async def _tick(self, task):
-        self.query_one("#msg", Static).update(
-            f"[{C['subtext']}]ticking “{task['text'][:40]}”…[/]")
-        try:
-            await self._thread(lambda: H.score(task["id"], "up"))
-        except H.HabiticaError as e:
-            self.query_one("#msg", Static).update(f"[{C['red']}]󰀦  {e}[/]")
-            return
-        await self.reload(fresh=True)
 
 
 def main():

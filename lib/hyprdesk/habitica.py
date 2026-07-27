@@ -4,16 +4,25 @@ Credentials come from hyprdesk.secrets ("habitica": user_id, api_token),
 never from widgets.conf, because that file is in a public repo.
 
 Habitica's model is four task types — Habits, Dailies, To-Dos, Rewards —
-which are NOT kanban columns. Forcing all four into three columns would
-misrepresent the data, so board() maps only To-Dos onto columns, using the
-signal Habitica actually gives us:
+which are NOT kanban columns, so each gets its own tab and only To-Dos are
+laid out as one.
 
-    To do   no checklist item ticked yet
-    Doing   some ticked, not all      (a real "started" signal)
+"Doing" is the honest problem here. Habitica has no such state. Checklist
+progress was tried as a stand-in and was wrong for real use: almost no
+to-do has a checklist, so Doing and Done sat empty forever. So Doing is a
+TAG — the one place Habitica lets you say something it did not think of —
+named `doing` and shared with the phone app and the website.
+
+    To do   neither of the below
+    Doing   carries the `doing` tag
     Done    task marked complete
 
-Dailies stay a separate strip: they recur, so "Done" for a Daily means
-"done today", which is a different claim from a To-Do being finished.
+The tag is created the first time something is moved into Doing, never on
+a read: opening a board must not write to your account.
+
+Dailies and Habits keep their own tabs. "Done" for a Daily means "done
+today", and a Habit is not something you finish at all — it is a + / −
+you press. Neither claim survives being squeezed into a To-Do column.
 """
 import json
 import time
@@ -129,12 +138,86 @@ def score(task_id, direction="up"):
     return out
 
 
-def _col(t):
+DOING_TAG = "doing"
+
+
+def tags(fresh=False):
+    if fresh:
+        _CACHE.pop("tags", None)
+    return _cached("tags", lambda: (_call("/tags").get("data") or []))
+
+
+def doing_tag_id(fresh=False):
+    """The id of the `doing` tag, or "" if it does not exist yet. Never
+    creates it — a read must not write to somebody's account."""
+    for t in tags(fresh=fresh):
+        if (t.get("name") or "").strip().lower() == DOING_TAG:
+            return t.get("id") or ""
+    return ""
+
+
+def ensure_doing_tag():
+    """The id, creating the tag if this is the first time anything moved
+    into Doing."""
+    tid = doing_tag_id()
+    if tid:
+        return tid
+    d = (_call("/tags", method="POST", body={"name": DOING_TAG})
+         .get("data") or {})
+    _CACHE.pop("tags", None)
+    tid = d.get("id") or ""
+    if not tid:
+        raise HabiticaError("Habitica would not create the `doing` tag")
+    return tid
+
+
+def add_tag(task_id, tag_id):
+    out = _call(f"/tasks/{task_id}/tags/{tag_id}", method="POST")
+    _CACHE.clear()
+    return out
+
+
+def del_tag(task_id, tag_id):
+    out = _call(f"/tasks/{task_id}/tags/{tag_id}", method="DELETE")
+    _CACHE.clear()
+    return out
+
+
+def set_column(task, col):
+    """Move a To-Do between board columns, saying it in Habitica's own
+    terms. Returns a short line describing what was actually done, because
+    "moved to Done" and "ticked off, +gold" are not the same news."""
+    tid = task.get("id")
+    was_done = bool(task.get("completed")) or task.get("col") == "done"
+    said = []
+    if col == "done":
+        if not was_done:
+            score(tid, "up")
+            said.append("ticked off in Habitica")
+        if task.get("doing"):
+            del_tag(tid, doing_tag_id())
+            said.append("cleared its `doing` tag")
+    else:
+        if was_done:
+            # scoring a completed To-Do down is Habitica's own undo — it
+            # takes back the reward too, which is what "not done" means
+            score(tid, "down")
+            said.append("un-ticked it")
+        if col == "doing" and not task.get("doing"):
+            add_tag(tid, ensure_doing_tag())
+            said.append("tagged it `doing`")
+        elif col == "todo" and task.get("doing"):
+            del_tag(tid, doing_tag_id())
+            said.append("cleared its `doing` tag")
+    _CACHE.clear()
+    return " · ".join(said) or "already there"
+
+
+def _col(t, doing_id=""):
     """Which column a To-Do belongs in, from Habitica's own fields."""
     if t.get("completed"):
         return "done"
-    items = t.get("checklist") or []
-    if items and any(i.get("completed") for i in items):
+    if doing_id and doing_id in (t.get("tags") or []):
         return "doing"
     return "todo"
 
@@ -145,11 +228,19 @@ def board(fresh=False):
     Each card: id, text, notes, checklist progress, due date, priority.
     Raises HabiticaError — the caller decides how to say it.
     """
-    todos = tasks("todos", fresh=fresh)
-    cols = {"todo": [], "doing": [], "done": [], "dailies": []}
+    # `type=todos` returns only the UNFINISHED ones — a ticked to-do
+    # vanishes from it entirely. That, not just the old checklist rule, is
+    # why Done was always empty: the cards were never fetched.
+    todos = tasks("todos", fresh=fresh) + tasks("completedTodos", fresh=fresh)
+    # NOT fresh: Habitica allows ~30 requests a minute and a board refresh
+    # already spends five. Tags almost never change, and the two calls that
+    # can change them (ensure_doing_tag, add/del_tag) clear the cache.
+    doing_id = doing_tag_id()
+    cols = {"todo": [], "doing": [], "done": [], "dailies": [], "habits": []}
     for t in todos:
         items = t.get("checklist") or []
-        cols[_col(t)].append({
+        col = _col(t, doing_id)
+        cols[col].append({
             "id": t.get("id") or t.get("_id"),
             "text": (t.get("text") or "").strip(),
             "notes": (t.get("notes") or "").strip(),
@@ -158,6 +249,10 @@ def board(fresh=False):
             "due": (t.get("date") or "")[:10],
             "pri": t.get("priority", 1),
             "kind": "todo",
+            "col": col,
+            "completed": bool(t.get("completed")),
+            "done_at": (t.get("dateCompleted") or "")[:10],
+            "doing": bool(doing_id and doing_id in (t.get("tags") or [])),
         })
     for t in tasks("dailys", fresh=fresh):
         if not t.get("isDue", True):
@@ -173,9 +268,28 @@ def board(fresh=False):
             "pri": t.get("priority", 1),
             "kind": "daily",
             "completed": bool(t.get("completed")),
+            "streak": t.get("streak") or 0,
+        })
+    for t in tasks("habits", fresh=fresh):
+        # a Habit is a + / − you press, not something you finish; its
+        # counters reset on its own schedule, which is why they are shown
+        cols["habits"].append({
+            "id": t.get("id") or t.get("_id"),
+            "text": (t.get("text") or "").strip(),
+            "notes": (t.get("notes") or "").strip(),
+            "up": bool(t.get("up", True)),
+            "down": bool(t.get("down", True)),
+            "up_n": t.get("counterUp") or 0,
+            "down_n": t.get("counterDown") or 0,
+            "pri": t.get("priority", 1),
+            "kind": "habit",
         })
     # highest difficulty first, then nearest due date — the order you'd
     # actually pick work in
-    for k in ("todo", "doing", "done"):
+    for k in ("todo", "doing"):
         cols[k].sort(key=lambda c: (-float(c["pri"] or 1), c["due"] or "9999"))
+    # Done is a history, so it reads newest-first. Habitica hands back
+    # roughly the last 30; the board says so rather than implying that is
+    # everything you have ever finished.
+    cols["done"].sort(key=lambda c: c.get("done_at") or "", reverse=True)
     return cols

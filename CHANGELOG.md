@@ -35,10 +35,29 @@ versioning is [SemVer](https://semver.org/spec/v2.0.0.html).
   Hypr Settings is a terminal app, so this is the same panel rather than a
   second settings framework built inside the studio.
 - A tab holding several panes shows `·N` in the bar.
+- **The Habitica board, rebuilt.** Three tabs — To-Dos, Dailies, Habits —
+  because Habitica has three kinds of task and squeezing them into one
+  board misrepresents all three. Tasks are cards now: difficulty, checklist
+  progress, due date, streak, and a Habit's ＋/− counters, with its
+  `:shortcode:` emoji resolved. **Drag a card between columns**; a terminal
+  has no ghost to float under the cursor, so the card you are carrying dims
+  and the column that will take it lights up. `[` and `]` do the same from
+  the keyboard, `1 2 3` switch tabs.
 - `docs/claude-studio.md`.
 
 ### Fixed
 
+- **The Habitica board could never show Done, and Doing was a fiction.**
+  Two separate faults. `GET /tasks/user?type=todos` returns only the
+  *unfinished* to-dos, so ticking one made it vanish from the board rather
+  than move — `completedTodos` is now fetched too, and Done holds 30 real
+  cards. And "Doing" was inferred from checklist progress, a signal almost
+  no to-do carries; it is a `doing` tag now, which is real state Habitica
+  will keep, show on the phone, and let you set from the website.
+- **The board could rate-limit itself.** Habitica allows roughly 30
+  requests a minute and a refresh spends five, yet every drag and every tick
+  triggered a full refresh — three actions in a row hit the wall. Actions
+  now update in place and only reconcile with the server when one fails.
 - **The session tree collapsed under you every 6 seconds.** Its refresh
   rebuilt the tree unconditionally, so an expanded project snapped shut and
   the cursor jumped to the top mid-scroll. Almost every poll finds nothing
