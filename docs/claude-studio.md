@@ -33,7 +33,11 @@ closing it would take the sidebar with it.
 | `q` | Close the whole studio |
 
 The tree refreshes itself every 6 s, because it goes stale the moment a
-tab is closed or a session starts somewhere else. Every 30 s it also
+tab is closed or a session starts somewhere else — but only redraws when
+something actually changed. It used to rebuild unconditionally, which
+collapsed whatever project you had opened and threw the cursor back to
+the top, every six seconds. When it does change, expanded projects and
+the cursor are put back. Every 30 s it also
 re-names open tabs: Claude titles a conversation a little *after* it
 starts, so a tab opened from the tree gets its real name on a later pass.
 

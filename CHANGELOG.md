@@ -39,6 +39,11 @@ versioning is [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The session tree collapsed under you every 6 seconds.** Its refresh
+  rebuilt the tree unconditionally, so an expanded project snapped shut and
+  the cursor jumped to the top mid-scroll. Almost every poll finds nothing
+  new, so almost every poll now does nothing; when something has changed,
+  the expanded projects and the cursor are restored.
 - **A tab took the name of the wrong conversation** once it held two. The
   rename walked every pane, so whichever it reached last won; a tab's
   identity is its first pane.

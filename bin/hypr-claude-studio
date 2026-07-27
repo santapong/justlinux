@@ -339,20 +339,34 @@ def sidebar():
             yield Footer()
 
         def on_mount(self):
+            self._sig = None
             self.reload_tree()
             self.query_one(Tree).focus()
             # the tree goes stale the moment a tab is closed or a session
             # starts elsewhere; r still forces it, this just keeps up
-            self.set_interval(6.0, self.reload_tree)
+            self.set_interval(6.0, self.reload_tree)  # cheap: see _sig
             # Claude names a conversation a little after it starts, so a
             # tab opened from the tree gets its real name on a later pass
             self.set_interval(30.0, rename_open_tabs)
 
-        def reload_tree(self):
+        def reload_tree(self, force=False):
+            rows = session_rows()
+            # rebuilding collapsed whatever the user had opened and threw
+            # the cursor back to the top — every 6 seconds. Almost every
+            # poll finds nothing new, so almost every poll must do nothing.
+            sig = [(r.get("kind"), r.get("label"), r.get("sid"),
+                    r.get("pid"), r.get("detail")) for r in rows]
+            if not force and sig == self._sig:
+                return
+            self._sig = sig
             tree = self.query_one(Tree)
+            # when it HAS changed, keep the shape the user arranged
+            was_open = {n.label.plain for n in tree.root.children
+                        for n in n.children if n.is_expanded}
+            cur = tree.cursor_node
+            cur_key = (cur.label.plain if cur is not None else None)
             tree.clear()
             tree.show_root = False
-            rows = session_rows()
             running = [r for r in rows if r["kind"] in ("run", "bg")]
             past = [r for r in rows if r["kind"] == "past"]
             if running:
@@ -375,8 +389,16 @@ def sidebar():
                 node = sec.add(f"󰉋 {label}  [dim]{len(items)}[/]",
                                data={"kind": "project",
                                      "cwd": items[0]["cwd"]})
+                if node.label.plain in was_open:
+                    node.expand()
                 for it in items:
                     node.add_leaf(f"🕒 {it['detail']}", data=it)
+            if cur_key is not None:
+                for n in tree.root.children:
+                    for m in [n, *n.children]:
+                        if m.label.plain == cur_key:
+                            tree.move_cursor(m)
+                            break
 
         def _current(self):
             node = self.query_one(Tree).cursor_node
@@ -457,7 +479,7 @@ def sidebar():
             new_term_tab(data.get("cwd") or str(Path.home()))
 
         def action_refresh(self):
-            self.reload_tree()
+            self.reload_tree(force=True)
 
         def action_quit_studio(self):
             tmux("kill-session", "-t", TMUX_SESSION)
