@@ -25,8 +25,8 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import (Button, ContentSwitcher, Footer, Label, ListItem,
-                             ListView, Static, Switch)
+from textual.widgets import (Button, ContentSwitcher, Footer, Input, Label,
+                             ListItem, ListView, Static, Switch)
 
 sys.path.insert(0, str(Path.home() / ".local/lib"))
 from hyprdesk.confwrite import conf_set as _conf_set   # atomic writer
@@ -61,6 +61,7 @@ NAV = [
     ("wallpaper",  "󰸉", "Wallpaper"),
     ("widgets",    "󰕰", "Widgets"),
     ("security",   "󰕥", "Security"),
+    ("integrations", "󰌘", "Integrations"),
     ("power",      "⏻", "Power"),
 ]
 
@@ -648,6 +649,29 @@ class HyprSettings(App):
                             yield Button("󰃤 Scan Downloads", id="av_scan")
                             yield Button("󰖟 Open ClamTk", id="av_gui")
                             yield Button("󰚰 Update definitions", id="av_update")
+                with VerticalScroll(id="pane-integrations"):
+                    with Card("Habitica · the task board (ALT+CTRL+K)"):
+                        yield Static("", id="hb_status", classes="status")
+                        with Horizontal(classes="row"):
+                            yield Label("User ID")
+                            yield Input(placeholder="from habitica.com → Settings → Site Data",
+                                        id="hb_user")
+                        with Horizontal(classes="row"):
+                            yield Label("API token")
+                            yield Input(placeholder="kept hidden — paste it here",
+                                        password=True, id="hb_token")
+                        with Horizontal(classes="row", id="btns"):
+                            yield Button("󰄬 Test & save", id="hb_save",
+                                         variant="primary")
+                            yield Button("󰆴 Forget keys", id="hb_forget",
+                                         variant="error")
+                        yield Static(
+                            "Keys are checked against Habitica before they are "
+                            "saved, so a typo fails here instead of silently on "
+                            "the board. They are written to "
+                            "~/.config/hyprdesk/secrets.json (0600) — never to "
+                            "widgets.conf, which is in a public repo.",
+                            classes="hint")
                 with VerticalScroll(id="pane-power"):
                     with Card("Session"):
                         yield Button("󰌾 Lock screen", id="p_lock")
@@ -664,6 +688,7 @@ class HyprSettings(App):
             PAGE_FILE.unlink(missing_ok=True)
         self.refresh_security()
         self.refresh_wallpapers()
+        self._hb_refresh()
         if self._initial_page:
             self.goto_page(self._initial_page)
         self._poll_tick = 0
@@ -702,6 +727,7 @@ class HyprSettings(App):
         self.query_one("#content", ContentSwitcher).current = pane
         self.refresh_security()
         self.refresh_wallpapers()
+        self._hb_refresh()
         self._refreshing = True
         try:
             self.query_one("#sw_autohide", Switch).value = autohide_on()
@@ -775,6 +801,74 @@ class HyprSettings(App):
             1.2, lambda: launch(str(HOME / ".local/bin/desktop-widgets.sh"),
                                 "restart"))
 
+    # ---------- integrations ----------
+    # C comes from waybar/colors.css — wallust's UNPINNED ansi slots. On the
+    # current wallpaper C["red"] measures 1.00:1 against the background, so
+    # an error painted in it is invisible. Status here uses the card
+    # palette's pinned good/bad instead, which stay legible whatever the
+    # wallpaper does.
+    @staticmethod
+    def _status_ink():
+        try:
+            from hyprdesk import colors
+            p = colors()
+            return p["bad"], p["good"], p["sub"]
+        except Exception:
+            return "#E06C75", "#8EC07C", C["subtext"]
+
+    def _hb_msg(self, text, bad=False, good=False):
+        red, green, sub = self._status_ink()
+        col = red if bad else (green if good else sub)
+        try:
+            self.query_one("#hb_status", Static).update(f"[{col}]{text}[/]")
+        except Exception:
+            pass
+
+    def _hb_refresh(self):
+        """Show what is stored WITHOUT ever showing the token itself."""
+        try:
+            from hyprdesk import secrets
+            svc = secrets.get("habitica") or {}
+        except Exception:
+            svc = {}
+        uid = str(svc.get("user_id", ""))
+        if uid and svc.get("api_token"):
+            self.query_one("#hb_user", Input).value = uid
+            # the token is deliberately NOT put back in the box — the store
+            # is write-only from this panel's point of view
+            self.query_one("#hb_token", Input).placeholder = \
+                "saved — type a new one to replace it"
+            self._hb_msg(f"connected as {svc.get('name') or uid[:8] + '…'}",
+                         good=True)
+        else:
+            self._hb_msg("not set up — paste your keys and press Test & save")
+
+    async def _hb_save(self, uid, tok):
+        import asyncio
+        if not uid or not tok:
+            self._hb_msg("both the User ID and the API token are needed",
+                         bad=True)
+            return
+        self._hb_msg("checking with Habitica…")
+        try:
+            from hyprdesk import habitica as H, secrets
+            name = await asyncio.to_thread(H.check, uid, tok)
+        except Exception as e:
+            # NOT saved: a key that Habitica refuses is worse than no key,
+            # because the board would fail later instead of here
+            self._hb_msg(f"{e}", bad=True)
+            return
+        try:
+            secrets.put("habitica", {"user_id": uid, "api_token": tok,
+                                     "name": name})
+        except Exception as e:
+            self._hb_msg(f"verified, but could not save: {e}", bad=True)
+            return
+        self.query_one("#hb_token", Input).value = ""
+        self.query_one("#hb_token", Input).placeholder = \
+            "saved — type a new one to replace it"
+        self._hb_msg(f"saved — connected as {name}", good=True)
+
     def on_button_pressed(self, event: Button.Pressed):
         bid = event.button.id or ""
         if bid == "theme_btn":
@@ -787,6 +881,24 @@ class HyprSettings(App):
             event.button.label = nxt
             self.schedule_widget_restart()
             return
+        if bid == "hb_save":
+            uid = self.query_one("#hb_user", Input).value.strip()
+            tok = self.query_one("#hb_token", Input).value.strip()
+            self.run_worker(self._hb_save(uid, tok), exclusive=True)
+            return
+
+        if bid == "hb_forget":
+            try:
+                from hyprdesk import secrets
+                secrets.forget("habitica")
+            except Exception as e:
+                self._hb_msg(f"could not clear: {e}", bad=True)
+                return
+            self.query_one("#hb_user", Input).value = ""
+            self.query_one("#hb_token", Input).value = ""
+            self._hb_msg("keys cleared")
+            return
+
         if bid.startswith("layer_"):
             key = bid.removeprefix("layer_")
             self.widgets = widgets_conf()
