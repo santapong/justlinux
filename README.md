@@ -71,6 +71,9 @@ sudo apt install hyprland hyprpaper hyprlock hypridle waybar rofi swaync \
                  kitty thunar grim slurp wl-clipboard cliphist brightnessctl \
                  imagemagick lxpolkit network-manager-gnome sddm
 
+# Thai input (see "Thai input" below — the configs ship, the packages don't)
+sudo apt install fcitx5 fcitx5-libthai fcitx5-configtool fcitx5-frontend-all
+
 # wallust (wallpaper -> colors) via cargo
 cargo install wallust --locked
 
@@ -92,6 +95,41 @@ Then log into Hyprland (SDDM session). Notes:
 - LightDM cannot start Hyprland (compositor deadlock) — use SDDM.
 - SDDM sets no locale for Wayland sessions; `hyprland.conf` exports
   `LANG=en_US.UTF-8` for that reason.
+
+## Thai input
+
+fcitx5, toggled with **Right Ctrl**. `config/fcitx5/` ships both halves:
+`config` (the trigger key) and `profile` (the enabled layouts — English +
+Thai). The profile matters: `install.sh` replaces `~/.config/fcitx5`
+wholesale, so without it installing these dots would wipe the enabled
+layouts and Thai would silently stop working.
+
+The env vars live in two places on purpose — `env =` lines in
+`hyprland.conf` for the Hyprland session, and `config/environment.d/im.conf`
+for the systemd user session. **Both only take effect on a fresh login**;
+editing them mid-session does nothing, and `hyprctl setenv` does not exist.
+Check what the running session actually sees with `fcitx5-diagnose`.
+
+**Flatpak apps need three more things, and env vars alone are not enough.**
+These live outside `~/.config`, so `install.sh` cannot do them:
+
+```sh
+# 1. the vars, inside the sandbox
+flatpak override --user --env=GTK_IM_MODULE=fcitx \
+    --env=QT_IM_MODULE=fcitx --env=XMODIFIERS=@im=fcitx org.chromium.Chromium
+
+# 2. D-Bus access to fcitx5 — blocked by default, and the real blocker
+flatpak override --user --talk-name=org.fcitx.Fcitx5 org.chromium.Chromium
+
+# 3. Chromium runs native Wayland here, and ignores IME without this
+#    (in ~/.var/app/org.chromium.Chromium/config/chromium-flags.conf)
+--enable-wayland-ime
+--wayland-text-input-version=3
+```
+
+Overrides only apply to freshly started processes — `flatpak kill
+org.chromium.Chromium` first. The tray icon is a status indicator only;
+clicking it toggles nothing.
 
 ## Keybinds ($mod = ALT)
 
