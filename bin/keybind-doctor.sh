@@ -13,7 +13,9 @@ mkdir -p "$(dirname "$LOG")"
     echo "submap: ${sub:-?}"
 
     echo "--- keyboard-taking processes ---"
-    pgrep -af 'hypr-arrange' || echo "hypr-arrange: not running"
+    # bracket pattern: a bare 'hypr-arrange' matches the SHELL running this
+    # script whenever the invocation quotes the name (QA checklist trap)
+    pgrep -af '[h]ypr-arrange' || echo "hypr-arrange: not running"
 
     echo "--- fcitx5 ---"
     pgrep -x fcitx5 >/dev/null && echo "fcitx5: running" || echo "fcitx5: DOWN"
@@ -41,7 +43,7 @@ for mon,v in json.load(sys.stdin).items():
 
 # the one-line verdict, best effort
 verdict="state captured"
-pgrep -af 'hypr-arrange' >/dev/null 2>&1 && verdict="hypr-arrange is holding the keyboard — close its overlay (Esc/click) or: pkill -f hypr-arrange"
+pgrep -af '[h]ypr-arrange' >/dev/null 2>&1 && verdict="hypr-arrange is holding the keyboard — close its overlay (Esc/click) or: pkill -f hypr-arrange"
 [ "$(hyprctl submap 2>/dev/null | head -1)" != "default" ] && \
     [ -n "$(hyprctl submap 2>/dev/null | head -1)" ] && \
     verdict="stuck in submap '$(hyprctl submap | head -1)' — hyprctl dispatch submap reset"
