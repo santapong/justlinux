@@ -23,6 +23,7 @@ import os
 import signal
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path.home() / ".local/lib"))
@@ -33,19 +34,47 @@ KITTY_CLASS = "hyprclaudestudio"
 # per-tab close button. Window 0 is the session tree — it has no ✕,
 # closing it would take the sidebar with it. The range tag names the
 # window so the click handler knows WHICH tab the ✕ belonged to.
+#
+# The padding lives INSIDE the range on purpose: tmux has no per-glyph hit
+# testing, so the hit region is exactly the cells between range and norange.
+# Wrapping " ✕ " measured 3-4 clickable columns against 1-2 for the bare
+# glyph, and the spaces double as the gap that stops a mis-aimed click from
+# landing on the neighbouring tab's label.
 CLOSE_X = ("#{?#{!=:#{window_index},0},"
-           "#[range=user|x#{window_index}]✕#[norange],}")
+           "#[range=user|x#{window_index}] ✕ #[norange],}")
 # a tab holding several panes shows its count — the name only ever
 # describes the first one
 # ⊞ was tried and sat next to the ✕ looking like a second button
 PANE_N = "#{?#{>:#{window_panes},1},·#{window_panes} ,}"
+# per-tab attention state, straight from tmux's own alert flags — no forks,
+# no polling, and nothing coupled to Claude's spinner glyphs. tmux CLEARS
+# both flags when a window is selected, which is exactly the semantics
+# wanted: the mark means "you have not looked at this yet".
+#   ● good  a bell — Claude finished its turn and wants you
+#   ○ sub   new output you have not seen. Deliberately NOT a status colour:
+#           "unread" is not a state, and status ink never decorates
+#           non-status content.
+# Window 0 is the sidebar and is suppressed — it is furniture, not a job.
+# {restore} re-asserts the caller's style, since a mark's #[fg=] would
+# otherwise bleed into the rest of the tab (and #[default] would blow away
+# the current tab's accent fill).
+ATTN = ("#{{?#{{==:#{{window_index}},0}},,"
+        "#{{?window_bell_flag,{good}● {restore},"
+        "#{{?window_activity_flag,{sub}○ {restore},}}}}}}")
 # the two split buttons live in status-right, so they are not part of any
 # window's range and act on whatever tab is currently selected
 # the labels ARE the prefix keys that do the same thing, so the tab bar
 # teaches the binding. Bare │ and ─ were tried first and read as
 # separators — nothing about them said "click me".
-SPLIT_BUTTONS = ("#[range=user|sh]{acc}[|]#[norange]{sub} "
-                 "#[range=user|sv]{acc}[-]#[norange]{sub}")
+#
+# They are fg-on-muted BLOCKS, not accent glyphs: accent means exactly one
+# thing in this bar — "you are here". (It matters more than it sounds:
+# hyprdesk.colors() collapses accent2 onto accent when accent2 fails its
+# contrast test, so on many wallpapers the brand, these buttons and the
+# current-tab fill were literally the same colour.) Padding sits inside the
+# range here too, for the same hit-region reason as CLOSE_X.
+SPLIT_BUTTONS = ("#[range=user|sh]{ctl} │ {off}#[norange] "
+                 "#[range=user|sv]{ctl} ─ {off}#[norange]")
 
 
 def tmux(*args, out=False):
@@ -99,22 +128,72 @@ def style_tmux():
     pal = colors()
     bg, fg = pal["bg"], pal["fg"]
     acc, sub = pal["accent"], pal["sub"]
+    muted, good = pal["muted"], pal["good"]
     # ink hierarchy: accent2 titles the bar, accent stays on the selected
-    # tab so "what this is" never wears the same colour as "where you are"
+    # tab so "what this is" never wears the same colour as "where you are".
+    # NOTE: colors() collapses accent2 onto accent whenever accent2 fails
+    # its contrast check, so on many wallpapers these two are equal — which
+    # is exactly why nothing else in this bar is allowed to wear accent.
     acc2 = pal["accent2"]
+    # the mark restores the style of whatever it sits inside: plain sub ink
+    # on an ordinary tab, the accent fill on the selected one
+    attn_plain = ATTN.format(good=f"#[fg={good}]", sub=f"#[fg={sub}]",
+                             restore=f"#[fg={sub}]")
+    attn_cur = ATTN.format(good=f"#[fg={good}]", sub=f"#[fg={sub}]",
+                           restore=f"#[bg={acc},fg={bg},bold]")
     for args in (
         ("set", "-g", "status-position", "top"),
         ("set", "-g", "mouse", "on"),
         ("set", "-g", "status-interval", "5"),
+        # the ONLY monitor option that needs setting: tmux already ships
+        # monitor-bell on and both visual-* off, so setting those would be
+        # redundant (verified against a -f /dev/null server).
+        ("set", "-g", "monitor-activity", "on"),
+        # a TALLER bar, two rows: row 0 brands the studio and carries the
+        # split buttons, row 1 belongs entirely to the tabs. One shared row
+        # left every tab — and its ✕ — a cramped click target that also
+        # truncated once three conversations were open.
+        ("set", "-g", "status", "2"),
         ("set", "-g", "status-style", f"bg={bg},fg={sub}"),
         ("set", "-g", "status-left",
          f"#[fg={acc2},bold] 󰚩 Claude Studio #[default] "),
-        ("set", "-g", "status-left-length", "22"),
+        # the row is no longer shared with the tabs, so these can breathe
+        ("set", "-g", "status-left-length", "40"),
         ("set", "-g", "status-right",
-         "#[fg={}]{}  #S ".format(
-             sub, SPLIT_BUTTONS.format(acc=f"#[fg={acc}]",
-                                       sub=f"#[fg={sub}]"))),
-        ("set", "-g", "status-right-length", "32"),
+         "{}  #[fg={}]#S ".format(
+             SPLIT_BUTTONS.format(ctl=f"#[bg={muted},fg={fg}]",
+                                  off="#[default]"),
+             sub)),
+        ("set", "-g", "status-right-length", "40"),
+        # built from status-left/right above so those stay the single
+        # source of truth for what the top row says. The centre slot states
+        # the TRUE tab count — row 1 is cut off at the right edge once the
+        # tabs outgrow the terminal, and without this the strip gives no
+        # hint that anything is missing (see the note on list=on below for
+        # why there is no scrollport to show it instead).
+        ("set", "-g", "status-format[0]",
+         "#[align=left]#{E:status-left}"
+         f"#[align=centre]#[fg={sub}]#{{session_windows}} tabs"
+         "#[align=right]#{E:status-right}"),
+        # range=window| is NOT decoration — it is the per-tab mouse hit
+        # region tmux's stock status-format supplies for free. Writing this
+        # row by hand without it broke `select-window -t=` AND
+        # `kill-window -t=`: both resolve "the window under the mouse" from
+        # this tag, so left-click stopped selecting and middle-click killed
+        # the CURRENT tab instead of the clicked one. The ✕ kept working
+        # only because it carries its own range=user tag.
+        #
+        # Deliberately NO list=on / list=focus here. They would add the
+        # ‹ › scrollport for overflow, but on tmux 3.7b trimming desyncs the
+        # mouse hit table from what was drawn — measured: with the strip
+        # showing tabs 9-13 a left-click on tab 4's label killed window 5.
+        # Untrimmed, every column maps to the tab drawn there. So: correct
+        # clicks, and overflow tabs are reached by keyboard (C-b w) instead.
+        ("set", "-g", "status-format[1]",
+         "#[align=left]#{W:"
+         "#[range=window|#{window_index}]#{E:window-status-format}#[norange],"
+         "#[range=window|#{window_index}]"
+         "#{E:window-status-current-format}#[norange]}"),
         # panes: the active one wears the accent, the rest recede. The
         # title line only appears once a window actually has two panes —
         # see the hooks below — so a single-pane tab loses no rows.
@@ -135,10 +214,14 @@ def style_tmux():
         ("bind-key", "Right", "select-pane", "-R"),
         ("bind-key", "Up", "select-pane", "-U"),
         ("bind-key", "Down", "select-pane", "-D"),
+        # padding either side: with the tabs on their own row this is free,
+        # and it separates one tab's ✕ from the next tab's label so a
+        # mis-aimed click selects rather than closes. CLOSE_X now carries
+        # its own inner padding, so the trailing run is one space here.
         ("set", "-g", "window-status-format",
-         f" #I #W {PANE_N}{CLOSE_X} "),
+         f"  #I #W {PANE_N}{attn_plain}{CLOSE_X} "),
         ("set", "-g", "window-status-current-format",
-         f"#[bg={acc},fg={bg},bold] #I #W {PANE_N}{CLOSE_X}"
+         f"#[bg={acc},fg={bg},bold]  #I #W {PANE_N}{attn_cur}{CLOSE_X}"
          f"#[bg={acc},fg={bg}] #[default]"),
         ("set", "-g", "window-status-separator", ""),
         # browser-style tabs: click the ✕ to close one, middle-click
@@ -148,9 +231,16 @@ def style_tmux():
         # left-click: ✕ closes that tab, the split buttons split the
         # current one (via --split, which knows the sidebar must not be
         # cut in half), anything else just selects.
+        # the ✕ branch MUST go through run-shell: `kill-window -t` does not
+        # format-expand its target, so `-t #{s/^x//:...}` reached tmux as a
+        # literal and errored ("can't find session: #{s/^x//") — the button
+        # looked dead. run-shell expands, which is why the split buttons
+        # below always worked. Middle-click survives on `-t=` (a real mouse
+        # target, not a format), which masked the bug.
         ("bind-key", "-n", "MouseUp1Status", "if", "-F",
          "#{m/r:^x[0-9]+$,#{mouse_status_range}}",
-         "kill-window -t #{s/^x//:mouse_status_range}",
+         f"run-shell 'tmux -L {TMUX_SESSION} kill-window"
+         " -t #{s/^x//:mouse_status_range}'",
          "if -F '#{m/r:^s[hv]$,#{mouse_status_range}}' "
          f"\"run-shell 'python3 {ME} --split #{{mouse_status_range}}'\" "
          "'select-window -t='"),
@@ -178,12 +268,16 @@ def _tab_name(entry, width=18):
 
 
 def rename_open_tabs():
-    """Give tabs opened before this ran the same real names. Only windows
-    whose start command names a session can be identified; a bare `claude`
-    has no id until its transcript exists, so it keeps the directory."""
+    """Give tabs opened before this ran the same real names. A window is
+    identified by the session id in its start command — which every tab now
+    has from birth, `--resume` and new sessions alike (see new_session_tab).
+    A tab whose transcript is not named yet keeps the directory and gets
+    upgraded on a later pass."""
     import re
-    uuid = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
-                      r"[0-9a-f]{4}-[0-9a-f]{12}")
+    # NOT `uuid`: that name is the stdlib module at import scope, and
+    # shadowing it here would break any later edit that generates an id.
+    uuid_re = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+                         r"[0-9a-f]{4}-[0-9a-f]{12}")
     for line in tmux("list-panes", "-s", "-F",
                      "#{window_index}|#{pane_index}|#{pane_current_path}|"
                      "#{pane_start_command}", out=True).splitlines():
@@ -197,7 +291,7 @@ def rename_open_tabs():
         # whichever pane the loop happened to reach last.
         if pane != "0":
             continue
-        m = uuid.search(cmd or "")
+        m = uuid_re.search(cmd or "")
         if not m:
             continue
         name = _tab_name({"sid": m.group(0), "cwd": cwd})
@@ -218,10 +312,43 @@ def open_session_tab(entry):
          "-c", cwd, f"claude --resume {sid}")
 
 
+_SESSION_ID_FLAG = None
+
+
+def _claude_takes_session_id():
+    """Whether this CLI accepts --session-id. Cached: it costs one `claude
+    --help` and only the first new session in a studio's lifetime pays."""
+    global _SESSION_ID_FLAG
+    if _SESSION_ID_FLAG is None:
+        try:
+            r = subprocess.run(["claude", "--help"], capture_output=True,
+                               text=True, timeout=15)
+            _SESSION_ID_FLAG = "--session-id" in (r.stdout + r.stderr)
+        except (OSError, subprocess.SubprocessError):
+            _SESSION_ID_FLAG = False
+    return _SESSION_ID_FLAG
+
+
 def new_session_tab(cwd):
+    """A new conversation, with its identity fixed UP FRONT.
+
+    Every session in one project used to open a tab called the directory —
+    three 'n' presses in ~/hyprland-dots gave three tabs reading
+    "hyprland-dots", and the close buttons became a guessing game FOREVER:
+    a bare `claude` has no id anywhere in its start command, so no later
+    pass could ever tell those tabs apart. Assigning the id ourselves puts
+    it in pane_start_command from birth, which is the one thing
+    rename_open_tabs reads — so the tab upgrades itself to Claude's own
+    conversation title on the next pass, exactly like a --resume tab.
+    """
     name = os.path.basename(cwd.rstrip("/")) or "~"
-    tmux("new-window", "-t", f"{TMUX_SESSION}:", "-n", name, "-c", cwd,
-         "claude")
+    if _claude_takes_session_id():
+        cmd = f"claude --session-id {uuid.uuid4()}"
+    else:
+        # older CLI: no id to pin, so this tab keeps the directory name.
+        # Degraded, not broken — the old behaviour.
+        cmd = "claude"
+    tmux("new-window", "-t", f"{TMUX_SESSION}:", "-n", name, "-c", cwd, cmd)
 
 
 def _work_window():
