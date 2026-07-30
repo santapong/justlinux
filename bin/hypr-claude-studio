@@ -2,21 +2,30 @@
 """hypr-claude-studio — a VS-Code-style workspace for Claude Code sessions.
 
 One kitty window running a tmux session:
-  · TOP: the tmux status bar shows every open session as a TAB
-    (mouse-clickable, like open files in VS Code)
-  · TAB 0 "sessions": an expandable tree of conversations — 🟢 running,
-    then projects → their resumable transcripts
+  · TOP: a two-row bar. Row 0 brands the studio, says where you are and how
+    many tabs there really are, and holds the / and split buttons. Row 1 is
+    the tab strip: click to switch, ✕ or middle-click to close, ● for a
+    bell (your turn) and ○ for output you have not read yet.
+  · TAB 0 "sessions": an expandable tree of conversations — ● running,
+    󰑮 background (with what the job is actually doing), then projects →
+    their resumable transcripts
   · Enter opens a session as its own tab (`claude --resume`); if it is
     already open its tab is focused instead; s opens it BESIDE the one
     you are reading (two conversations, one screen); n = new session in
     the highlighted project; t = plain terminal there; m = the settings
     panel (MCP servers) as a tab; r = refresh
+  · JUMP: C-b g (or C-b C-Space, or the / button) opens a fuzzy popup over
+    every open tab and every resumable transcript. Row 1 has no scrollport
+    on purpose, so this is the only way to reach a tab past the right edge.
   · SPLITS: any tab holds several panes — C-b | side by side, C-b - stacked
     (C-b arrows to move between them, C-b z to zoom one full-screen), or
-    click the | and — buttons at the right of the tab bar
+    click the │ and ─ buttons at the right of row 0
 
 Modes: (default) focus-or-spawn the studio · --sidebar (inside tmux)
        --split h|v (from the tab bar's split buttons)
+       --palette (from C-b g / the / button; runs inside a display-popup)
+Every mode needs a branch in __main__: an unknown flag falls through to
+launch(), which spawns a SECOND studio rather than failing quietly.
 """
 import json
 import os
@@ -615,6 +624,12 @@ def sidebar():
     from textual.app import App, ComposeResult
     from textual.binding import Binding
     from textual.widgets import Footer, Static, Tree
+    # every tree label is Rich markup, and the text going into it is a
+    # conversation title or a job's own detail string — neither of which is
+    # ours. One '[' in either raises MarkupError and takes the row with it,
+    # and the GUI rules count a blank row as a bug. Nothing on this box
+    # contains a bracket today; that is data, not a guarantee.
+    from rich.markup import escape
     from hyprdesk import colors
     from hyprdesk.claudesessions import session_rows
 
@@ -643,9 +658,24 @@ def sidebar():
         """
 
         def compose(self) -> ComposeResult:
+            # The Footer below already renders every key this line used to
+            # repeat (Enter/s/t/m are all show=True), so the one free row is
+            # spent on the MOUSE contract instead — the only thing in this
+            # app nothing else can teach.
+            #
+            # Every gesture named here is one that actually works, which was
+            # not true until this week: middle-click closed the WRONG tab
+            # until the window hit regions came back, and there was no jump
+            # key at all until the palette landed. Naming C-b g rather than
+            # C-b Space matters for the same reason — Space is next-layout.
+            # A hint line that promises what the app does not honour is
+            # worse than no hint line.
+            #
+            # Kept to one short row: the sidebar is narrow and Textual clips
+            # silently, so a long line would simply disappear.
             yield Static(
-                f"[bold {pal['accent']}]󰚩 Sessions[/] — Enter opens a tab"
-                " · s = beside it · t = terminal · m = MCP · C-b | ─ splits",
+                f"[bold {pal['accent']}]󰚩 Sessions[/]  "
+                f"[{pal['sub']}]click a tab · ✕ closes it · C-b g jumps[/]",
                 id="hint")
             yield Tree("sessions", id="tree")
             yield Footer()
@@ -681,30 +711,51 @@ def sidebar():
             tree.show_root = False
             running = [r for r in rows if r["kind"] in ("run", "bg")]
             past = [r for r in rows if r["kind"] == "past"]
+            # Glyphs wear PALETTE ROLES so the tree re-inks with the
+            # wallpaper like the rest of the fleet — an emoji's colour is
+            # fixed by the font and can never do that. Terminal panels are
+            # exempt from the pixel-icon rule by the design doc's own line:
+            # tmux draws characters, not sprites.
+            #
+            # Headings are bold FOREGROUND, deliberately not accent2: on
+            # this wallpaper colors() has collapsed accent2 onto accent
+            # (they are both #E17963), and accent is already spent on the
+            # tree cursor. Titling a section with it would put "what this
+            # is" in the same ink as "where you are" — the exact collision
+            # the tab strip refuses.
             if running:
                 sec = tree.root.add(
-                    f"[bold]🟢 Running ({len(running)})[/]", expand=True)
+                    f"[bold]Running ({len(running)})[/]", expand=True)
                 for r in running:
-                    icon = "🟢" if r["kind"] == "run" else "󰑮"
+                    # ● and 󰑮 both verified present in JetBrainsMono Nerd
+                    # Font (fc-list :charset=). ◐ was tried first and is in
+                    # 0 JetBrainsMono faces — it would have been a box.
+                    icon = (f"[{pal['good']}]●[/]" if r["kind"] == "run"
+                            else f"[{pal['warn']}]󰑮[/]")
                     # the name says what it IS, the dim path says where —
                     # every session in $HOME used to read just "~"
-                    where = r.get("dir", "")
-                    sec.add_leaf(f"{icon} {r['label']}"
+                    where = escape(r.get("dir", ""))
+                    sec.add_leaf(f"{icon} {escape(str(r['label']))}"
                                  + (f"  [dim]{where}[/]" if where else ""),
                                  data=r)
             projects = {}
             for r in past:
                 projects.setdefault(r["label"], []).append(r)
             sec = tree.root.add(
-                f"[bold]󰉋 Projects ({len(projects)})[/]", expand=True)
+                f"[bold]Projects ({len(projects)})[/]", expand=True)
             for label, items in sorted(projects.items()):
-                node = sec.add(f"󰉋 {label}  [dim]{len(items)}[/]",
+                node = sec.add(f"[{pal['sub']}]󰉋[/] {escape(str(label))}"
+                               f"  [dim]{len(items)}[/]",
                                data={"kind": "project",
                                      "cwd": items[0]["cwd"]})
                 if node.label.plain in was_open:
                     node.expand()
                 for it in items:
-                    node.add_leaf(f"🕒 {it['detail']}", data=it)
+                    # 󰥔 replaces the 🕒 emoji: same meaning, but it can
+                    # actually take a palette role
+                    node.add_leaf(
+                        f"[{pal['sub']}]󰥔[/] {escape(str(it['detail']))}",
+                        data=it)
             if cur_key is not None:
                 for n in tree.root.children:
                     for m in [n, *n.children]:

@@ -641,6 +641,38 @@ def transcript_for(pid, cwd, taken, txs):
     return best if best_gap is not None and best_gap <= 120 else ""
 
 
+_BG_DETAIL_CAP = 40
+
+
+def _bg_detail(sid, where, fallback):
+    """What a background job is actually DOING, for one picker row.
+
+    job_state() sat unused for months while every bg row said the same
+    hardcoded sentence. It is worth reading — but not verbatim: `detail` is
+    a prose sentence, measured at 50 to 200+ characters on real jobs here,
+    which would overrun any row it is put in. So it is capped, and every
+    field has a
+    non-blank fallback: the shape is an undocumented internal that has
+    already drifted across cliVersions, and a row that renders empty reads
+    as a broken widget rather than as missing data.
+    """
+    js = job_state(sid) or {}
+    state = (js.get("state") or "").strip()
+    detail = " ".join((js.get("detail") or "").split())
+    if detail.lower() == state.lower():
+        detail = ""                      # "stopped · stopped" says it twice
+    if len(detail) > _BG_DETAIL_CAP:
+        detail = detail[:_BG_DETAIL_CAP - 1].rstrip() + "…"
+    # tempo is a STORED string, not an elapsed time, so it cannot churn the
+    # studio tree's signature check on every poll
+    tempo = (js.get("tempo") or "").strip()
+    if tempo in ("idle", state):
+        tempo = ""                       # says nothing the state does not
+    head = state or "background"
+    tail = detail or tempo or fallback
+    return f"󰑮 {head} · {tail} — in {where}"
+
+
 def session_rows(clients=None):
     """Flat entry list for pickers: running first, then bg jobs, then
     resumable transcripts. Same dict shape the launcher's Item expects."""
@@ -678,8 +710,8 @@ def session_rows(clients=None):
         else:
             rows.append({"label": title or where, "icon": "󰚩", "kind": "bg",
                          "cwd": cwd, "pid": pid, "sid": sid, "dir": where,
-                         "detail": f"󰑮 background job in {where} —"
-                                   " view on claude.ai"})
+                         "detail": _bg_detail(sid, where,
+                                              "view on claude.ai")})
     for pid, sid, cwd in daemon_hosted():
         where = nice(cwd)
         tx = _tx_for_sid(sid, txs)
@@ -688,8 +720,8 @@ def session_rows(clients=None):
         rows.append({"label": (session_title(tx) if tx else "") or where,
                      "icon": "󰚩", "kind": "bg",
                      "cwd": cwd, "pid": pid, "sid": sid, "dir": where,
-                     "detail": f"󰑮 daemon-hosted in {where} —"
-                               " outlives its terminal"})
+                     "detail": _bg_detail(sid, where,
+                                          "outlives its terminal")})
     for mtime, f in txs:
         cwd, preview = session_meta(f)
         if not preview:
