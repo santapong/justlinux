@@ -42,10 +42,19 @@ KITTY_CLASS = "hyprclaudestudio"
 # landing on the neighbouring tab's label.
 CLOSE_X = ("#{?#{!=:#{window_index},0},"
            "#[range=user|x#{window_index}] ✕ #[norange],}")
-# a tab holding several panes shows its count — the name only ever
-# describes the first one
+# what else is in this tab. A tab's NAME is its identity pane, so a second
+# conversation opened beside it had nothing to say for itself but "·2".
+# @beside (a per-window user option, re-derived every rename pass) carries
+# that conversation's real name; the bare count is the fallback for when the
+# other pane is just a shell.
 # ⊞ was tried and sat next to the ✕ looking like a second button
-PANE_N = "#{?#{>:#{window_panes},1},·#{window_panes} ,}"
+#
+# A TEMPLATE, not a constant: this is interpolated into an f-string, so a
+# bare {ink} would reach tmux as the literal text "#[fg={ink}]" — which tmux
+# accepts with rc=0 and then renders as garbage in every tab. The current
+# tab passes empty strings and keeps its accent fill.
+PANE_N = ("#{{?#{{@beside}},{ink}+#{{=/10/…:@beside}} {restore},"
+          "#{{?#{{>:#{{window_panes}},1}},{ink}·#{{window_panes}} {restore},}}}}")
 # per-tab attention state, straight from tmux's own alert flags — no forks,
 # no polling, and nothing coupled to Claude's spinner glyphs. tmux CLEARS
 # both flags when a window is selected, which is exactly the semantics
@@ -128,7 +137,7 @@ def style_tmux():
     pal = colors()
     bg, fg = pal["bg"], pal["fg"]
     acc, sub = pal["accent"], pal["sub"]
-    muted, good = pal["muted"], pal["good"]
+    muted, good, warn = pal["muted"], pal["good"], pal["warn"]
     # ink hierarchy: accent2 titles the bar, accent stays on the selected
     # tab so "what this is" never wears the same colour as "where you are".
     # NOTE: colors() collapses accent2 onto accent whenever accent2 fails
@@ -141,6 +150,10 @@ def style_tmux():
                              restore=f"#[fg={sub}]")
     attn_cur = ATTN.format(good=f"#[fg={good}]", sub=f"#[fg={sub}]",
                            restore=f"#[bg={acc},fg={bg},bold]")
+    # the selected tab already reads as selected — recolouring inside the
+    # accent fill only lowers contrast, so it passes no ink at all
+    pane_n_plain = PANE_N.format(ink=f"#[fg={sub}]", restore=f"#[fg={sub}]")
+    pane_n_cur = PANE_N.format(ink="", restore="")
     for args in (
         ("set", "-g", "status-position", "top"),
         ("set", "-g", "mouse", "on"),
@@ -171,9 +184,27 @@ def style_tmux():
         # tabs outgrow the terminal, and without this the strip gives no
         # hint that anything is missing (see the note on list=on below for
         # why there is no scrollport to show it instead).
+        # the centre slot: where you are, how many tabs there really are,
+        # and the two pane states that change what your keys do. Held in a
+        # user option so status-format[0] stays readable and one place owns
+        # what the middle says. (`status-centre` is NOT a tmux option — a
+        # format reading it expands to empty and the whole segment silently
+        # renders blank; only the @-prefixed user option exists.)
+        #
+        # #{b:...} is basename(3), no fork. The path is capped so a deep
+        # directory cannot crowd out the tab count next to it. No prefix-key
+        # cue: client_prefix is only 1 while C-b is held and tmux has no
+        # reason to redraw the status inside that window, so it would be an
+        # indicator that never appears. Git branch is out for the same
+        # reason the diff-stat idea was — it needs a #() fork per tick.
+        ("set", "-g", "@status-centre",
+         f"#[fg={sub}]#{{=/20/…:#{{b:pane_current_path}}}}"
+         " · #{session_windows} tabs"
+         f"#{{?window_zoomed_flag,#[fg={warn}] [zoom],}}"
+         f"#{{?pane_in_mode,#[fg={acc2}] #{{pane_mode}},}}"),
         ("set", "-g", "status-format[0]",
          "#[align=left]#{E:status-left}"
-         f"#[align=centre]#[fg={sub}]#{{session_windows}} tabs"
+         "#[align=centre]#{E:@status-centre}"
          "#[align=right]#{E:status-right}"),
         # range=window| is NOT decoration — it is the per-tab mouse hit
         # region tmux's stock status-format supplies for free. Writing this
@@ -204,9 +235,14 @@ def style_tmux():
          f"#[fg={sub}]#{{pane_current_command}} "),
         # one hook, both directions: pane-exited does not fire for
         # kill-pane, and after-split-window only ever turns it on
+        # back to one pane: drop the border title AND the +beside name, or a
+        # tab keeps advertising a conversation that is no longer open. The
+        # rename pass re-derives @beside anyway, but that is up to 30s away
+        # and this costs nothing.
         ("set-hook", "-g", "window-layout-changed",
          "if -F '#{==:#{window_panes},1}' "
-         "'setw pane-border-status off' 'setw pane-border-status top'"),
+         "'setw pane-border-status off ; set -uw @beside' "
+         "'setw pane-border-status top'"),
         # mnemonic splits: the key looks like the split it makes
         ("bind-key", "|", "split-window", "-h", "-c", "#{pane_current_path}"),
         ("bind-key", "-", "split-window", "-v", "-c", "#{pane_current_path}"),
@@ -219,9 +255,9 @@ def style_tmux():
         # mis-aimed click selects rather than closes. CLOSE_X now carries
         # its own inner padding, so the trailing run is one space here.
         ("set", "-g", "window-status-format",
-         f"  #I #W {PANE_N}{attn_plain}{CLOSE_X} "),
+         f"  #I #W {pane_n_plain}{attn_plain}{CLOSE_X} "),
         ("set", "-g", "window-status-current-format",
-         f"#[bg={acc},fg={bg},bold]  #I #W {PANE_N}{attn_cur}{CLOSE_X}"
+         f"#[bg={acc},fg={bg},bold]  #I #W {pane_n_cur}{attn_cur}{CLOSE_X}"
          f"#[bg={acc},fg={bg}] #[default]"),
         ("set", "-g", "window-status-separator", ""),
         # browser-style tabs: click the ✕ to close one, middle-click
@@ -268,34 +304,66 @@ def _tab_name(entry, width=18):
 
 
 def rename_open_tabs():
-    """Give tabs opened before this ran the same real names. A window is
-    identified by the session id in its start command — which every tab now
-    has from birth, `--resume` and new sessions alike (see new_session_tab).
-    A tab whose transcript is not named yet keeps the directory and gets
-    upgraded on a later pass."""
+    """Re-derive what every tab claims to be, from what it actually holds.
+
+    A window is identified by the session id in its start command — which
+    every tab now has from birth, `--resume` and new sessions alike (see
+    new_session_tab). A tab whose transcript is not named yet keeps the
+    directory and gets upgraded on a later pass.
+
+    This RE-DERIVES rather than remembers, which is the whole point: writing
+    @beside once at split time goes stale the moment the pane layout changes
+    under it. Kill the identity pane and keep the second conversation, and a
+    write-once tab is named after something that is no longer running while
+    +beside names the thing that is.
+    """
     import re
     # NOT `uuid`: that name is the stdlib module at import scope, and
     # shadowing it here would break any later edit that generates an id.
     uuid_re = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
                          r"[0-9a-f]{4}-[0-9a-f]{12}")
+    windows = {}
     for line in tmux("list-panes", "-s", "-F",
                      "#{window_index}|#{pane_index}|#{pane_current_path}|"
                      "#{pane_start_command}", out=True).splitlines():
         idx, _, rest = line.partition("|")
         pane, _, rest = rest.partition("|")
         cwd, _, cmd = rest.partition("|")
-        if idx == "0":
+        if idx == "0":          # the sidebar owns its window; never renamed
             continue
-        # a tab's identity is its FIRST pane. Without this, opening a
-        # second conversation beside the first renamed the whole tab to
-        # whichever pane the loop happened to reach last.
-        if pane != "0":
-            continue
-        m = uuid_re.search(cmd or "")
-        if not m:
-            continue
-        name = _tab_name({"sid": m.group(0), "cwd": cwd})
-        tmux("rename-window", "-t", idx, name)
+        windows.setdefault(idx, []).append((pane, cwd, cmd))
+
+    for idx, panes in windows.items():
+        # LOWEST surviving pane index is the tab's identity, not literally
+        # pane 0: after the first pane is killed there is no pane 0, and
+        # anchoring on it would freeze the tab's name forever.
+        panes.sort(key=lambda p: int(p[0]) if p[0].isdigit() else 0)
+        ident, rest = panes[0], panes[1:]
+        m = uuid_re.search(ident[2] or "")
+        if m:
+            tmux("rename-window", "-t", idx,
+                 _tab_name({"sid": m.group(0), "cwd": ident[1]}))
+        # the first OTHER pane that is a conversation, if any. A shell or a
+        # build beside you is left to the bare pane count.
+        beside = ""
+        for pane, cwd, cmd in rest:
+            m2 = uuid_re.search(cmd or "")
+            if m2:
+                beside = _tab_name({"sid": m2.group(0), "cwd": cwd}, width=10)
+                break
+        # SESSION-QUALIFIED, and it matters: set-option's -t is a
+        # target-PANE, not a target-window, so a bare index is read as a
+        # pane of the CURRENT window and the option lands on the wrong tab
+        # entirely (measured: `-t 1` while window 2 was current wrote to
+        # window 2, and reported success). rename-window above takes a real
+        # target-window, which is why a bare index is fine there.
+        target = f"{TMUX_SESSION}:{idx}"
+        if beside:
+            tmux("set-option", "-w", "-t", target, "@beside", beside)
+        else:
+            # unconditional: `set -uw` on an option that was never set
+            # returns 0, so this needs no show-options probe first (checked)
+            tmux("set-option", "-uw", "-t", target, "@beside")
 
 
 def open_session_tab(entry):
@@ -386,6 +454,13 @@ def open_session_beside(entry):
         return "tab"
     tmux("split-window", "-h", "-t", f"{TMUX_SESSION}:{target}",
          "-c", cwd, f"claude --resume {sid}")
+    # say what landed beside you NOW; the rename pass re-derives this (and
+    # corrects it if the layout changes), but that is up to 30s away and the
+    # tab would read "·2" until then.
+    # session-qualified: set-option's -t is a target-PANE, so a bare index
+    # silently writes the option onto whichever tab is current instead.
+    tmux("set-option", "-w", "-t", f"{TMUX_SESSION}:{target}", "@beside",
+         _tab_name(entry, width=10))
     tmux("select-window", "-t", target)
     return "split"
 
