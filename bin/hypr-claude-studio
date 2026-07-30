@@ -666,6 +666,39 @@ def sidebar():
     style_tmux()
     rename_open_tabs()
 
+    class AimTree(Tree):
+        """First click AIMS, second click opens.
+
+        The stock Tree selects on any single click, and here "select" means
+        `claude --resume` — so a misaim on these one-cell rows didn't
+        highlight the wrong session, it OPENED it. Two-step clicking makes a
+        miss cost nothing: the first click only moves the (now loud) cursor
+        bar, and clicking the row that already wears it is what commits.
+        Keyboard is untouched — Enter still opens the highlighted row in one
+        press, because it cannot misaim.
+
+        Expandable rows (sections, projects) still toggle on the first
+        click: a mistoggle is free to undo, and demanding two clicks to peek
+        inside a project would punish the common gesture to guard nothing.
+        """
+
+        def on_click(self, event):
+            try:
+                line = event.y + int(self.scroll_offset.y)
+                node = self.get_node_at_line(line)
+            except Exception:
+                return                       # off the tree: let Textual be
+            if node is None:
+                return
+            if node is self.cursor_node:
+                return                       # second click: stock path opens
+            event.prevent_default()          # first click: aim only
+            self.move_cursor(node)
+            data = getattr(node, "data", None)
+            if data is None or (isinstance(data, dict)
+                                and data.get("kind") == "project"):
+                node.toggle()
+
     class ConfirmQuit(ModalScreen):
         """q used to take the whole studio — every tab, every running
         conversation — on one keypress, with nothing between the key and the
@@ -787,9 +820,10 @@ def sidebar():
             # silently, so a long line would simply disappear.
             yield Static(
                 f"[bold {pal['accent']}]󰚩 Sessions[/]  "
-                f"[{pal['sub']}]click a tab · ✕ closes it · C-b g jumps[/]",
+                f"[{pal['sub']}]click picks · click again opens"
+                " · C-b g jumps[/]",
                 id="hint")
-            yield Tree("sessions", id="tree")
+            yield AimTree("sessions", id="tree")
             yield Footer()
 
         def on_mount(self):
