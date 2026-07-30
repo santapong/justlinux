@@ -1219,6 +1219,15 @@ class HyprSettings(App):
                                   r.returncode == 0, msg)
         self.run_worker(work, thread=True, group="net", exclusive=True)
 
+    def on_input_submitted(self, event):
+        """Enter in the Wi-Fi password field joins — the field is focused
+        the moment it appears, so type-password-hit-Enter works without
+        ever reaching for the mouse. The Join button stays for clickers."""
+        if (event.input.id or "") == "net_pw":
+            ssid = getattr(self, "_net_pending", "")
+            if ssid and event.value:
+                self._net_join(ssid, event.value)
+
     def _vpn_import(self, path):
         """Import a VPN config in a worker. The type comes from the file:
         .ovpn (or .conf that smells of OpenVPN) → the openvpn plugin,
