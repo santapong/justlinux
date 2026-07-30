@@ -63,6 +63,7 @@ NAV = [
     ("bar",        "󰜬", "Bar"),
     ("wallpaper",  "󰸉", "Wallpaper"),
     ("widgets",    "󰕰", "Widgets"),
+    ("network",    "󰤨", "Network"),
     ("security",   "󰕥", "Security"),
     ("integrations", "󰌘", "Integrations"),
     ("power",      "⏻", "Power"),
@@ -522,6 +523,12 @@ class HyprSettings(App):
     #mcp_rows {{ height: auto; }}
     #mcp_rows .row {{ height: auto; }}
     .status {{ padding: 0 0 1 0; }}
+    /* network rows: the name fills, the join button stays a fixed target.
+       The password row is HIDDEN until a secured new network is picked —
+       an always-visible password box begs to be typed into. */
+    #net_rows .row {{ height: auto; }}
+    .netname {{ width: 1fr; padding: 1 0 0 1; }}
+    #net_pwrow {{ display: none; }}
 
     Button {{ background: transparent; border: round {C['surface']};
               color: {C['text']}; margin-right: 1; }}
@@ -831,6 +838,35 @@ class HyprSettings(App):
                 "added as HTTP transport; anything else runs as "
                 "a stdio command.", classes="hint")
 
+    def _build_network(self):
+        """Body of the network pane, built on first show. Every nmcli call
+        runs in a thread worker — a scan blocks for seconds and this app's
+        rule is that the UI never does."""
+        with Card("Connection"):
+            yield Static("looking…", id="net_status", classes="status")
+            with Horizontal(classes="row"):
+                yield Label("Wi-Fi radio")
+                yield Switch(value=True, id="sw_wifi")
+            with Horizontal(classes="row"):
+                yield Button("󰑓 Rescan", id="net_rescan")
+                yield Button("󰒓 Advanced editor…", id="net_editor")
+        with Card("Wi-Fi networks · click one to connect"):
+            yield Static("", id="net_hint2", classes="status")
+            yield Vertical(id="net_rows")
+            # password row appears only when a secured, unknown network is
+            # picked — a always-visible password box begs to be typed into
+            with Horizontal(classes="row", id="net_pwrow"):
+                yield Label("Password")
+                yield Input(password=True, placeholder="network password",
+                            id="net_pw")
+                yield Button("Join", id="net_join", variant="primary")
+            yield Static(
+                "Known networks join on one click. A new secured one asks "
+                "for its password here — checked by the router, so a typo "
+                "fails visibly instead of silently. Hidden SSIDs and the "
+                "full profile list live in the Advanced editor.",
+                classes="hint")
+
     def _build_power(self):
         """Body of the power pane, moved verbatim out of
         compose() so it is built on first show."""
@@ -939,6 +975,8 @@ class HyprSettings(App):
                 self.query_one("#sw_autohide", Switch).value = autohide_on()
             finally:
                 self._refreshing = False
+        elif pane == "pane-network":
+            self.refresh_network()                   # cached scan, threaded
         elif pane == "pane-integrations":
             self._hb_refresh()                       # local file, instant
             # health is only worth re-checking if it could have changed
@@ -961,6 +999,159 @@ class HyprSettings(App):
             "Scanner daemon running — scans are fast",
             "Scanner daemon not running — scans still work, just slower"))
 
+    def refresh_network(self, rescan=False):
+        """Gather everything nmcli knows in a THREAD, then paint. `rescan`
+        forces a fresh AP sweep (seconds); a plain page-open reads the
+        cache so the pane is never the thing that made you wait."""
+        try:
+            self.query_one("#net_hint2", Static).update(
+                "scanning…" if rescan else "reading…")
+        except Exception:
+            return                        # pane not built yet
+
+        def work():
+            def nm(*args, t=25):
+                try:
+                    r = subprocess.run(["nmcli", "-t", *args],
+                                       capture_output=True, text=True,
+                                       timeout=t)
+                    return r.stdout if r.returncode == 0 else ""
+                except (OSError, subprocess.TimeoutExpired):
+                    return ""
+            radio = "enabled" in nm("radio", "wifi")
+            # active wifi connection + its device and IP
+            active = ""
+            dev = ""
+            for line in nm("-f", "NAME,TYPE,DEVICE",
+                           "connection", "show", "--active").splitlines():
+                p = line.split(":")
+                if len(p) >= 3 and p[1] == "802-11-wireless":
+                    active, dev = p[0], p[2]
+                    break
+            ip = ""
+            if dev:
+                for line in nm("-f", "IP4.ADDRESS", "dev", "show",
+                               dev).splitlines():
+                    if ":" in line:
+                        ip = line.split(":", 1)[1].split("/")[0]
+                        break
+            known = {p.split(":")[0] for p in
+                     nm("-f", "NAME,TYPE", "connection", "show").splitlines()
+                     if ":802-11-wireless" in p}
+            # one row per SSID, strongest band wins; hidden SSIDs are the
+            # Advanced editor's job (join-by-name needs typing a name)
+            aps = {}
+            for line in nm("-f", "IN-USE,SSID,SIGNAL,SECURITY",
+                           "dev", "wifi", "list", "--rescan",
+                           "yes" if rescan else "no").splitlines():
+                p = line.split(":")
+                if len(p) < 4 or not p[1]:
+                    continue
+                inuse, ssid, sec = p[0] == "*", p[1], p[3]
+                try:
+                    sig = int(p[2])
+                except ValueError:
+                    sig = 0
+                cur = aps.get(ssid)
+                was_used = bool(cur and cur[2])
+                if cur is None or sig > cur[0]:
+                    aps[ssid] = (sig, sec, was_used or inuse)
+                elif inuse:
+                    aps[ssid] = (cur[0], cur[1], True)
+            rows = sorted(
+                ((ssid, sig, sec, used)
+                 for ssid, (sig, sec, used) in aps.items()),
+                key=lambda r: (not r[3], -r[1]))[:12]
+            self.call_from_thread(self._net_paint, radio, active, ip, rows,
+                                  known)
+        self.run_worker(work, thread=True, group="net", exclusive=True)
+
+    def _net_paint(self, radio, active, ip, rows, known):
+        from rich.markup import escape
+        try:
+            st = self.query_one("#net_status", Static)
+        except Exception:
+            return                        # user left the pane mid-scan
+        if active:
+            st.update(dot(True,
+                          "connected to [bold]" + escape(active) + "[/]"
+                          + (f" · {ip}" if ip else ""), ""))
+        elif radio:
+            st.update(dot(False, "", "Wi-Fi on — not connected"))
+        else:
+            st.update(dot(False, "", "Wi-Fi radio is OFF"))
+        self._refreshing = True
+        try:
+            self.query_one("#sw_wifi", Switch).value = radio
+        finally:
+            self._refreshing = False
+        self._net_aps = rows
+        box = self.query_one("#net_rows", Vertical)
+        box.remove_children()
+        for i, (ssid, sig, sec, used) in enumerate(rows):
+            bars = ("▂▄▆█" if sig >= 75 else "▂▄▆" if sig >= 50
+                    else "▂▄" if sig >= 25 else "▂")
+            lock = "󰌾" if sec and sec != "--" else "open"
+            mark = (f"[{C['green']}]● [/]" if used else "  ")
+            box.mount(Horizontal(
+                Static(f"{mark}[{C['text']}]{escape(ssid)}[/]  "
+                       f"[{C['accent']}]{bars}[/] "
+                       f"[{C['subtext']}]{sig}% · {lock}[/]",
+                       classes="netname"),
+                Button("connected" if used
+                       else ("join" if ssid in known else "join…"),
+                       id=f"net_ap_{i}", classes="small",
+                       disabled=used),
+                classes="row"))
+        self.query_one("#net_hint2", Static).update(
+            "" if rows else ("no networks found — try Rescan" if radio
+                             else "turn the radio on to scan"))
+        self.query_one("#net_pwrow", Horizontal).display = False
+
+    def _net_join(self, ssid, password=None):
+        """Connect in a worker; paint the outcome. A wrong password leaves
+        a broken profile behind that would make every retry fail the same
+        way, so a failed fresh join deletes it before reporting."""
+        self.query_one("#net_hint2", Static).update(
+            f"joining {ssid}…")
+
+        def work():
+            def run(*a, t=45):
+                try:
+                    return subprocess.run(["nmcli", *a], capture_output=True,
+                                          text=True, timeout=t)
+                except (OSError, subprocess.TimeoutExpired) as e:
+                    class R:                       # shaped like a result
+                        returncode, stderr = 1, str(e)
+                    return R()
+            known = ssid in {p.split(":")[0] for p in subprocess.run(
+                ["nmcli", "-t", "-f", "NAME", "connection", "show"],
+                capture_output=True, text=True).stdout.splitlines()}
+            if known and password is None:
+                r = run("connection", "up", ssid)
+            elif password is None:
+                r = run("device", "wifi", "connect", ssid)
+            else:
+                r = run("device", "wifi", "connect", ssid,
+                        "password", password)
+                if r.returncode != 0:
+                    run("connection", "delete", ssid, t=10)
+            err = (r.stderr or "").strip().splitlines()
+            msg = err[-1] if err else "failed"
+            self.call_from_thread(self._net_joined, ssid,
+                                  r.returncode == 0, msg)
+        self.run_worker(work, thread=True, group="net", exclusive=True)
+
+    def _net_joined(self, ssid, ok, msg):
+        from rich.markup import escape
+        if ok:
+            self.notify(f"Connected to {ssid}")
+            self.refresh_network()
+        else:
+            self.query_one("#net_hint2", Static).update(
+                f"[{DANGER}]could not join {escape(ssid)}: "
+                f"{escape(msg)}[/]")
+
     def refresh_wallpapers(self):
         pairs = current_wallpapers()
         text = "\n".join(f"[{C['accent']}]{m}[/]  →  {p}" for m, p in pairs) \
@@ -981,6 +1172,17 @@ class HyprSettings(App):
                                capture_output=True)
             self.notify("Auto-hide " + ("ON — move mouse to top edge to reveal"
                                         if event.value else "OFF — bar always visible"))
+            return
+        if sid == "sw_wifi":
+            def work(on=event.value):
+                try:
+                    subprocess.run(["nmcli", "radio", "wifi",
+                                    "on" if on else "off"],
+                                   capture_output=True, timeout=15)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+                self.call_from_thread(self.refresh_network)
+            self.run_worker(work, thread=True, group="net", exclusive=True)
             return
         if sid.startswith("sw_w_"):
             wkey = sid.removeprefix("sw_w_")
@@ -1183,6 +1385,47 @@ class HyprSettings(App):
 
     def on_button_pressed(self, event: Button.Pressed):
         bid = event.button.id or ""
+        if bid == "net_rescan":
+            self.refresh_network(rescan=True)
+            return
+        if bid == "net_editor":
+            launch("nm-connection-editor")
+            return
+        if bid.startswith("net_ap_"):
+            try:
+                ssid, _sig, sec, used = \
+                    self._net_aps[int(bid.removeprefix("net_ap_"))]
+            except (AttributeError, ValueError, IndexError):
+                return
+            if used:
+                return
+            secured = bool(sec and sec != "--")
+            known = False
+            try:
+                known = ssid in {p.split(":")[0] for p in subprocess.run(
+                    ["nmcli", "-t", "-f", "NAME", "connection", "show"],
+                    capture_output=True, text=True,
+                    timeout=10).stdout.splitlines()}
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            if known or not secured:
+                self._net_join(ssid)
+            else:
+                # new secured network: reveal the password row, aimed at it
+                self._net_pending = ssid
+                row = self.query_one("#net_pwrow", Horizontal)
+                row.display = True
+                pw = self.query_one("#net_pw", Input)
+                pw.value = ""
+                pw.placeholder = f"password for {ssid}"
+                pw.focus()
+            return
+        if bid == "net_join":
+            ssid = getattr(self, "_net_pending", "")
+            pw = self.query_one("#net_pw", Input).value
+            if ssid and pw:
+                self._net_join(ssid, pw)
+            return
         if bid == "theme_btn":
             themes = theme_list()
             cur = self.widgets.get("theme", "wallust")

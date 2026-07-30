@@ -516,7 +516,8 @@ spawn_guard_set() {
 
 settings_panel() {
     # Hypr Settings — click-and-pick TUI control panel (textual) in a glass float
-    # $1 (optional): page to open — appearance|bar|wallpaper|widgets|security|power
+    # $1 (optional): page to open —
+    # appearance|bar|wallpaper|widgets|network|security|integrations|power
     local page="${1:-}" addr
     # exact class+title match (a browser tab named "Hypr Settings" must not count)
     addr=$(hyprctl clients -j | python3 -c "
