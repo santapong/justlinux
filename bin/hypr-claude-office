@@ -18,8 +18,14 @@ Click a desk to jump to its terminal — its window, or the studio tab
 hosting it. Only a session with no process left is resumed (as a studio
 tab when the studio is open); resuming a LIVE one would double it.
 Hover a desk for what Claude last said it is doing.
+Past the live desks come GHOST desks: empty, dimmed, one per recent
+conversation you could pick back up, labelled with how long ago it was.
+Click one to reopen it — as a studio tab when the studio is open. They
+only fill slots the live desks leave (GHOSTS_MAX at most), so work
+happening now always wins the space.
 The scene lives on the bottom layer like the widget cards — visible on
-the desktop, behind windows — and hides itself when no Claude runs.
+the desktop, behind windows. It stays up while enabled even with nothing
+running: that is the point of the ghosts.
 
 Run again to toggle off. Autostarted by desktop-widgets.sh when
 widgets.conf has claude_office=on.
@@ -43,7 +49,7 @@ sys.path.insert(0, str(Path.home() / ".local/lib"))
 from hyprdesk import colors, conf_get, rgb
 from hyprdesk.layer import LayerWindow
 from hyprdesk.claudesessions import (CLAUDE_PROJECTS, _argv, _sid_key,
-                                     session_title, transcript_for,
+                                     ago, session_title, transcript_for,
                                      active_subagents, claude_procs,
                                      daemon_roster, job_state, proc_cpu_ticks,
                                      recent_transcripts, session_meta,
@@ -63,6 +69,20 @@ COLS_DEF = 5                 # office_cols: desks per row before wrapping.
                              # 5 keeps the card the same width it was when
                              # cells were name-less and half as wide.
 MAX_ROWS = 2                 # past this the tail collapses into "+N more"
+GHOSTS_MAX = 4               # empty desks for conversations you could pick
+                             # back up. Capped low ON PURPOSE: they only fill
+                             # slots the live desks leave, and a wall of
+                             # memories would bury the work happening now.
+GHOST_MIN_IDLE = 120         # a transcript touched more recently than this
+                             # is assumed STILL OPEN and never offered as a
+                             # ghost. A live worker's sid is read off its
+                             # bound transcript, so a session whose transcript
+                             # could not be bound has sid "" and is invisible
+                             # to the sid check below — this is the guard that
+                             # covers it. Resuming a live conversation starts
+                             # a second claude on one transcript, so the cost
+                             # of being wrong here is high and the cost of
+                             # waiting two minutes is nothing.
 # cpu ticks per poll ⇒ "typing". MEASURED on this box over 8 polls of
 # three GENUINELY idle sessions: 15-43 a poll (one had not written its
 # transcript for 42 minutes), and a busy one sits in the same band — so
@@ -592,6 +612,15 @@ class Office(LayerWindow):
         # claude on one transcript. on_click already routes live desks away,
         # but this is the call that does the damage, so it refuses too.
         pid = wk.get("pid")
+        # A ghost carries live=False and a synthetic pid, so neither check
+        # below speaks for it. What keeps a ghost honest is upstream, in the
+        # poll: a transcript is only offered once it has been untouched for
+        # GHOST_MIN_IDLE, and never if it is `taken` (bound to a live pid or
+        # named by the daemon roster) or already a desk's sid.
+        # An fd-based "is it open?" check was tried here and removed: claude
+        # does not hold its transcript open, so it never fired — and matching
+        # a sid against fd paths false-positives on scratchpad directories
+        # that carry the same id.
         if wk.get("live") or (pid and os.path.exists(f"/proc/{pid}")):
             subprocess.run(["notify-send", "Claude office",
                             "That session is still running — it has no "
@@ -825,6 +854,51 @@ class Office(LayerWindow):
         # the headline number: how many desks are waiting on YOU
         self.needy = sum(1 for w in rows
                          if w.get("state") in ("attention", "blocked"))
+        # ---- ghost desks: conversations you could pick back up ----
+        # With nothing live the office drew one sleeping Clawd and no way to
+        # act, which made it a status light rather than somewhere to go. A
+        # ghost is a RESUMABLE conversation: an empty desk, dimmed, click to
+        # reopen it (on_click already routes a non-live desk with a sid into
+        # _resume, so this needs no new interaction).
+        #
+        # They take only the slots the live desks leave, so a busy office
+        # never trades a working desk for the memory of one. Built from the
+        # `txs` listing gathered above rather than session_rows(), because
+        # this runs every POLL_S=2s and session_rows() forks hyprctl.
+        self.live_n = len(rows)
+        free = max(0, min(GHOSTS_MAX, cap - self.live_n))
+        if free:
+            # a conversation already on a desk must not also be a ghost of
+            # itself: skip both the sids in play and the transcripts bound
+            # to a live pid
+            busy_sids = {w.get("sid") for w in rows if w.get("sid")}
+            now = time.time()
+            n = 0
+            for mtime, f in txs:
+                if n >= free:
+                    break
+                sid = os.path.basename(str(f))[:-6]   # <sid>.jsonl
+                if sid in busy_sids or f in taken:
+                    continue
+                if now - mtime < GHOST_MIN_IDLE:
+                    continue        # still being written: treat it as live
+                cwd, preview = session_meta(f)
+                if not preview:
+                    continue                          # empty/aborted session
+                rows.append({
+                    # negative: unique in the prev-poll map, and never a real
+                    # /proc entry — which is what stops _resume's live guard
+                    # from refusing a ghost
+                    "pid": -(n + 1),
+                    "ghost": True, "live": False, "state": "ghost",
+                    "sid": sid, "cwd": cwd or str(Path.home()),
+                    "label": session_title(f) or preview,
+                    "place": os.path.basename(
+                        str(cwd or "").rstrip("/")) or "~",
+                    "age": ago(mtime),
+                    "detail": f"{ago(mtime)} — {preview}",
+                })
+                n += 1
         # only a studio window that is actually on screen is worth
         # handing a session to — a detached tmux server helps nobody
         self.studio_addr = ""
@@ -930,12 +1004,17 @@ class Office(LayerWindow):
                        f"󰚩 CLAUDE OFFICE · {self.needy} need you", size=9)
         elif self.workers:
             # never just the bare title: "all quiet" is itself information,
-            # and the count tells you the office is actually watching
-            n = len(self.workers)
+            # and the count tells you the office is actually watching.
+            # live_n, NOT len(workers): ghosts are not running, and counting
+            # them as such would report work that is not happening.
+            n = getattr(self, "live_n", len(self.workers))
+            ghosts = len(self.workers) - n
+            if n:
+                say = f"{n} running · none need you"
+            else:
+                say = f"nothing running · {ghosts} to pick up"
             cr.set_source_rgba(*rgb(PAL["sub"]), 0.9)
-            self._text(cr, PAD, PAD + 6,
-                       f"󰚩 CLAUDE OFFICE · {n} running · none need you",
-                       size=9)
+            self._text(cr, PAD, PAD + 6, f"󰚩 CLAUDE OFFICE · {say}", size=9)
         else:
             cr.set_source_rgba(*rgb(PAL["sub"]), 0.9)
             self._text(cr, PAD, PAD + 6, "󰚩 CLAUDE OFFICE", size=9)
@@ -982,7 +1061,16 @@ class Office(LayerWindow):
             cr.set_source_rgba(0, 0, 0, 0.22)
             cr.rectangle(desk_x, y_floor, 16 * SCALE, SCALE)
             cr.fill()
-            if state == "sleep":
+            if state == "ghost":
+                # an EMPTY desk: the chair is there, nobody is in it. No
+                # Clawd at all is the whole point — a dimmed worker would
+                # read as "asleep at their desk", which is a live session.
+                cr.push_group()
+                draw_art(cr, DESK, desk_x, y_desk,
+                         extra={"S": rgb(PAL["muted"])})
+                cr.pop_group_to_source()
+                cr.paint_with_alpha(0.45)
+            elif state == "sleep":
                 draw_art(cr, DESK, desk_x, y_desk,
                          extra={"S": rgb(PAL["muted"])})
                 # slumped over the keyboard, fast asleep
@@ -1055,12 +1143,19 @@ class Office(LayerWindow):
             word = {"typing": "working", "reading": "reading",
                     "attention": "needs you", "idle": "idle",
                     "sleep": "asleep"}.get(state, state)
+            if state == "ghost":
+                # the age IS the status: what you want to know about a
+                # conversation you might reopen is how stale it is
+                word = wk.get("age") or "resumable"
             if wk.get("daemon"):
                 word += " 󰑮"           # no terminal of its own
             ty = ytop + CELL_H + 9
             # the name is the primary ink; attention lifts it to accent2 so
             # the desk that wants you reads first at a glance
+            # a ghost's name recedes to sub: it is a thing you COULD do, and
+            # must never compete with a session that is actually running
             cr.set_source_rgb(*rgb(PAL["accent2"] if state == "attention"
+                                   else PAL["sub"] if state == "ghost"
                                    else PAL["fg"]))
             for li, line in enumerate(
                     self._wrap(wk["label"], CELL_W - 4 * SCALE, 9)):

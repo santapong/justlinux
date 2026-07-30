@@ -72,7 +72,9 @@
         "format-ethernet": " wired",
         "format-disconnected": "\u26a0 offline",
         "interval": 5,
-        "tooltip-format": "{ifname}: {ipaddr}\n\udb80\uddda {bandwidthDownBytes}  \udb81\udd52 {bandwidthUpBytes}"
+        "tooltip-format": "{ifname}: {ipaddr}\n\udb80\uddda {bandwidthDownBytes}  \udb81\udd52 {bandwidthUpBytes}\n\nclick: pick a network  \u00b7  right-click: full editor",
+        "on-click": "kitty --class floatterm --title 'Network' sh -c 'LANG=en_US.UTF-8 nmtui'",
+        "on-click-right": "nm-connection-editor"
     },
     "pulseaudio": {
         "format": "{icon} {volume}%",
