@@ -526,7 +526,11 @@ class HyprSettings(App):
     /* network rows: the name fills, the join button stays a fixed target.
        The password row is HIDDEN until a secured new network is picked —
        an always-visible password box begs to be typed into. */
-    #net_rows .row {{ height: auto; }}
+    /* auto-height on the CONTAINERS too: a bare Vertical inside a card
+       stretches to fill, which left a screenful of nothing between one
+       VPN row and the import controls */
+    #net_rows, #vpn_rows {{ height: auto; }}
+    #net_rows .row, #vpn_rows .row {{ height: auto; }}
     .netname {{ width: 1fr; padding: 1 0 0 1; }}
     #net_pwrow {{ display: none; }}
 
@@ -866,6 +870,26 @@ class HyprSettings(App):
                 "fails visibly instead of silently. Hidden SSIDs and the "
                 "full profile list live in the Advanced editor.",
                 classes="hint")
+        with Card("VPN"):
+            yield Static("", id="vpn_status", classes="status")
+            yield Vertical(id="vpn_rows")
+            with Horizontal(classes="row"):
+                yield Label("Config file")
+                yield Input(placeholder="path to a .ovpn or WireGuard .conf",
+                            id="vpn_path")
+                yield Button("󰅌", id="vpn_paste", classes="small")
+            with Horizontal(classes="row"):
+                yield Button("󰩍 Import", id="vpn_import", variant="primary")
+            yield Static(
+                "Joining a VPN means importing the file its provider gave "
+                "you — .ovpn for OpenVPN, .conf for WireGuard. It appears "
+                "above with a connect button. Building one from scratch "
+                "(keys, routes) is the Advanced editor's job.",
+                classes="hint")
+        with Card("Bluetooth"):
+            yield Static("looking…", id="bt_status", classes="status")
+            with Horizontal(classes="row", id="bt_btns"):
+                yield Button("󰂯 Open Blueman", id="bt_gui")
 
     def _build_power(self):
         """Body of the power pane, moved verbatim out of
@@ -1042,8 +1066,13 @@ class HyprSettings(App):
             # Advanced editor's job (join-by-name needs typing a name)
             aps = {}
             for line in nm("-f", "IN-USE,SSID,SIGNAL,SECURITY",
+                           # `auto`, never `no`: NM AGES results out of its
+                           # scan cache within ~30s, so `no` on a freshly
+                           # opened page returned ONLY the associated AP —
+                           # which read as "only one network exists". auto
+                           # reuses a fresh cache and sweeps when stale.
                            "dev", "wifi", "list", "--rescan",
-                           "yes" if rescan else "no").splitlines():
+                           "yes" if rescan else "auto").splitlines():
                 p = line.split(":")
                 if len(p) < 4 or not p[1]:
                     continue
@@ -1062,11 +1091,26 @@ class HyprSettings(App):
                 ((ssid, sig, sec, used)
                  for ssid, (sig, sec, used) in aps.items()),
                 key=lambda r: (not r[3], -r[1]))[:12]
+            # VPNs: name, kind, up? — wireguard is its own type, the rest
+            # ride the vpn plugin type
+            up_now = {p.split(":")[0] for p in
+                      nm("-f", "NAME", "connection", "show",
+                         "--active").splitlines()}
+            vpns = [(p.split(":")[0], p.split(":")[1],
+                     p.split(":")[0] in up_now)
+                    for p in nm("-f", "NAME,TYPE",
+                                "connection", "show").splitlines()
+                    if ":vpn" in p or ":wireguard" in p]
+            # bluetooth: /sys is the honest check — bluetoothctl HANGS with
+            # no adapter (measured 2m timeout earlier), so never call it to
+            # answer "is there one"
+            bt = os.path.exists("/sys/class/bluetooth") and \
+                bool(os.listdir("/sys/class/bluetooth"))
             self.call_from_thread(self._net_paint, radio, active, ip, rows,
-                                  known)
+                                  known, vpns, bt)
         self.run_worker(work, thread=True, group="net", exclusive=True)
 
-    def _net_paint(self, radio, active, ip, rows, known):
+    def _net_paint(self, radio, active, ip, rows, known, vpns=(), bt=False):
         from rich.markup import escape
         try:
             st = self.query_one("#net_status", Static)
@@ -1107,6 +1151,39 @@ class HyprSettings(App):
             "" if rows else ("no networks found — try Rescan" if radio
                              else "turn the radio on to scan"))
         self.query_one("#net_pwrow", Horizontal).display = False
+        # ----- VPN rows -----
+        self._net_vpns = list(vpns)
+        vbox = self.query_one("#vpn_rows", Vertical)
+        vbox.remove_children()
+        for i, (name, kind, up) in enumerate(self._net_vpns):
+            vbox.mount(Horizontal(
+                Static(f"[{C['text']}]{escape(name)}[/]  "
+                       f"[{C['subtext']}]{escape(kind)}[/]",
+                       classes="netname"),
+                Button("disconnect" if up else "connect",
+                       id=f"vpn_up_{i}", classes="small",
+                       variant="warning" if up else "default"),
+                classes="row"))
+        self.query_one("#vpn_status", Static).update(
+            dot(True, "VPN up: " + escape(", ".join(
+                n for n, _k, u in self._net_vpns if u)), "")
+            if any(u for _n, _k, u in self._net_vpns)
+            else (f"[{C['subtext']}]no VPN connected[/]"
+                  if self._net_vpns else
+                  f"[{C['subtext']}]none set up yet — import a config "
+                  "below[/]"))
+        # ----- bluetooth -----
+        # the skill's rule: what can fail renders a fallback, never a blank.
+        # This box has NO adapter today, so the fallback IS the usual view —
+        # but the card checks live, so plugging a dongle upgrades it on the
+        # next page-open with no code change.
+        self.query_one("#bt_status", Static).update(
+            dot(True, "adapter present — pair and manage in Blueman", "")
+            if bt else
+            f"[{C['subtext']}]no Bluetooth adapter on this machine — "
+            "systemd skips the service on that exact condition. A USB "
+            "dongle makes this card come alive.[/]")
+        self.query_one("#bt_gui", Button).disabled = not bt
 
     def _net_join(self, ssid, password=None):
         """Connect in a worker; paint the outcome. A wrong password leaves
@@ -1140,6 +1217,85 @@ class HyprSettings(App):
             msg = err[-1] if err else "failed"
             self.call_from_thread(self._net_joined, ssid,
                                   r.returncode == 0, msg)
+        self.run_worker(work, thread=True, group="net", exclusive=True)
+
+    def _vpn_import(self, path):
+        """Import a VPN config in a worker. The type comes from the file:
+        .ovpn (or .conf that smells of OpenVPN) → the openvpn plugin,
+        [Interface]+[Peer] → native wireguard. Import does NOT connect —
+        the new row's connect button does, so a bad import cannot strand
+        half a tunnel up."""
+        from rich.markup import escape
+        p = Path(path).expanduser()
+        st = self.query_one("#vpn_status", Static)
+        if not path:
+            st.update(f"[{DANGER}]paste or type the config file's path "
+                      "first[/]")
+            return
+        if not p.is_file():
+            st.update(f"[{DANGER}]no such file: {escape(str(p))}[/]")
+            return
+        try:
+            head = p.read_text(errors="replace")[:4000]
+        except OSError as e:
+            st.update(f"[{DANGER}]cannot read it: {escape(str(e))}[/]")
+            return
+        if "[Interface]" in head and "[Peer]" in head:
+            kind = "wireguard"
+        elif p.suffix == ".ovpn" or "remote " in head or "client" in head:
+            kind = "openvpn"
+        else:
+            st.update(f"[{DANGER}]cannot tell what this is — expected a "
+                      "WireGuard .conf ([Interface]/[Peer]) or an "
+                      ".ovpn[/]")
+            return
+        st.update(f"importing {escape(p.name)} as {kind}…")
+
+        def work():
+            try:
+                r = subprocess.run(
+                    ["nmcli", "connection", "import", "type", kind,
+                     "file", str(p)],
+                    capture_output=True, text=True, timeout=30)
+                ok, msg = r.returncode == 0, \
+                    (r.stderr or r.stdout or "").strip().splitlines()
+            except (OSError, subprocess.TimeoutExpired) as e:
+                ok, msg = False, [str(e)]
+            self.call_from_thread(self._vpn_imported, ok,
+                                  msg[-1] if msg else "")
+        self.run_worker(work, thread=True, group="net", exclusive=True)
+
+    def _vpn_imported(self, ok, msg):
+        from rich.markup import escape
+        if ok:
+            self.notify("VPN imported — connect it below")
+            self.query_one("#vpn_path", Input).value = ""
+            self.refresh_network()
+        else:
+            self.query_one("#vpn_status", Static).update(
+                f"[{DANGER}]import failed: {escape(msg)}[/]")
+
+    def _vpn_toggle(self, name, up):
+        self.query_one("#vpn_status", Static).update(
+            f"{'closing' if up else 'opening'} {name}…")
+
+        def work():
+            try:
+                r = subprocess.run(
+                    ["nmcli", "connection", "down" if up else "up", name],
+                    capture_output=True, text=True, timeout=60)
+                ok = r.returncode == 0
+                msg = (r.stderr or "").strip().splitlines()
+            except (OSError, subprocess.TimeoutExpired) as e:
+                ok, msg = False, [str(e)]
+            def done():
+                if not ok:
+                    from rich.markup import escape
+                    self.query_one("#vpn_status", Static).update(
+                        f"[{DANGER}]{escape(msg[-1] if msg else 'failed')}"
+                        "[/]")
+                self.refresh_network()
+            self.call_from_thread(done)
         self.run_worker(work, thread=True, group="net", exclusive=True)
 
     def _net_joined(self, ssid, ok, msg):
@@ -1425,6 +1581,28 @@ class HyprSettings(App):
             pw = self.query_one("#net_pw", Input).value
             if ssid and pw:
                 self._net_join(ssid, pw)
+            return
+        if bid == "vpn_paste":
+            try:
+                r = subprocess.run(["wl-paste", "-n"], capture_output=True,
+                                   text=True, timeout=5)
+                self.query_one("#vpn_path", Input).value = r.stdout.strip()
+            except (OSError, subprocess.TimeoutExpired):
+                self.notify("clipboard unavailable", severity="warning")
+            return
+        if bid == "vpn_import":
+            self._vpn_import(self.query_one("#vpn_path", Input).value.strip())
+            return
+        if bid.startswith("vpn_up_"):
+            try:
+                name, _kind, up = \
+                    self._net_vpns[int(bid.removeprefix("vpn_up_"))]
+            except (AttributeError, ValueError, IndexError):
+                return
+            self._vpn_toggle(name, up)
+            return
+        if bid == "bt_gui":
+            launch("blueman-manager")
             return
         if bid == "theme_btn":
             themes = theme_list()
