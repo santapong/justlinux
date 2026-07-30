@@ -741,7 +741,17 @@ def sidebar():
         Screen {{ background: ansi_default; color: {pal['fg']}; }}
         #hint {{ color: {pal['sub']}; padding: 0 2; height: 1; }}
         Tree {{ background: transparent; padding: 0 1; }}
-        Tree > .tree--cursor {{ background: {pal['accent']} 30%; }}
+        /* the cursor is "you are here" and wears accent like the tab
+           strip's current tab. 30% was a faint wash you had to hunt for;
+           55% + bold reads across the room while fg labels stay legible on
+           it (a FULL fill would put the rows' sub-ink spans on raw accent,
+           which is unreadable). tree--highlight-line is the mouse hover —
+           same job as the ghost desks' wake, so aiming a click gets
+           feedback before the click. */
+        Tree > .tree--cursor {{
+            background: {pal['accent']} 55%; text-style: bold;
+        }}
+        Tree > .tree--highlight-line {{ background: {pal['sub']} 15%; }}
         Tree > .tree--guides {{ color: {pal['sub']}; }}
         ConfirmQuit {{ align: center middle; background: {pal['bg']} 60%; }}
         /* muted is a SURFACE tone in the ink table, never text — this is
