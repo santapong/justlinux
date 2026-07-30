@@ -1065,11 +1065,14 @@ class Office(LayerWindow):
                 # an EMPTY desk: the chair is there, nobody is in it. No
                 # Clawd at all is the whole point — a dimmed worker would
                 # read as "asleep at their desk", which is a live session.
+                # Hover WAKES the desk (0.45 → 0.85): the change itself is
+                # the "you can act on this" cue, on the same frame as the
+                # hover redraw — the skill's 150ms feedback rule.
                 cr.push_group()
                 draw_art(cr, DESK, desk_x, y_desk,
                          extra={"S": rgb(PAL["muted"])})
                 cr.pop_group_to_source()
-                cr.paint_with_alpha(0.45)
+                cr.paint_with_alpha(0.85 if i == self.hover else 0.45)
             elif state == "sleep":
                 draw_art(cr, DESK, desk_x, y_desk,
                          extra={"S": rgb(PAL["muted"])})
@@ -1145,8 +1148,14 @@ class Office(LayerWindow):
                     "sleep": "asleep"}.get(state, state)
             if state == "ghost":
                 # the age IS the status: what you want to know about a
-                # conversation you might reopen is how stale it is
-                word = wk.get("age") or "resumable"
+                # conversation you might reopen is how stale it is. Under
+                # the cursor it says the action instead — plain words, in
+                # primary ink, because nothing else on a ghost teaches that
+                # it is clickable.
+                if i == self.hover:
+                    word, ink = "click to reopen", PAL["fg"]
+                else:
+                    word = wk.get("age") or "resumable"
             if wk.get("daemon"):
                 word += " 󰑮"           # no terminal of its own
             ty = ytop + CELL_H + 9
