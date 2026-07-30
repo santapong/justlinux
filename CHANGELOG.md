@@ -4,6 +4,80 @@ All notable changes to this desktop. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] — 2026-07-30
+
+### Added
+
+- **Studio: a jump palette.** `C-b g` / `C-b C-Space` / the `/` button
+  opens a fuzzy popup over every open tab and every resumable transcript.
+  It is also the deliberate answer to tab overflow: row 1 has no
+  scrollport because tmux 3.7b desyncs its mouse hit table when the list
+  trims (measured — a click on one tab's label killed a different window).
+- **Studio: per-tab attention marks** from tmux's own alert flags — `○`
+  unread output, `●` bell (your turn). Selecting the tab clears them,
+  because that is what tmux already does with the flags. Zero forks,
+  nothing coupled to Claude's spinner glyphs.
+- **Studio: a split tab names its second conversation** (`+api`, not
+  `·2`), re-derived every rename pass so it self-corrects when the pane
+  layout changes. New sessions get their id from the studio
+  (`claude --session-id`), so identical directory-named tabs are gone.
+- **Studio: row 0 earns its centre** — focused pane's directory, true tab
+  count, `[zoom]` / copy-mode indicators, all in a `@status-centre` user
+  option.
+- **Office: ghost desks.** Up to four dimmed, empty desks for resumable
+  conversations, aged, hover-to-wake, click-to-reopen — offered only after
+  120 s untouched and never while bound to a live pid.
+- **Settings: a Network page.** Connection status with IP, Wi-Fi radio
+  switch, one row per SSID (strongest band, connected-first), one-click
+  join for known networks, and a password *dialog* for new ones that names
+  the network and shows its security and signal. VPN import (`.ovpn` /
+  WireGuard `.conf`, type read from the file, import never auto-connects)
+  with per-profile connect/disconnect. Bluetooth card that tells the truth:
+  this machine has no adapter, and the card comes alive when one is
+  plugged. The bar's network module now opens this page; right-click keeps
+  `nm-connection-editor`.
+- **Thai input.** fcitx5 + libthai, Right Ctrl toggle, shared input state,
+  ships in `config/fcitx5/` *including the profile* — install.sh replaces
+  config dirs wholesale, so shipping only the hotkey file would wipe the
+  enabled layouts. The README carries the three Flatpak steps env vars
+  alone cannot do (sandbox D-Bus grant, `--enable-wayland-ime`).
+
+### Fixed
+
+- **Studio: the ✕ never worked.** `kill-window -t` does not format-expand
+  its target; the click reached tmux as a literal `#{s/^x//:…}` and
+  errored. Routed through `run-shell`, which expands. The split buttons
+  always worked for exactly this reason.
+- **Studio: the two-row bar broke clicking tabs** — the hand-written
+  `status-format[1]` dropped `range=window|`, which both
+  `select-window -t=` and `kill-window -t=` resolve against. Left-click
+  selected nothing; middle-click killed the *current* tab. Caught by the
+  design plan's feasibility gate, fixed same day.
+- **Studio: a misaimed click cost a resume.** The tree now aims on first
+  click and opens on the second (Enter still opens in one press; projects
+  still toggle on first click). Cursor bar lifted from a 30% wash to 55% +
+  bold. `q` asks before destroying the studio, naming every tab and live
+  conversation it would take; `q`/`Esc`/`Enter` all cancel.
+- **Settings: the network scan showed one network.** NetworkManager ages
+  scan results out within ~30 s, so `--rescan no` on page-open returned
+  only the associated AP. `auto` re-sweeps when stale: 1 → 20 networks.
+- **install.sh exited 1 and never installed `lib/`.** `cp` without `-r`
+  aborts on `bin/__pycache__` under `set -e` — configs landed, half the
+  scripts landed, everything after silently never ran. And `lib/hyprdesk`
+  — which every script imports — was never copied at all, per-package now
+  (`~/.local/lib` also holds `python3.13`, not ours to move). The
+  `claude/skills` design system installs per-skill for the same reason.
+- **Office/sidebar: emoji → palette glyphs.** `🟢`/`🕒` exist in exactly
+  one font here (not JetBrainsMono NF) and their colour can never follow
+  the wallpaper. Every replacement glyph was checked with
+  `fc-list :charset=` — which is how `⌕`, `⛶` and `◐` were caught as
+  tofu before shipping. Tree labels are Rich markup and now escape their
+  text: one `[` in a conversation title took the whole row with it.
+- **Sidebar rows say what a background job is doing** — `job_state()` had
+  sat unused since it was written; its `detail` is capped at 40 chars with
+  non-blank fallbacks, because the real data runs 50–206 chars and the
+  shape has already drifted across cliVersions.
+
 ## [1.1.5] — 2026-07-27
 
 ### Performance

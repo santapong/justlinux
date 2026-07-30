@@ -104,12 +104,32 @@ In priority order:
   Claude's `detail` line.
 - Capped at `office_cols × 2` desks; the remainder collapses into `+N more`.
 
+## Ghost desks — conversations you could pick back up
+
+Past the live desks sit **ghosts**: empty, dimmed desks, one per recent
+resumable conversation, labelled with how long ago it was. No Clawd at all
+— a dimmed worker would read as "asleep at their desk", which is a live
+state. Hover wakes the desk (0.45 → 0.85 alpha) and swaps its age for
+*click to reopen*; clicking reopens it, as a studio tab when the studio is
+up.
+
+They fill only the slots the live desks leave (four at most), so current
+work always wins the space, and the header counts them separately —
+"nothing running · 4 to pick up" — because a ghost is not running and must
+not be reported as such.
+
+What keeps a ghost honest is the poll, not the click: a transcript is only
+offered once it has sat untouched for 120 s and is neither bound to a live
+pid nor named by the daemon roster. Resuming a live conversation puts a
+second `claude` on one transcript, so the offer side is where the guard
+lives — a ghost's synthetic negative pid slips `_resume`'s process check
+by construction.
+
 ## Clicking
 
 The whole card takes clicks. **A desk opens its session; anywhere else opens
 the Studio** — the header, the gaps between desks, the `+N more` marker, and
-the empty office (which shows a sleeping Clawd when nothing is running). The
-office is a *view*; the Studio is where you work.
+the empty office. The office is a *view*; the Studio is where you work.
 
 Clicking a desk:
 

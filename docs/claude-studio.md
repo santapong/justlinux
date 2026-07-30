@@ -14,12 +14,21 @@ you use for work — no plugins, no resurrect, no theme collision.
 declaration there, not the SVG.*
 
 ```
-┌─ tab bar ────────────────────────────────────────────────────────┐
-│ 󰚩 Claude Studio  0 sessions │ 1 fix-the-parser ·2 ✕ │ 2  api ✕  [|] [-] │
+┌─ row 0 ──────────────────────────────────────────────────────────┐
+│ 󰚩 Claude Studio      dots · 4 tabs · [zoom]      / │ ─  studio   │
+├─ row 1 — the tabs ───────────────────────────────────────────────┤
+│  0 sessions   1 fix-the-parser +api ✕   2 talos ○ ✕   3 aegis ● ✕│
 ├──────────────────────────────────────────────────────────────────┤
 │  the selected tab's window — one pane, or several                │
 └──────────────────────────────────────────────────────────────────┘
 ```
+
+Row 0 brands the studio and says where you are: the focused pane's
+directory, the TRUE tab count (row 1 clips at the right edge — see the
+jump palette below for why there is no scrollport), and `[zoom]` / the
+copy-mode name when a pane state changes what your keys do. The `/` and
+split buttons are fg-on-muted blocks: **accent means exactly one thing in
+this bar — "you are here"** — and nothing else is allowed to wear it.
 
 ## Tab 0 — the session tree
 
@@ -35,7 +44,16 @@ closing it would take the sidebar with it.
 | `m` | The settings panel (MCP servers) as a tab |
 | `x` | Stop a 󰑮 background session (its transcript stays resumable) |
 | `r` | Refresh the tree |
-| `q` | Close the whole studio |
+| `q` | Close the whole studio — **after a dialog** that names every tab and live conversation it would take. `q`, `Esc` and `Enter` all cancel; killing needs `Tab`+`Enter` or a click. An empty studio skips the question. |
+
+**Mouse: first click aims, second click opens.** The stock Tree selects on
+any single click, and selecting a session here means `claude --resume` —
+on one-cell rows, missing by one row didn't highlight the wrong
+conversation, it *opened* it. Now the first click only moves the cursor
+bar (accent, 55%, bold — visible from across the room), and clicking the
+row that already wears it commits. A fast double-click still opens;
+`Enter` still opens in one press, because a keyboard cannot misaim; and
+projects still expand on the first click, because a mistoggle is free.
 
 The tree refreshes itself every 6 s, because it goes stale the moment a
 tab is closed or a session starts somewhere else — but only redraws when
@@ -60,14 +78,39 @@ the directory. Before that, every session in `$HOME` opened a tab called
 `santapong` and the close buttons were a guessing game.
 
 - **✕** on a tab closes it. Middle-click anywhere on the tab does the same.
-- A tab holding several panes shows `·N` — its name only ever describes
-  the first one.
+- **`○` and `●` are the attention marks**, from tmux's own alert flags —
+  `○` (sub ink) is output you have not looked at, `●` (good ink) is a bell:
+  Claude finished its turn and wants you. Selecting the tab is what clears
+  them, because that is already what tmux does with the flags.
+- A split tab **names its second conversation** — `+api` instead of `·2`.
+  The bare `·N` count remains for when the other pane is just a shell.
+  `@beside` is re-derived every rename pass, so killing the identity pane
+  renames the tab to the conversation still running.
+- A **new** session gets its id from the studio (`claude --session-id`),
+  so three `n` presses in one project no longer make three identical tabs
+  forever — each upgrades to Claude's title on the next pass.
 - Closing a tab ends the *terminal*, not the conversation — it is still in
   the tree, still resumable.
 
 tmux has no per-glyph hit testing, so the ✕ carries its own `range=user|`
-tag naming the window it belongs to; left-clicking anywhere else on the
-tab still just selects it.
+tag (wrapping its padding: 3–4 clickable cells, not one), and every tab
+carries `range=window|` — the region `select-window -t=` and
+`kill-window -t=` both resolve against. Dropping that tag once broke
+left-click entirely and made middle-click kill the *current* tab.
+
+## Jump anywhere — `C-b g`
+
+`C-b g` (or `C-b C-Space`, or the `/` button in row 0) opens a fuzzy
+popup over **every open tab and every resumable transcript** — pick a tab
+and it selects it, pick a transcript and it opens as one. Live sessions
+are deliberately absent: handing one to `claude --resume` would open a
+second client on a running conversation.
+
+It is also the answer to tab overflow. Row 1 has **no scrollport on
+purpose**: on tmux 3.7b, `list=on` desyncs the mouse hit table the moment
+the list trims — a click on one tab's label killed a different window —
+so tabs past the right edge have no mouse path at all. This is how you
+reach them. Degrades to `choose-tree -Z` if fzf is ever missing.
 
 ## Splits — several panes in one tab
 
@@ -130,7 +173,7 @@ icons — tmux draws characters, not sprites.
 
 | | |
 |---|---|
-| `bin/hypr-claude-studio` | all of it — `launch`, `--sidebar`, `--split` |
+| `bin/hypr-claude-studio` | all of it — `launch`, `--sidebar`, `--split`, `--palette` |
 | `lib/hyprdesk/claudesessions.py` | where sessions and their titles come from |
 
 Launching when the studio already exists **summons** it to the current
