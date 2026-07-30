@@ -451,6 +451,93 @@ class Confirm(ModalScreen[bool]):
         self.dismiss(False)
 
 
+class WifiJoin(ModalScreen):
+    """Password prompt for joining a secured network, as a POPUP.
+
+    It floated as a row at the bottom of the card first, which had two
+    problems the modal solves: on a page grown tall with VPN and Bluetooth
+    cards the row could appear off-screen (a prompt you have to scroll to
+    find is a prompt you miss), and it competed with the list instead of
+    focusing the one decision. The dialog names the network, shows what
+    kind of lock it wears and how strong it is — the facts you compare
+    against the router's sticker before committing a password.
+
+    Dismisses with the password string, or None on cancel. Enter joins,
+    Escape cancels, and the 󰅌 pastes — passwords live in managers, and
+    Ctrl+V is the terminal's key, not the app's.
+    """
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
+    CSS = f"""
+    WifiJoin {{ align: center middle; background: {C['base']} 60%; }}
+    #wj-box {{ width: 62; height: auto; padding: 1 2;
+               background: {C['base']}; border: round {C['surface']}; }}
+    #wj-title {{ text-style: bold; }}
+    #wj-info {{ color: {C['subtext']}; padding: 0 0 1 0; }}
+    #wj-row {{ height: 3; }}
+    #wj-row Label {{ padding: 1 2 0 0; }}
+    /* the Input defaults to full width and shoved the paste button clean
+       off the dialog's right edge — seen in a screenshot, not a review */
+    #wj-row Input {{ width: 1fr; }}
+    #wj-row Button {{ margin-left: 1; }}
+    #wj-btns {{ height: 3; align-horizontal: right; }}
+    #wj-btns Button {{ margin-left: 2; }}
+    """
+
+    def __init__(self, ssid, sig, sec):
+        super().__init__()
+        self._ssid, self._sig, self._sec = ssid, sig, sec
+
+    def compose(self) -> ComposeResult:
+        from rich.markup import escape
+        bars = ("▂▄▆█" if self._sig >= 75 else "▂▄▆" if self._sig >= 50
+                else "▂▄" if self._sig >= 25 else "▂")
+        with Vertical(id="wj-box"):
+            yield Static(f"󰤨 Join [{C['accent']}]{escape(self._ssid)}[/]",
+                         id="wj-title")
+            yield Static(f"󰌾 {escape(self._sec or 'secured')} · "
+                         f"[{C['accent']}]{bars}[/] {self._sig}% signal",
+                         id="wj-info")
+            with Horizontal(id="wj-row"):
+                yield Label("Password")
+                yield Input(password=True, placeholder="from the router "
+                            "sticker, or whoever runs the network",
+                            id="wj_pw")
+                yield Button("󰅌", id="wj_paste", classes="small")
+            with Horizontal(id="wj-btns"):
+                yield Button("Cancel", id="wj_cancel")
+                yield Button("Join", id="wj_join", variant="primary")
+
+    def on_mount(self):
+        self.query_one("#wj_pw", Input).focus()
+
+    def _submit(self):
+        pw = self.query_one("#wj_pw", Input).value
+        self.dismiss(pw if pw else None)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        bid = event.button.id or ""
+        if bid == "wj_join":
+            self._submit()
+        elif bid == "wj_cancel":
+            self.dismiss(None)
+        elif bid == "wj_paste":
+            try:
+                r = subprocess.run(["wl-paste", "-n"], capture_output=True,
+                                   text=True, timeout=5)
+                self.query_one("#wj_pw", Input).value = r.stdout.strip()
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        event.stop()
+
+    def on_input_submitted(self, event) -> None:
+        self._submit()
+        event.stop()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class LazyPane(VerticalScroll):
     """A settings pane whose contents are built when it is mounted.
 
@@ -532,7 +619,6 @@ class HyprSettings(App):
     #net_rows, #vpn_rows {{ height: auto; }}
     #net_rows .row, #vpn_rows .row {{ height: auto; }}
     .netname {{ width: 1fr; padding: 1 0 0 1; }}
-    #net_pwrow {{ display: none; }}
 
     Button {{ background: transparent; border: round {C['surface']};
               color: {C['text']}; margin-right: 1; }}
@@ -857,18 +943,12 @@ class HyprSettings(App):
         with Card("Wi-Fi networks · click one to connect"):
             yield Static("", id="net_hint2", classes="status")
             yield Vertical(id="net_rows")
-            # password row appears only when a secured, unknown network is
-            # picked — a always-visible password box begs to be typed into
-            with Horizontal(classes="row", id="net_pwrow"):
-                yield Label("Password")
-                yield Input(password=True, placeholder="network password",
-                            id="net_pw")
-                yield Button("Join", id="net_join", variant="primary")
             yield Static(
-                "Known networks join on one click. A new secured one asks "
-                "for its password here — checked by the router, so a typo "
-                "fails visibly instead of silently. Hidden SSIDs and the "
-                "full profile list live in the Advanced editor.",
+                "Known networks join on one click. A new secured one opens "
+                "a dialog naming it — the password is checked by the "
+                "router, so a typo fails visibly instead of silently. "
+                "Hidden SSIDs and the full profile list live in the "
+                "Advanced editor.",
                 classes="hint")
         with Card("VPN"):
             yield Static("", id="vpn_status", classes="status")
@@ -1150,7 +1230,6 @@ class HyprSettings(App):
         self.query_one("#net_hint2", Static).update(
             "" if rows else ("no networks found — try Rescan" if radio
                              else "turn the radio on to scan"))
-        self.query_one("#net_pwrow", Horizontal).display = False
         # ----- VPN rows -----
         self._net_vpns = list(vpns)
         vbox = self.query_one("#vpn_rows", Vertical)
@@ -1218,15 +1297,6 @@ class HyprSettings(App):
             self.call_from_thread(self._net_joined, ssid,
                                   r.returncode == 0, msg)
         self.run_worker(work, thread=True, group="net", exclusive=True)
-
-    def on_input_submitted(self, event):
-        """Enter in the Wi-Fi password field joins — the field is focused
-        the moment it appears, so type-password-hit-Enter works without
-        ever reaching for the mouse. The Join button stays for clickers."""
-        if (event.input.id or "") == "net_pw":
-            ssid = getattr(self, "_net_pending", "")
-            if ssid and event.value:
-                self._net_join(ssid, event.value)
 
     def _vpn_import(self, path):
         """Import a VPN config in a worker. The type comes from the file:
@@ -1576,20 +1646,12 @@ class HyprSettings(App):
             if known or not secured:
                 self._net_join(ssid)
             else:
-                # new secured network: reveal the password row, aimed at it
-                self._net_pending = ssid
-                row = self.query_one("#net_pwrow", Horizontal)
-                row.display = True
-                pw = self.query_one("#net_pw", Input)
-                pw.value = ""
-                pw.placeholder = f"password for {ssid}"
-                pw.focus()
-            return
-        if bid == "net_join":
-            ssid = getattr(self, "_net_pending", "")
-            pw = self.query_one("#net_pw", Input).value
-            if ssid and pw:
-                self._net_join(ssid, pw)
+                # new secured network: a POPUP that names it and shows its
+                # lock and signal, so the password lands on the right net
+                def got(pw, ssid=ssid):
+                    if pw:
+                        self._net_join(ssid, pw)
+                self.push_screen(WifiJoin(ssid, _sig, sec), got)
             return
         if bid == "vpn_paste":
             try:
