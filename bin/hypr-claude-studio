@@ -521,6 +521,33 @@ def open_settings_tab(page="integrations"):
          f"python3 {Path.home()}/.local/bin/hypr-settings {page}")
 
 
+def studio_stake():
+    """What pressing q would actually destroy: (tabs, conversations, names).
+
+    `tabs` excludes window 0 — the tree is the studio's own furniture and
+    losing it costs nothing. `conversations` counts panes whose start command
+    carries a session id, which is what makes the difference between closing
+    a couple of shells and closing live work.
+    """
+    import re
+    uuid_re = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+                         r"[0-9a-f]{4}-[0-9a-f]{12}")
+    names, convos = [], 0
+    for line in tmux("list-panes", "-s", "-F",
+                     "#{window_index}|#{pane_index}|#{window_name}|"
+                     "#{pane_start_command}", out=True).splitlines():
+        idx, _, rest = line.partition("|")
+        pane, _, rest = rest.partition("|")
+        name, _, cmd = rest.partition("|")
+        if idx == "0":
+            continue
+        if pane == "0":
+            names.append(name)
+        if uuid_re.search(cmd or ""):
+            convos += 1
+    return len(names), convos, names
+
+
 def palette():
     """Jump anywhere: every open tab and every resumable transcript in one
     fuzzy list, floating over whatever you were reading.
@@ -623,7 +650,9 @@ def split_here(where):
 def sidebar():
     from textual.app import App, ComposeResult
     from textual.binding import Binding
-    from textual.widgets import Footer, Static, Tree
+    from textual.containers import Horizontal, Vertical
+    from textual.screen import ModalScreen
+    from textual.widgets import Button, Footer, Static, Tree
     # every tree label is Rich markup, and the text going into it is a
     # conversation title or a job's own detail string — neither of which is
     # ours. One '[' in either raises MarkupError and takes the row with it,
@@ -636,6 +665,65 @@ def sidebar():
     pal = colors()
     style_tmux()
     rename_open_tabs()
+
+    class ConfirmQuit(ModalScreen):
+        """q used to take the whole studio — every tab, every running
+        conversation — on one keypress, with nothing between the key and the
+        kill. It sits next to n/s/t/m/r/x in the same single-letter row, so
+        it was one slip away at all times.
+
+        This names what will actually close rather than asking abstractly,
+        and says the one thing that makes the decision easy: the
+        conversations are not lost, only their terminals. Cancel holds focus
+        so Enter and Escape are both safe; the destructive path needs a
+        deliberate move.
+        """
+
+        BINDINGS = [
+            Binding("escape", "cancel", "Cancel", show=True),
+            Binding("q", "cancel", "Cancel", show=False),
+        ]
+
+        def __init__(self, tabs, convos, names):
+            super().__init__()
+            self._tabs, self._convos, self._names = tabs, convos, names
+
+        def compose(self) -> ComposeResult:
+            shown = ", ".join(self._names[:3])
+            if len(self._names) > 3:
+                shown += f", +{len(self._names) - 3} more"
+            if self._tabs == 1:
+                what = "1 tab"
+                if self._convos:
+                    what += ", a live conversation"
+            else:
+                what = f"{self._tabs} tabs"
+                if self._convos == 1:
+                    what += ", one of them a live conversation"
+                elif self._convos:
+                    what += f", {self._convos} of them live conversations"
+            with Vertical(id="confirm-box"):
+                yield Static("Close the studio?", id="confirm-title")
+                yield Static(f"This closes {what}.", id="confirm-what")
+                yield Static(f"[dim]{shown}[/]", id="confirm-names")
+                # only say this when there is a conversation to reassure
+                # about — otherwise it is comfort about nothing
+                if self._convos:
+                    yield Static(
+                        f"[{pal['sub']}]Every conversation stays resumable —"
+                        " only its terminal goes away.[/]", id="confirm-note")
+                with Horizontal(id="confirm-buttons"):
+                    yield Button("Cancel", variant="primary", id="cancel")
+                    yield Button("Close studio", variant="error", id="quit")
+
+        def on_mount(self):
+            self.query_one("#cancel", Button).focus()
+
+        def on_button_pressed(self, event):
+            self.dismiss(event.button.id == "quit")
+
+        def action_cancel(self):
+            self.dismiss(False)
 
     class Studio(App):
         ENABLE_COMMAND_PALETTE = False
@@ -655,6 +743,20 @@ def sidebar():
         Tree {{ background: transparent; padding: 0 1; }}
         Tree > .tree--cursor {{ background: {pal['accent']} 30%; }}
         Tree > .tree--guides {{ color: {pal['sub']}; }}
+        ConfirmQuit {{ align: center middle; background: {pal['bg']} 60%; }}
+        /* muted is a SURFACE tone in the ink table, never text — this is
+           the one place it belongs. bad ink stays on the button only, so
+           the dialog does not read as an error that already happened. */
+        #confirm-box {{
+            width: 58; height: auto; padding: 1 2;
+            background: {pal['bg']}; border: round {pal['muted']};
+        }}
+        #confirm-title {{ color: {pal['fg']}; text-style: bold; }}
+        #confirm-what {{ color: {pal['fg']}; padding-top: 1; }}
+        #confirm-names {{ padding-bottom: 1; }}
+        #confirm-note {{ padding-bottom: 1; }}
+        #confirm-buttons {{ height: auto; align-horizontal: right; }}
+        #confirm-buttons Button {{ margin-left: 2; }}
         """
 
         def compose(self) -> ComposeResult:
@@ -845,7 +947,18 @@ def sidebar():
             self.reload_tree(force=True)
 
         def action_quit_studio(self):
-            tmux("kill-session", "-t", TMUX_SESSION)
+            tabs, convos, names = studio_stake()
+            if not tabs:
+                # nothing open but the tree: there is nothing to lose, so
+                # do not make the user confirm an empty room
+                tmux("kill-session", "-t", TMUX_SESSION)
+                return
+
+            def done(confirmed):
+                if confirmed:
+                    tmux("kill-session", "-t", TMUX_SESSION)
+
+            self.push_screen(ConfirmQuit(tabs, convos, names), done)
 
     Studio().run()
 
