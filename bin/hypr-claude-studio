@@ -84,6 +84,12 @@ ATTN = ("#{{?#{{==:#{{window_index}},0}},,"
 # range here too, for the same hit-region reason as CLOSE_X.
 SPLIT_BUTTONS = ("#[range=user|sh]{ctl} │ {off}#[norange] "
                  "#[range=user|sv]{ctl} ─ {off}#[norange]")
+# jump-anywhere button, same block treatment as the split pair.
+# NOT ⌕ (U+2315): exactly one font on this machine has that codepoint and it
+# is not JetBrainsMono Nerd Font, so it would have rendered as a box in the
+# only terminal this bar ever appears in. `/` is the search affordance vim,
+# less and fzf all already teach, and every font has it.
+PALETTE_BUTTON = "#[range=user|pal]{ctl} / {off}#[norange]"
 
 
 def tmux(*args, out=False):
@@ -154,6 +160,24 @@ def style_tmux():
     # accent fill only lowers contrast, so it passes no ink at all
     pane_n_plain = PANE_N.format(ink=f"#[fg={sub}]", restore=f"#[fg={sub}]")
     pane_n_cur = PANE_N.format(ink="", restore="")
+    # Built by concatenation, not f-strings: these are tmux format strings
+    # made of #{...}, and doubling every brace to escape them is how a
+    # subtle mismatch gets in.
+    #
+    # The popup command is STATIC — there is no format in it to expand — so
+    # it is the if-branch directly rather than being wrapped in run-shell.
+    # (The ✕ branch needs run-shell because its target IS a format; see
+    # below.) Brace blocks carry the nesting so nothing has to survive three
+    # levels of quoting.
+    popup_cmd = 'display-popup -E -w 70% -h 60% "python3 ' + ME + ' --palette"'
+    kill_cmd = ("run-shell 'tmux -L " + TMUX_SESSION +
+                " kill-window -t #{s/^x//:mouse_status_range}'")
+    split_cmd = "run-shell 'python3 " + ME + " --split #{mouse_status_range}'"
+    mouse_else = ("if -F '#{m/r:^s[hv]$,#{mouse_status_range}}' "
+                  "{ " + split_cmd + " } "
+                  "{ if -F '#{==:#{mouse_status_range},pal}' "
+                  "{ " + popup_cmd + " } "
+                  "{ select-window -t= } }")
     for args in (
         ("set", "-g", "status-position", "top"),
         ("set", "-g", "mouse", "on"),
@@ -173,11 +197,14 @@ def style_tmux():
         # the row is no longer shared with the tabs, so these can breathe
         ("set", "-g", "status-left-length", "40"),
         ("set", "-g", "status-right",
-         "{}  #[fg={}]#S ".format(
+         "{}  {}  #[fg={}]#S ".format(
+             PALETTE_BUTTON.format(ctl=f"#[bg={muted},fg={fg}]",
+                                   off="#[default]"),
              SPLIT_BUTTONS.format(ctl=f"#[bg={muted},fg={fg}]",
                                   off="#[default]"),
              sub)),
-        ("set", "-g", "status-right-length", "40"),
+        # three buttons plus the session name now; 40 truncated the row
+        ("set", "-g", "status-right-length", "60"),
         # built from status-left/right above so those stay the single
         # source of truth for what the top row says. The centre slot states
         # the TRUE tab count — row 1 is cut off at the right edge once the
@@ -274,13 +301,17 @@ def style_tmux():
         # below always worked. Middle-click survives on `-t=` (a real mouse
         # target, not a format), which masked the bug.
         ("bind-key", "-n", "MouseUp1Status", "if", "-F",
-         "#{m/r:^x[0-9]+$,#{mouse_status_range}}",
-         f"run-shell 'tmux -L {TMUX_SESSION} kill-window"
-         " -t #{s/^x//:mouse_status_range}'",
-         "if -F '#{m/r:^s[hv]$,#{mouse_status_range}}' "
-         f"\"run-shell 'python3 {ME} --split #{{mouse_status_range}}'\" "
-         "'select-window -t='"),
+         "#{m/r:^x[0-9]+$,#{mouse_status_range}}", kill_cmd, mouse_else),
         ("bind-key", "-n", "MouseUp2Status", "kill-window", "-t="),
+        # jump anywhere. C-Space because the correction's other suggestion,
+        # C-b p, is NOT free — it is previous-window in tmux's built-in
+        # table, which -f /dev/null does not remove. C-b g is a free
+        # mnemonic alias ("go"). Space itself is next-layout, and this
+        # studio makes real use of multi-pane tabs, so it stays put.
+        ("bind-key", "C-Space", "display-popup", "-E", "-w", "70%",
+         "-h", "60%", f"python3 {ME} --palette"),
+        ("bind-key", "g", "display-popup", "-E", "-w", "70%",
+         "-h", "60%", f"python3 {ME} --palette"),
     ):
         tmux(*args)
 
@@ -479,6 +510,85 @@ def open_settings_tab(page="integrations"):
     tmux("new-window", "-t", f"{TMUX_SESSION}:", "-n", "󰌘 settings",
          "-c", str(Path.home()),
          f"python3 {Path.home()}/.local/bin/hypr-settings {page}")
+
+
+def palette():
+    """Jump anywhere: every open tab and every resumable transcript in one
+    fuzzy list, floating over whatever you were reading.
+
+    This is also the keyboard answer to the one thing the tab strip gives up.
+    There is no scrollport on row 1 (see status-format[1] — a trimmed list
+    desyncs tmux's mouse hit table), so a tab past the right edge has no
+    mouse path at all. This is how you reach it.
+
+    Runs INSIDE a display-popup, so it owns a real terminal and talks to the
+    studio's server over its own socket like every other mode here.
+    """
+    import shutil
+    if not shutil.which("fzf"):
+        # degrade to tmux's own picker rather than flashing an empty popup
+        tmux("choose-tree", "-Z")
+        return
+    import re
+    from hyprdesk.claudesessions import session_rows
+    uuid_re = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+                         r"[0-9a-f]{4}-[0-9a-f]{12}")
+    # conversations that are already tabs — they are offered as tabs below,
+    # so the transcript half skips them instead of listing them twice
+    open_sids = set()
+    for line in tmux("list-panes", "-s", "-F", "#{pane_start_command}",
+                     out=True).splitlines():
+        m = uuid_re.search(line)
+        if m:
+            open_sids.add(m.group(0))
+
+    items = []          # (action, display) — action is what the pick does
+    for line in tmux("list-windows", "-F", "#{window_index}|#{window_name}",
+                     out=True).splitlines():
+        idx, _, name = line.partition("|")
+        if idx == "0":          # the tree is where you already are
+            continue
+        items.append((("tab", idx, ""), f"tab   {idx:>2}  {name}"))
+    for row in session_rows():
+        # PAST only. A 'run' row is a live session — handing it to
+        # `claude --resume` would open a second client onto a conversation
+        # that is already running, which is the duplicate the tab path
+        # refuses. The sidebar is where you go to those.
+        if row.get("kind") != "past":
+            continue
+        sid = row.get("sid")
+        if not sid or sid in open_sids:
+            continue
+        label = row.get("detail") or row.get("label") or sid[:8]
+        where = row.get("dir") or ""
+        items.append((("sid", sid, row.get("cwd") or ""),
+                      f"past      {label}  {where}".rstrip()))
+    if not items:
+        return
+
+    # field 1 is the index we act on, hidden from the view with --with-nth
+    menu = "".join(f"{i}\t{d}\n" for i, (_, d) in enumerate(items))
+    try:
+        picked = subprocess.run(
+            ["fzf", "--delimiter", "\t", "--with-nth", "2..", "--no-multi",
+             "--reverse", "--height", "100%", "--prompt", "jump "],
+            input=menu, capture_output=True, text=True)
+    except OSError:
+        return
+    out = picked.stdout.strip()
+    if picked.returncode != 0 or not out:
+        return                      # Esc, or nothing matched: do nothing
+    try:
+        action = items[int(out.split("\t", 1)[0])][0]
+    except (ValueError, IndexError):
+        return
+    kind, first, second = action
+    if kind == "tab":
+        # session-qualified: inside a popup the "current" window is not the
+        # one the user was looking at
+        tmux("select-window", "-t", f"{TMUX_SESSION}:{first}")
+    else:
+        open_session_tab({"sid": first, "cwd": second})
 
 
 def new_term_tab(cwd):
@@ -690,10 +800,16 @@ def sidebar():
 
 
 if __name__ == "__main__":
+    # every mode needs a branch here. An unrecognised flag falls through to
+    # launch(), which summons or SPAWNS A SECOND STUDIO — so a mode wired
+    # into a key binding but not into this dispatch does not fail quietly,
+    # it does something wildly wrong in front of the user.
     if "--sidebar" in sys.argv:
         sidebar()
     elif "--split" in sys.argv:
         i = sys.argv.index("--split")
         split_here(sys.argv[i + 1] if i + 1 < len(sys.argv) else "sh")
+    elif "--palette" in sys.argv:
+        palette()
     else:
         launch()
