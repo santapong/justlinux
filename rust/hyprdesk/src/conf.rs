@@ -10,6 +10,27 @@ fn widgets_conf() -> PathBuf {
     crate::home().join(".config/conky/widgets.conf")
 }
 
+/// Every key=value pair, same grammar as conf_get — cardspec's
+/// instances() walks the whole file.
+pub fn conf_all() -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    if let Ok(text) = fs::read_to_string(widgets_conf()) {
+        for line in text.lines() {
+            let mut parts = line.splitn(2, '=');
+            let k = parts.next().unwrap_or("").trim();
+            if !k.is_empty() && k.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                if let Some(v) = parts.next() {
+                    let v = v.trim().split_whitespace().next().unwrap_or("");
+                    if !v.is_empty() {
+                        out.insert(k.to_string(), v.to_string());
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 pub fn conf_get(key: &str, default: &str) -> String {
     if let Ok(text) = fs::read_to_string(widgets_conf()) {
         for line in text.lines() {

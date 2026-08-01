@@ -4,13 +4,14 @@
 //! implementations cannot drift apart without a visible symptom.
 
 mod conf;
+pub mod cardspec;
 pub mod grid;
 #[cfg(feature = "draw")]
 pub mod draw;
 mod sessions;
 mod theme;
 
-pub use conf::{conf_get, conf_set};
+pub use conf::{conf_all, conf_get, conf_set};
 pub use sessions::{
     active_subagents, ago, claude_procs, job_state, recent_transcripts, session_meta,
     session_title, sid_key, ClaudeProc, JobState,
