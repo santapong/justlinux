@@ -8,6 +8,10 @@ pub mod cardspec;
 pub mod grid;
 #[cfg(feature = "draw")]
 pub mod draw;
+#[cfg(feature = "draw")]
+pub mod pixicons16;
+#[cfg(feature = "draw")]
+pub mod rows;
 mod sessions;
 mod theme;
 

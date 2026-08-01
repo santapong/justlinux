@@ -27,6 +27,13 @@ struct Raster {
 
 pub struct Text {
     font: Option<FontVec>,
+    bold: Option<FontVec>,
+    /// cairo-size → PxScale conversion, measured from the font itself:
+    /// cairo's set_font_size is EM units, ab_glyph's PxScale is line
+    /// height (ascent−descent). For this face height/em = 1320/1000 —
+    /// a hardcoded 1.16 guess rendered every label 12% small, visible as
+    /// "rust text is thinner" in the rows side-by-side.
+    factor: f32,
     // (char, px*10) → coverage. The scene redraws every 160 ms and the
     // label set is nearly static; rasterizing outlines each frame measured
     // 4.7% CPU where the python office holds 0.5-2.9. Coverage is cached,
@@ -36,27 +43,70 @@ pub struct Text {
 
 impl Text {
     pub fn load() -> Text {
-        let candidates = [
-            crate::home()
-                .join(".local/share/fonts/JetBrainsMonoNerd/JetBrainsMonoNerdFont-Regular.ttf"),
-            "/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Regular.ttf".into(),
-        ];
-        for p in candidates {
-            if let Ok(bytes) = std::fs::read(&p) {
-                if let Ok(f) = FontVec::try_from_vec(bytes) {
-                    return Text { font: Some(f), cache: RefCell::new(HashMap::new()) };
+        let load_one = |paths: &[std::path::PathBuf]| {
+            for p in paths {
+                if let Ok(bytes) = std::fs::read(p) {
+                    if let Ok(f) = FontVec::try_from_vec(bytes) {
+                        return Some(f);
+                    }
                 }
             }
+            None
+        };
+        let base = crate::home().join(".local/share/fonts/JetBrainsMonoNerd");
+        let font = load_one(&[
+            base.join("JetBrainsMonoNerdFont-Regular.ttf"),
+            "/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Regular.ttf".into(),
+        ]);
+        // bold is a separate FACE, not a stroke trick — the rows renderers
+        // set real weights; the fallback is just the regular face
+        let bold = load_one(&[base.join("JetBrainsMonoNerdFont-Bold.ttf")]);
+        let factor = font
+            .as_ref()
+            .and_then(|f| f.units_per_em().map(|em| f.height_unscaled() / em))
+            .unwrap_or(1.32);
+        Text {
+            font,
+            bold,
+            factor,
+            cache: RefCell::new(HashMap::new()),
         }
-        Text { font: None, cache: RefCell::new(HashMap::new()) }
+    }
+
+    fn face(&self, bold: bool) -> Option<&FontVec> {
+        if bold {
+            self.bold.as_ref().or(self.font.as_ref())
+        } else {
+            self.font.as_ref()
+        }
+    }
+
+    /// Advance of `s` at `px` without drawing — the measure half of every
+    /// right-align / ellipsize / centering decision.
+    pub fn advance(&self, px: f32, bold: bool, s: &str) -> f32 {
+        let Some(font) = self.face(bold) else { return 0.0 };
+        let scale = PxScale::from(px * self.factor);
+        let scaled = font.as_scaled(scale);
+        s.chars().map(|c| scaled.h_advance(font.glyph_id(c))).sum()
     }
 
     /// Draw `s` at (x, baseline y). Returns the advance, so callers can chain.
     pub fn draw(&self, pix: &mut Pixmap, x: f32, y: f32, px: f32, color: Rgb, s: &str) -> f32 {
-        let Some(font) = &self.font else { return 0.0 };
-        // fontdue-style px roughly equals ab_glyph's height scale ×1.16 on
-        // this face; keeps the label sizes the concept render chose
-        let scale = PxScale::from(px * 1.16);
+        self.draw_weight(pix, x, y, px, color, s, false)
+    }
+
+    pub fn draw_weight(
+        &self,
+        pix: &mut Pixmap,
+        x: f32,
+        y: f32,
+        px: f32,
+        color: Rgb,
+        s: &str,
+        bold: bool,
+    ) -> f32 {
+        let Some(font) = self.face(bold) else { return 0.0 };
+        let scale = PxScale::from(px * self.factor);
         let scaled = font.as_scaled(scale);
         let Rgb(cr, cg, cb) = color;
         let (w, h) = (pix.width() as i32, pix.height() as i32);
@@ -64,7 +114,7 @@ impl Text {
         let mut cx = x;
         let mut cache = self.cache.borrow_mut();
         for ch in s.chars() {
-            let key = (ch, (px * 10.0) as u32);
+            let key = (ch, (px * 10.0) as u32 * 2 + bold as u32);
             if !cache.contains_key(&key) {
                 // rasterize at origin once; position is applied at blit
                 let gid = font.glyph_id(ch);
