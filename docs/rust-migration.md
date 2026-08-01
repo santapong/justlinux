@@ -1,5 +1,13 @@
 # Rust migration — plan of record
 
+> **POLICY (1 Aug 2026, user decision): new features in this project are
+> written in Rust.** Claude Office and Claude Studio migrate from Python
+> to Rust. The "Textual apps stay Python forever" rule below is REVISED
+> for the studio (see "The ladder, revised"); it still holds for
+> settings/launcher/kanban until they are next rebuilt, not merely
+> touched. The rationale sections below are kept as written — the
+> measurements are still true; the *decision* on top of them changed.
+
 Decided 30 Jul 2026, from measurements on this machine, not from taste.
 The question was "what would a Rust rewrite buy, and can it happen feature
 by feature?" — the answers are *some real things* and *yes, unusually
@@ -123,6 +131,53 @@ release flow as its own minor version, and rolls back by restoring the
 Python file from git history. `rust/` is a cargo workspace; built
 binaries land in `bin/` under the same names, so `install.sh` and every
 caller stay oblivious.
+
+## The ladder, revised (1 Aug 2026 — Rust-for-new-features policy)
+
+| Order | Component | Language plan |
+|---|---|---|
+| 1 — pilot | `hypr-viz` | **done, measured** (3.6 MB vs 55); pending audio + click-through acceptance |
+| 2 | **`hypr-office2d`** — the Gather-style office | **NEW FEATURE, BORN IN RUST.** It is a rewrite of hypr-claude-office anyway; writing it in Python first and porting later would build it twice. Pulls the office's rung forward. |
+| 3 | `hypr-pet`, `hypr-cardhost`, `hypr-appdock` | Rust, as before |
+| 4 | **studio sidebar** → ratatui | REVISED from "stay Python". Costs named below. |
+| hold | settings, launcher, kanban | Python until rebuilt — converting a working 2k-line Textual app with no feature driver is cost without benefit |
+
+**Step 0 for rung 2: extract `rust/hyprdesk` as a workspace library crate**
+from hypr-viz's `hyprdesk.rs` (conf grammar, palette + pins + contrast
+fixes, confwrite discipline), and grow it what the office needs: layer
+POS_ANCHORS placement, `hyprctl -j` clients, the claudesessions readers
+(session rows, titles, `job_state`, `active_subagents`). One crate, every
+rung reuses it, the files stay the interface.
+
+## Rung 2 — the 2D office (design in docs/claude-office.md + concept render)
+
+Gather-style floor: desks at x,y that grow with sessions, agents that
+WALK — in from the door on session start, out on exit — and a MEETING
+ROOM that fills with mini-Clawds when `active_subagents()` sees a
+workflow. The architectural core is a reconcile/animate split: the 2 s
+poll sets *desired* state, a ~160 ms tick moves actors toward it.
+Manhattan paths only (corridor lane, then turn); no pathfinding.
+
+Phases: P1 scene engine (floor plan, actors, waypoints, the split) →
+P2 arrivals/departures + stable sid→desk map + ghost desks →
+P3 meeting room (workflow name, minis, +N overflow) →
+P4 parity (click/hover/tips, empty state, size presets, docs).
+Ships as `bin/hypr-office2d` first, side by side with the Python office
+behind `office_layout = grid|floor`; replaces `bin/hypr-claude-office`
+(and the pkill patterns that name its python cmdline) only at acceptance.
+
+## Rung 4 — studio sidebar in ratatui, costs named
+
+The studio is mostly tmux orchestration (36 `tmux(...)` call sites —
+trivial subprocess work in any language). The Rust cost is the Textual
+UI: ratatui has no Tree, no ModalScreen, no CSS, no `run_test()`. The
+port hand-rolls a tree list (~200 lines), a confirm dialog, and the
+aim-then-open click contract, and replaces the headless-pilot test
+harness with state-level tests (drive the app struct, assert the frame
+buffer). Everything the current sidebar learned — escape() every title,
+the q-confirm semantics, first-click-aims — is spec, listed in
+docs/claude-studio.md. Do this LAST: it is the only rung where Rust
+makes the code harder rather than smaller.
 
 ## Pilot acceptance criteria — hypr-viz
 
