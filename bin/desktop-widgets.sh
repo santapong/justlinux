@@ -37,7 +37,8 @@ viz_up() { pgrep -xf "python3 $VIZ" >/dev/null 2>&1; }
 
 do_stop() {
     pkill -f "conky -c $WIDGET_DIR" 2>/dev/null
-    pkill -xf "python3 $PET" 2>/dev/null
+    pkill -xf "python3 $PET" 2>/dev/null   # script form
+    pkill -xf "$PET" 2>/dev/null           # rust binary form
     pkill -xf "python3 $OFFICE" 2>/dev/null
     pkill -xf "$OFFICE2D" 2>/dev/null
     pkill -xf "python3 $VIZ" 2>/dev/null
@@ -50,6 +51,7 @@ do_stop() {
     for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
         pgrep -f "conky -c $WIDGET_DIR" >/dev/null 2>&1 ||
             pgrep -xf "python3 $PET" >/dev/null 2>&1 ||
+            pgrep -xf "$PET" >/dev/null 2>&1 ||
             pgrep -xf "python3 $DOCK" >/dev/null 2>&1 ||
             pgrep -xf "python3 $CARDHOST" >/dev/null 2>&1 ||
             pgrep -xf "python3 $OFFICE" >/dev/null 2>&1 ||
@@ -86,7 +88,9 @@ do_start() {   # $want_viz=1 forces viz back up even when the conf says off
     pgrep -xf "python3 $SERWATCH" >/dev/null ||
         "$SERWATCH" >/dev/null 2>&1 9>&- &
     if [ "$(setting pet on)" = "on" ]; then
-        if ! pgrep -xf "python3 $PET" >/dev/null; then
+        # the pet may be the python script (cmdline "python3 <path>") or
+        # the rust binary (cmdline "<path>") — guard against both forms
+        if ! pgrep -xf "python3 $PET" >/dev/null && ! pgrep -xf "$PET" >/dev/null; then
             layer=$(setting pet_layer bottom)
             [ "$layer" = "bottom" ] && layer=""
             HYPRPET_LAYER="$layer" "$PET" >/dev/null 2>&1 9>&- &

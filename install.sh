@@ -40,11 +40,14 @@ done
 # python grid office, so office_layout=floor is simply unavailable until
 # a `cargo` appears and install.sh runs again.
 if command -v cargo >/dev/null 2>&1 && [ -d rust ]; then
-    if (cd rust && cargo build --release -p hypr-office2d >/dev/null 2>&1); then
+    if (cd rust && cargo build --release -p hypr-office2d -p hypr-pet >/dev/null 2>&1); then
         install -m755 rust/target/release/hypr-office2d "$HOME/.local/bin/hypr-office2d"
-        echo "installed: ~/.local/bin/hypr-office2d (built from rust/)"
+        # AFTER the bin/ loop above, so the binary wins over the python
+        # script it replaces; without cargo the python copy stands
+        install -m755 rust/target/release/hypr-pet "$HOME/.local/bin/hypr-pet"
+        echo "installed: ~/.local/bin/{hypr-office2d,hypr-pet} (built from rust/)"
     else
-        echo "skipped: rust build failed — the python office covers it" >&2
+        echo "skipped: rust build failed — the python versions cover it" >&2
     fi
 fi
 

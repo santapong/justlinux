@@ -4,6 +4,8 @@
 //! implementations cannot drift apart without a visible symptom.
 
 mod conf;
+#[cfg(feature = "draw")]
+pub mod draw;
 mod sessions;
 mod theme;
 

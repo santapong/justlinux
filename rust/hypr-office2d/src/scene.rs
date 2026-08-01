@@ -10,7 +10,7 @@ use hyprdesk::{ClaudeProc, Palette, Rgb};
 use tiny_skia::Pixmap;
 
 use crate::sprites;
-use crate::text::Text;
+use hyprdesk::draw::Text;
 
 pub const W: u32 = 640;
 pub const H: u32 = 300;

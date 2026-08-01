@@ -12,7 +12,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use ab_glyph::{Font, FontVec, PxScale, ScaleFont};
-use hyprdesk::Rgb;
+use crate::Rgb;
 use tiny_skia::Pixmap;
 
 /// One rasterized glyph: coverage bitmap + placement, colour-independent.
@@ -37,7 +37,7 @@ pub struct Text {
 impl Text {
     pub fn load() -> Text {
         let candidates = [
-            hyprdesk::home()
+            crate::home()
                 .join(".local/share/fonts/JetBrainsMonoNerd/JetBrainsMonoNerdFont-Regular.ttf"),
             "/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Regular.ttf".into(),
         ];

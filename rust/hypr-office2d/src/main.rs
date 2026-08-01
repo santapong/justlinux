@@ -10,7 +10,7 @@
 
 mod scene;
 mod sprites;
-mod text;
+use hyprdesk::draw as text;
 
 use std::process::Command;
 use std::time::Duration;

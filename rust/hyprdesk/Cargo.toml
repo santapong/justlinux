@@ -7,6 +7,13 @@ description = "The fleet contracts in Rust — parses the SAME files lib/hyprdes
 [dependencies]
 fs2 = "0.4"
 serde_json = "1"
+tiny-skia = { version = "0.11", optional = true }
+ab_glyph = { version = "0.2", optional = true }
+
+[features]
+# label rendering shared by the pixel widgets (office2d, pet). Optional so
+# a consumer that draws nothing (a future librarian CLI) pulls nothing.
+draw = ["dep:tiny-skia", "dep:ab_glyph"]
 
 [dev-dependencies]
 fontdue = "0.9"
