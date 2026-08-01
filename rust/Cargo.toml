@@ -1,0 +1,11 @@
+# The migration workspace. One crate per ported tool; binaries are copied
+# into bin/ under the SAME names the Python versions had, so install.sh
+# and every caller stay oblivious. See docs/rust-migration.md — the ladder
+# and the contract table there are the spec.
+[workspace]
+resolver = "2"
+members = ["hyprdesk", "hypr-viz", "hypr-office2d"]
+
+[profile.release]
+strip = true
+lto = true

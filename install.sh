@@ -35,6 +35,19 @@ for f in bin/*; do
     echo "installed: ~/.local/bin/$(basename "$f")"
 done
 
+# Rust tools — built from source when a toolchain exists. Without cargo
+# nothing breaks: desktop-widgets.sh checks -x and falls back to the
+# python grid office, so office_layout=floor is simply unavailable until
+# a `cargo` appears and install.sh runs again.
+if command -v cargo >/dev/null 2>&1 && [ -d rust ]; then
+    if (cd rust && cargo build --release -p hypr-office2d >/dev/null 2>&1); then
+        install -m755 rust/target/release/hypr-office2d "$HOME/.local/bin/hypr-office2d"
+        echo "installed: ~/.local/bin/hypr-office2d (built from rust/)"
+    else
+        echo "skipped: rust build failed — the python office covers it" >&2
+    fi
+fi
+
 # The python package every bin/ script imports. Each one starts with
 # sys.path.insert(~/.local/lib) and then `from hyprdesk import ...`, so
 # without this a fresh machine gets all the scripts and every single one of

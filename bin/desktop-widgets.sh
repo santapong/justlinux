@@ -6,6 +6,7 @@ WIDGET_DIR="$HOME/.config/conky/widgets"
 CONF="$HOME/.config/conky/widgets.conf"
 PET="$HOME/.local/bin/hypr-pet"
 OFFICE="$HOME/.local/bin/hypr-claude-office"
+OFFICE2D="$HOME/.local/bin/hypr-office2d"          # rust floor-plan office
 VIZ="$HOME/.local/bin/hypr-viz"
 DOCK="$HOME/.local/bin/hypr-appdock"
 SERWATCH="$HOME/.local/bin/serial-watch"
@@ -38,6 +39,7 @@ do_stop() {
     pkill -f "conky -c $WIDGET_DIR" 2>/dev/null
     pkill -xf "python3 $PET" 2>/dev/null
     pkill -xf "python3 $OFFICE" 2>/dev/null
+    pkill -xf "$OFFICE2D" 2>/dev/null
     pkill -xf "python3 $VIZ" 2>/dev/null
     pkill -xf "python3 $DOCK" 2>/dev/null
     pkill -xf "python3 $SERWATCH" 2>/dev/null
@@ -91,8 +93,16 @@ do_start() {   # $want_viz=1 forces viz back up even when the conf says off
         fi
     fi
     if [ "$(setting claude_office on)" = "on" ]; then
-        pgrep -xf "python3 $OFFICE" >/dev/null ||
-            "$OFFICE" >/dev/null 2>&1 9>&- &
+        # office_layout picks WHICH office: grid = the python original,
+        # floor = the rust 2D one (walking agents, meeting room). Same
+        # toggle, same restart verbs — the layout key is the only switch.
+        if [ "$(setting office_layout grid)" = "floor" ] && [ -x "$OFFICE2D" ]; then
+            pgrep -xf "$OFFICE2D" >/dev/null ||
+                "$OFFICE2D" >/dev/null 2>&1 9>&- &
+        else
+            pgrep -xf "python3 $OFFICE" >/dev/null ||
+                "$OFFICE" >/dev/null 2>&1 9>&- &
+        fi
     fi
     # viz never autostarts at login: only the conf toggle or a bounce that
     # found it already running (ALT+SHIFT+Y leaves no trace in the conf)
@@ -125,14 +135,28 @@ restart-conky)
     do_start
     ;;
 restart-office)
-    # bounce ONLY the claude-office widget — conky/cardhost/dock/pet keep
-    # running untouched
+    # bounce ONLY the office widget (whichever layout is running) —
+    # conky/cardhost/dock/pet keep running untouched
     pkill -xf "python3 $OFFICE" 2>/dev/null
+    pkill -xf "$OFFICE2D" 2>/dev/null
     for _ in 1 2 3 4 5 6 7 8 9 10; do
-        pgrep -xf "python3 $OFFICE" >/dev/null 2>&1 || break
+        pgrep -xf "python3 $OFFICE" >/dev/null 2>&1 ||
+            pgrep -xf "$OFFICE2D" >/dev/null 2>&1 || break
         sleep 0.1
     done
     do_start
+    ;;
+toggle-office)
+    # ALT+CTRL+O lands here so the hotkey follows office_layout too.
+    # The office binaries carry their own toggle semantics (run again
+    # kills), so this just picks the right one and exec's it.
+    # 9>&- on the execs: the office inherits our fds, and an inherited
+    # fd 9 holds the widget lock for the office's WHOLE LIFE — the exact
+    # wedge the header comment documents.
+    if [ "$(setting office_layout grid)" = "floor" ] && [ -x "$OFFICE2D" ]; then
+        exec "$OFFICE2D" 9>&-
+    fi
+    exec "$OFFICE" 9>&-
     ;;
 restart-viz)
     # bounce ONLY hypr-viz — conky/cardhost/dock/pet keep running untouched.

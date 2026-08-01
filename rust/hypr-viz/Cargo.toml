@@ -1,0 +1,18 @@
+[package]
+name = "hypr-viz"
+version = "0.1.0"
+edition = "2021"
+description = "Audio visualizer layer surface — the Rust migration's pilot rung (see docs/rust-migration.md)"
+
+# Versions match the Cargo.lock the first build produced. calloop 0.14 is
+# ours; the 0.13 in the lock is sctk 0.19's private copy — do not "fix" the
+# apparent duplicate, they are different consumers.
+[dependencies]
+hyprdesk = { path = "../hyprdesk" }
+smithay-client-toolkit = "0.19.2"
+wayland-client = "0.31"
+calloop = "0.14"
+calloop-wayland-source = "0.4"
+tiny-skia = "0.11"
+signal-hook = "0.3"
+fs2 = "0.4"
