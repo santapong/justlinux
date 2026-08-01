@@ -298,6 +298,7 @@ dependencies = [
  "signal-hook",
  "smithay-client-toolkit",
  "tiny-skia",
+ "toml",
  "wayland-client",
 ]
 

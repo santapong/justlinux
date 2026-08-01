@@ -206,6 +206,20 @@ same exit-if-owned probe) → hotplug/reserve rechecks. The ctl protocol
 and the conf keys are the interfaces; both ends already have tests in
 the parity example pattern.
 
+**COMPLETE — swapped 2 Aug 2026.** Every step above landed with its
+parity harness green: cardspec (14 templates, all derived values
+identical), rows (`measure()` exact on every template), the
+multi-surface host (14 cards, 14 pixel-exact positions vs the live
+python geometry), then sources + ctl + hotplug in the final pass. Live
+acceptance after the swap: 14/14 cards identical in position AND size
+once real fetch data landed, `--ctl ping/reload/reload-theme` all
+answer, hypr-arrange's `tool_ctl()` reload works unchanged, error
+cards and "(stale)" badges verified. Cost: 0.58% CPU / 12.3 MB RSS vs
+python's ~59 MB. `~/.local/bin/hypr-cardhost` is now the rust binary;
+desktop-widgets.sh guards both cmdline forms and install.sh builds
+`-p hypr-cardhost`. Remaining resident python: appdock (rung 3c),
+then studio (rung 4, LAST).
+
 ## Rung 4 — studio sidebar in ratatui, costs named
 
 The studio is mostly tmux orchestration (36 `tmux(...)` call sites —

@@ -45,6 +45,7 @@ do_stop() {
     pkill -xf "python3 $DOCK" 2>/dev/null
     pkill -xf "python3 $SERWATCH" 2>/dev/null
     pkill -xf "python3 $CARDHOST" 2>/dev/null
+    pkill -xf "$CARDHOST" 2>/dev/null
     # wait for real exit — a half-dead conky makes restart's pgrep guard
     # skip widgets as "already running", and a dying cardhost/dock still
     # owns its ctl socket (the new instance would probe it and disable ctl)
@@ -54,6 +55,7 @@ do_stop() {
             pgrep -xf "$PET" >/dev/null 2>&1 ||
             pgrep -xf "python3 $DOCK" >/dev/null 2>&1 ||
             pgrep -xf "python3 $CARDHOST" >/dev/null 2>&1 ||
+            pgrep -xf "$CARDHOST" >/dev/null 2>&1 ||
             pgrep -xf "python3 $OFFICE" >/dev/null 2>&1 ||
             pgrep -xf "python3 $SERWATCH" >/dev/null 2>&1 ||
             pgrep -xf "python3 $VIZ" >/dev/null 2>&1 || break
