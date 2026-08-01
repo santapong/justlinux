@@ -73,6 +73,7 @@ pub struct Ghost {
 }
 
 pub struct Scene {
+    pub hover: Option<usize>, // desk index under the pointer
     pub actors: Vec<Actor>,
     pub ghosts: Vec<Ghost>,
     pub meeting: usize, // live subagents in the meeting room
@@ -94,6 +95,7 @@ fn path_to_desk(desk: usize) -> Vec<(f32, f32)> {
 impl Scene {
     pub fn new() -> Scene {
         Scene {
+            hover: None,
             actors: Vec::new(),
             ghosts: Vec::new(),
             meeting: 0,
@@ -304,9 +306,14 @@ impl Scene {
         }
     }
 
-    /// The 160 ms half: pure motion, no filesystem.
-    pub fn animate(&mut self) {
+    /// The 160 ms half: pure motion, no filesystem. Returns whether the
+    /// FRAME CHANGED VISIBLY — walkers moved, or something on screen
+    /// animates (typing bob/code, meeting minis). A scene of seated idle
+    /// workers is a still image, and a still image redrawn six times a
+    /// second was the measured 4.5%-vs-2.9% CPU gap against the python.
+    pub fn animate(&mut self) -> bool {
         self.frame += 1;
+        let mut moved = false;
         for a in self.actors.iter_mut() {
             let Some(&target) = a.path.first() else {
                 if matches!(a.phase, Phase::Arriving) {
@@ -323,10 +330,20 @@ impl Scene {
                 a.pos.0 += dx / dist * WALK_PX;
                 a.pos.1 += dy / dist * WALK_PX;
             }
+            moved = true;
         }
         // a leaver who reached the door despawns
+        let before = self.actors.len();
         self.actors
             .retain(|a| !(matches!(a.phase, Phase::Leaving) && a.path.is_empty()));
+        moved |= self.actors.len() != before;
+        // blink-driven animation only exists on screen for these states
+        let animating = self.meeting > 0
+            || self
+                .actors
+                .iter()
+                .any(|a| matches!(a.row.state, WorkState::Typing));
+        moved || animating
     }
 
     pub fn working(&self) -> usize {
@@ -340,6 +357,14 @@ impl Scene {
             .iter()
             .filter(|a| matches!(a.phase, Phase::Arriving))
             .count()
+    }
+
+    /// The desk index under (x, y), if any — hover and click share it so
+    /// what highlights is exactly what a click would act on.
+    pub fn desk_at(&self, x: f32, y: f32) -> Option<usize> {
+        DESK_SLOTS.iter().position(|&(dx, dy)| {
+            x >= dx - 6.0 && x <= dx + 54.0 && y >= dy - 20.0 && y <= dy + 62.0
+        })
     }
 
     /// What a click at (x, y) means. Desk rects cover art + labels.
@@ -463,6 +488,17 @@ impl Scene {
 
         // desks: occupied by an AtDesk actor, ghosted, or bare
         for (di, &(dx, dy)) in DESK_SLOTS.iter().enumerate() {
+            if self.hover == Some(di) {
+                // hover wash: feedback before the click lands (the office
+                // ghosts and the studio tree obey the same rule)
+                let mut p = tiny_skia::Paint::default();
+                p.set_color(tiny_skia::Color::from_rgba8(
+                    pal.sub.0, pal.sub.1, pal.sub.2, 26,
+                ));
+                if let Some(rc) = tiny_skia::Rect::from_xywh(dx - 6.0, dy - 20.0, 60.0, 82.0) {
+                    pix.fill_rect(rc, &p, tiny_skia::Transform::identity(), None);
+                }
+            }
             let occupant = self
                 .actors
                 .iter()

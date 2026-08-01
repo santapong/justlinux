@@ -195,6 +195,7 @@ struct App {
     need_draw: bool,
     tick: u64,
     scene: Scene,
+    pixmap: tiny_skia::Pixmap,
     pal: hyprdesk::Palette,
     text: text::Text,
     pointer: Option<wl_pointer::WlPointer>,
@@ -214,7 +215,8 @@ impl App {
         else {
             return;
         };
-        let mut pixmap = tiny_skia::Pixmap::new(W, H).unwrap();
+        self.pixmap.data_mut().fill(0);
+        let mut pixmap = std::mem::replace(&mut self.pixmap, tiny_skia::Pixmap::new(1, 1).unwrap());
         self.scene.render(&mut pixmap, &self.pal, &self.text);
         for (dst, src) in canvas.chunks_exact_mut(4).zip(pixmap.data().chunks_exact(4)) {
             dst[0] = src[2];
@@ -222,6 +224,7 @@ impl App {
             dst[2] = src[0];
             dst[3] = src[3];
         }
+        self.pixmap = pixmap;
         let surface = self.layer.wl_surface();
         surface.damage_buffer(0, 0, W as i32, H as i32);
         buffer.attach_to(surface).ok();
@@ -296,6 +299,7 @@ fn main() {
         need_draw: false,
         tick: 0,
         scene,
+        pixmap: tiny_skia::Pixmap::new(W, H).unwrap(),
         pal: hyprdesk::colors(),
         text: text::Text::load(),
         pointer: None,
@@ -344,11 +348,15 @@ fn main() {
         .handle()
         .insert_source(Timer::from_duration(FRAME), |_, _, app: &mut App| {
             app.tick += 1;
+            let mut changed = false;
             if app.tick % RECONCILE_EVERY == 0 {
                 app.scene.reconcile();
+                changed = true; // labels/states may have moved even if nothing walks
             }
-            app.scene.animate();
-            app.need_draw = true;
+            changed |= app.scene.animate();
+            if changed {
+                app.need_draw = true;
+            }
             TimeoutAction::ToDuration(FRAME)
         })
         .expect("timer");
@@ -472,6 +480,19 @@ impl PointerHandler for App {
             match ev.kind {
                 PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
                     self.pointer_pos = ev.position;
+                    let over = self
+                        .scene
+                        .desk_at(ev.position.0 as f32, ev.position.1 as f32);
+                    if over != self.scene.hover {
+                        self.scene.hover = over;
+                        self.need_draw = true; // same-frame feedback
+                    }
+                }
+                PointerEventKind::Leave { .. } => {
+                    if self.scene.hover.is_some() {
+                        self.scene.hover = None;
+                        self.need_draw = true;
+                    }
                 }
                 PointerEventKind::Press { button: 0x110, .. } => {
                     // BTN_LEFT. Click actions fork detached externals; the

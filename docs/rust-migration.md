@@ -162,9 +162,18 @@ Phases: P1 scene engine (floor plan, actors, waypoints, the split) →
 P2 arrivals/departures + stable sid→desk map + ghost desks →
 P3 meeting room (workflow name, minis, +N overflow) →
 P4 parity (click/hover/tips, empty state, size presets, docs).
-Ships as `bin/hypr-office2d` first, side by side with the Python office
-behind `office_layout = grid|floor`; replaces `bin/hypr-claude-office`
-(and the pkill patterns that name its python cmdline) only at acceptance.
+
+**Status 1 Aug 2026: P1–P4 SHIPPED and live.** office_layout=floor is
+active on this machine; desktop-widgets.sh and ALT+CTRL+O route on the
+key with an -x fallback to grid, install.sh builds the binary when cargo
+exists. Measured: RSS 7.9 vs python 56 MB; cpu 2.9% while a session
+types (python parity), near-idle otherwise via the dirty-flag pass —
+animate() reports whether the frame visibly changed and a still scene is
+not redrawn. Clicks user-verified. Two lessons that must not be
+re-learned: fontdue eagerly outlines all 12k Nerd Font glyphs (49 MB —
+use ab_glyph), and every transcript reader is byte-capped because a
+48 MB transcript exists. The python office stays in bin/ as the grid
+layout, no longer on the removal path — grid IS a layout now.
 
 ## Rung 4 — studio sidebar in ratatui, costs named
 
