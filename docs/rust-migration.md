@@ -175,6 +175,37 @@ use ab_glyph), and every transcript reader is byte-capped because a
 48 MB transcript exists. The python office stays in bin/ as the grid
 layout, no longer on the removal path — grid IS a layout now.
 
+## Rung 3b — cardhost, re-scoped from evidence (1 Aug 2026)
+
+Reading it corrects the plan: the ladder called cardhost "lowest rewrite
+risk" and it is the OPPOSITE — the riskiest resident port. One process,
+N layer surfaces (one per card), a ctl unix socket that hypr-arrange,
+Settings and tools all speak (`--ctl ping|reload|reload-theme`), TOML
+templates (cardspec), THIRTEEN row renderers (title/text/keyval/bar/
+sparkline/graph/hr/clock/calgrid/notesfile/heatmap + repeat groups),
+async script sources with generation tokens, staleness badges and
+error-card degradation, monitor hotplug + reserved-inset rechecks.
+~1,600 python lines across four files against the pet's 508.
+
+**The keystone is DONE and proven: `hyprdesk::grid`** — hypr-arrange
+(python, staying) writes the `<id>_col/_row` cells a rust cardhost
+reads, so the two grids must agree to the pixel. They do:
+`examples/grid_parity.rs` sweeps 1,584 cases across six workarea
+geometries — identical, including exact-half roundings where python's
+banker's rounding and rust's round-half-away disagree (`pyround` carries
+the python semantics).
+
+Port order for the rest, one commit each: cardspec (TOML → the `toml`
+crate, template + instance params + legacy migration) → rows (the 13
+renderers on tiny-skia + draw::Text, measure() first since placement
+depends on card height) → the multi-surface host (N LayerSurfaces on one
+event loop — new sctk ground, prove with two static cards before
+wiring data) → sources (clock/stats/netgraph builtin, async cmd with
+generation tokens via calloop) → ctl socket (calloop UnixListener,
+same exit-if-owned probe) → hotplug/reserve rechecks. The ctl protocol
+and the conf keys are the interfaces; both ends already have tests in
+the parity example pattern.
+
 ## Rung 4 — studio sidebar in ratatui, costs named
 
 The studio is mostly tmux orchestration (36 `tmux(...)` call sites —

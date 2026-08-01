@@ -4,6 +4,7 @@
 //! implementations cannot drift apart without a visible symptom.
 
 mod conf;
+pub mod grid;
 #[cfg(feature = "draw")]
 pub mod draw;
 mod sessions;
