@@ -14,7 +14,7 @@
 //! replaces bin/hypr-viz those patterns must change in the same commit.
 
 mod audio;
-mod hyprdesk;
+// the fleet contracts moved to the shared workspace crate (step 0 of rung 2)
 
 use std::process::Command;
 use std::sync::atomic::AtomicBool;
