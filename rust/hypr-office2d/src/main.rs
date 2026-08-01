@@ -43,7 +43,7 @@ use wayland_client::{
     Connection, QueueHandle,
 };
 
-use scene::{Click, Scene, H, W};
+use scene::{Click, Pass, Scene, H, W};
 
 const FRAME: Duration = Duration::from_millis(160); // python FPS_MS
 const RECONCILE_EVERY: u64 = 12; // ticks — ~2 s, python POLL_S
@@ -196,6 +196,8 @@ struct App {
     tick: u64,
     scene: Scene,
     pixmap: tiny_skia::Pixmap,
+    bg: tiny_skia::Pixmap,     // cached static pass
+    static_dirty: bool,
     pal: hyprdesk::Palette,
     text: text::Text,
     pointer: Option<wl_pointer::WlPointer>,
@@ -215,9 +217,17 @@ impl App {
         else {
             return;
         };
-        self.pixmap.data_mut().fill(0);
+        if self.static_dirty {
+            self.static_dirty = false;
+            let mut bg = std::mem::replace(&mut self.bg, tiny_skia::Pixmap::new(1, 1).unwrap());
+            bg.data_mut().fill(0);
+            self.scene.render(&mut bg, &self.pal, &self.text, Pass::Static);
+            self.bg = bg;
+        }
+        // frame = cached static + the few things that move
+        self.pixmap.data_mut().copy_from_slice(self.bg.data());
         let mut pixmap = std::mem::replace(&mut self.pixmap, tiny_skia::Pixmap::new(1, 1).unwrap());
-        self.scene.render(&mut pixmap, &self.pal, &self.text);
+        self.scene.render(&mut pixmap, &self.pal, &self.text, Pass::Dynamic);
         for (dst, src) in canvas.chunks_exact_mut(4).zip(pixmap.data().chunks_exact(4)) {
             dst[0] = src[2];
             dst[1] = src[1];
@@ -300,6 +310,8 @@ fn main() {
         tick: 0,
         scene,
         pixmap: tiny_skia::Pixmap::new(W, H).unwrap(),
+        bg: tiny_skia::Pixmap::new(W, H).unwrap(),
+        static_dirty: true,
         pal: hyprdesk::colors(),
         text: text::Text::load(),
         pointer: None,
@@ -334,7 +346,11 @@ fn main() {
                         apply_placement(&app.layer);
                         app.layer.commit();
                     }
-                    Sig::Theme => app.pal = hyprdesk::colors(),
+                    Sig::Theme => {
+                        app.pal = hyprdesk::colors();
+                        app.static_dirty = true;
+                        app.need_draw = true;
+                    }
                     Sig::Quit => app.exit = true,
                 }
             }
@@ -351,9 +367,12 @@ fn main() {
             let mut changed = false;
             if app.tick % RECONCILE_EVERY == 0 {
                 app.scene.reconcile();
-                changed = true; // labels/states may have moved even if nothing walks
+                app.static_dirty = true; // labels/states/counts may differ
+                changed = true;
             }
-            changed |= app.scene.animate();
+            let (redraw, sdirty) = app.scene.animate();
+            changed |= redraw;
+            app.static_dirty |= sdirty;
             if changed {
                 app.need_draw = true;
             }
@@ -485,12 +504,14 @@ impl PointerHandler for App {
                         .desk_at(ev.position.0 as f32, ev.position.1 as f32);
                     if over != self.scene.hover {
                         self.scene.hover = over;
+                        self.static_dirty = true; // the wash lives in the bg
                         self.need_draw = true; // same-frame feedback
                     }
                 }
                 PointerEventKind::Leave { .. } => {
                     if self.scene.hover.is_some() {
                         self.scene.hover = None;
+                        self.static_dirty = true;
                         self.need_draw = true;
                     }
                 }

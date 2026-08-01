@@ -311,13 +311,18 @@ impl Scene {
     /// animates (typing bob/code, meeting minis). A scene of seated idle
     /// workers is a still image, and a still image redrawn six times a
     /// second was the measured 4.5%-vs-2.9% CPU gap against the python.
-    pub fn animate(&mut self) -> bool {
+    pub fn animate(&mut self) -> (bool, bool) {
         self.frame += 1;
         let mut moved = false;
+        let mut static_dirty = false;
         for a in self.actors.iter_mut() {
             let Some(&target) = a.path.first() else {
                 if matches!(a.phase, Phase::Arriving) {
+                    // seating moves an actor from the dynamic half to the
+                    // static half (and changes the header counts)
                     a.phase = Phase::AtDesk;
+                    static_dirty = true;
+                    moved = true;
                 }
                 continue;
             };
@@ -336,14 +341,17 @@ impl Scene {
         let before = self.actors.len();
         self.actors
             .retain(|a| !(matches!(a.phase, Phase::Leaving) && a.path.is_empty()));
-        moved |= self.actors.len() != before;
+        if self.actors.len() != before {
+            moved = true;
+            static_dirty = true; // header counts changed
+        }
         // blink-driven animation only exists on screen for these states
         let animating = self.meeting > 0
             || self
                 .actors
                 .iter()
                 .any(|a| matches!(a.row.state, WorkState::Typing));
-        moved || animating
+        (moved || animating, static_dirty)
     }
 
     pub fn working(&self) -> usize {
@@ -387,11 +395,18 @@ impl Scene {
         Click::Background
     }
 
-    pub fn render(&self, pix: &mut Pixmap, pal: &Palette, text: &Text) {
+    pub fn render(&self, pix: &mut Pixmap, pal: &Palette, text: &Text, pass: Pass) {
         let blink = self.frame % 2 == 0;
         let mut paint = tiny_skia::Paint::default();
         paint.anti_alias = true;
+        let stat = pass == Pass::Static;
 
+        if !stat {
+            // ----- DYNAMIC pass: minis, typing desks, walkers -----
+            self.render_dynamic(pix, pal, text, blink);
+            return;
+        }
+        // ----- STATIC pass: everything below -----
         // glass card
         let r = 14.0;
         let mut pb = tiny_skia::PathBuilder::new();
@@ -454,22 +469,6 @@ impl Scene {
                 pal.accent,
                 &format!("workflow ×{}", self.meeting),
             );
-            let seats = [
-                (WALL_X + 52.0, 84.0),
-                (WALL_X + 104.0, 84.0),
-                (WALL_X + 52.0, 158.0),
-                (WALL_X + 104.0, 158.0),
-                (WALL_X + 20.0, 118.0),
-                (WALL_X + 150.0, 118.0),
-            ];
-            for (i, &(sx, sy)) in seats.iter().enumerate().take(self.meeting.min(6)) {
-                let art = if (self.frame as usize + i) % 2 == 0 {
-                    sprites::CLAWD_A
-                } else {
-                    sprites::CLAWD_B
-                };
-                sprites::blit(pix, art, sx, sy, 2.0, pal, pal.muted, true, 255);
-            }
             if self.meeting > 6 {
                 text.draw(
                     pix,
@@ -480,14 +479,28 @@ impl Scene {
                     &format!("+{}", self.meeting - 6),
                 );
             }
+            // the minis themselves animate — dynamic pass
         }
 
         // door
         line(pix, 12.0, h - 38.0, 3.0, 28.0, pal.accent, 230);
         text.draw(pix, 10.0, h - 6.0, 7.0, pal.sub, "DOOR");
 
-        // desks: occupied by an AtDesk actor, ghosted, or bare
+        // desks: occupied by an AtDesk actor, ghosted, or bare.
+        // A TYPING occupant's whole cell belongs to the dynamic pass —
+        // its sprite bobs and its screen scrolls, and splitting a cell
+        // between layers would fight the z-order (worker draws BEHIND the
+        // desk art).
         for (di, &(dx, dy)) in DESK_SLOTS.iter().enumerate() {
+            if self
+                .actors
+                .iter()
+                .any(|a| a.desk == di
+                    && matches!(a.phase, Phase::AtDesk)
+                    && matches!(a.row.state, WorkState::Typing))
+            {
+                continue;
+            }
             if self.hover == Some(di) {
                 // hover wash: feedback before the click lands (the office
                 // ghosts and the studio tree obey the same rule)
@@ -601,6 +614,71 @@ impl Scene {
             );
         }
 
+    }
+
+    /// Walkers, meeting minis, and every desk whose occupant is typing.
+    fn render_dynamic(&self, pix: &mut Pixmap, pal: &Palette, text: &Text, blink: bool) {
+        let line = |pix: &mut Pixmap, x: f32, y: f32, ww: f32, hh: f32, c: Rgb, a: u8| {
+            let mut p = tiny_skia::Paint::default();
+            p.set_color(tiny_skia::Color::from_rgba8(c.0, c.1, c.2, a));
+            if let Some(rc) = tiny_skia::Rect::from_xywh(x, y, ww, hh) {
+                pix.fill_rect(rc, &p, tiny_skia::Transform::identity(), None);
+            }
+        };
+        // meeting minis
+        if self.meeting > 0 {
+            let seats = [
+                (WALL_X + 52.0, 84.0),
+                (WALL_X + 104.0, 84.0),
+                (WALL_X + 52.0, 158.0),
+                (WALL_X + 104.0, 158.0),
+                (WALL_X + 20.0, 118.0),
+                (WALL_X + 150.0, 118.0),
+            ];
+            for (i, &(sx, sy)) in seats.iter().enumerate().take(self.meeting.min(6)) {
+                let art = if (self.frame as usize + i) % 2 == 0 {
+                    sprites::CLAWD_A
+                } else {
+                    sprites::CLAWD_B
+                };
+                sprites::blit(pix, art, sx, sy, 2.0, pal, pal.muted, true, 255);
+            }
+        }
+        // typing desks: full cell (wash, worker, desk, code, labels)
+        for (di, &(dx, dy)) in DESK_SLOTS.iter().enumerate() {
+            let Some(a) = self.actors.iter().find(|a| {
+                a.desk == di
+                    && matches!(a.phase, Phase::AtDesk)
+                    && matches!(a.row.state, WorkState::Typing)
+            }) else {
+                continue;
+            };
+            if self.hover == Some(di) {
+                line(pix, dx - 6.0, dy - 20.0, 60.0, 82.0, pal.sub, 26);
+            }
+            let screen = Rgb(0x2a, 0x24, 0x22);
+            let bob = if blink { SCALE } else { 0.0 };
+            let art = if blink { sprites::CLAWD_A } else { sprites::CLAWD_B };
+            sprites::blit(pix, art, dx + 6.0, dy - 13.0 - bob, SCALE, pal, screen, true, 255);
+            sprites::blit(pix, sprites::DESK, dx, dy, SCALE, pal, screen, false, 255);
+            for rr in 0..3u32 {
+                let cx = (self.frame as u32 + rr * 2) % 4;
+                let c = if rr % 2 == 1 { pal.accent2 } else { pal.accent };
+                line(
+                    pix,
+                    dx + (4 + cx) as f32 * SCALE,
+                    dy + rr as f32 * SCALE + SCALE / 2.0,
+                    2.0 * SCALE,
+                    (SCALE / 2.0).max(1.0),
+                    c,
+                    255,
+                );
+            }
+            let ty = dy + 7.0 * SCALE + 12.0;
+            let name: String = a.row.title.chars().take(22).collect();
+            text.draw(pix, dx, ty, 9.0, pal.fg, &name);
+            text.draw(pix, dx, ty + 12.0, 8.0, pal.accent, "working");
+        }
         // walkers draw ABOVE desks so they are never hidden mid-corridor
         for a in &self.actors {
             if matches!(a.phase, Phase::AtDesk) {
@@ -610,6 +688,18 @@ impl Scene {
             sprites::blit(pix, art, a.pos.0, a.pos.1, SCALE, pal, pal.muted, true, 255);
         }
     }
+}
+
+/// Which half of the frame to paint. Static is everything that only
+/// changes on reconcile/hover/theme — glass, rooms, desks, labels, seated
+/// idle workers. Dynamic is what moves between reconciles: walkers, the
+/// typing desk (bob + code pixels), meeting minis. The static half is
+/// rendered once into a cached pixmap and memcpy'd under the dynamic half
+/// each frame — repainting a still image six times a second was the CPU.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Pass {
+    Static,
+    Dynamic,
 }
 
 #[derive(Clone)]
