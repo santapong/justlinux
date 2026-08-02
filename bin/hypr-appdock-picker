@@ -1,0 +1,1072 @@
+#!/usr/bin/env python3
+"""hypr-appdock — pinned applications dock, one per monitor, per workspace.
+
+v2 (widget-redesign phase 1):
+  · one Dock window per connected monitor, each with its OWN pin sets
+    (pins.json v2 "monitors" block; v1 files load unchanged)
+  · top layer + auto-hide by default: a 4px strip on the screen-bottom
+    edge reveals the dock over windows; an empty workspace keeps it
+    visible. dock_layer=bottom in widgets.conf restores the old
+    under-windows desktop dock.
+  · ➕ opens the picker scoped to THIS monitor + workspace; right-click a
+    dock icon to unpin it here. Workspaces inherit the monitor's Default
+    set; monitors without their own sets inherit the legacy/global sets.
+  · glass theme from hyprdesk.colors(); live refresh via
+    `hypr-appdock --ctl reload-theme` (wallpaper recolor) or
+    `--ctl reload` (re-read widgets.conf, respawn docks).
+
+Config keys (widgets.conf, all optional — legacy apps_* read as fallback):
+  dock_layer=top|bottom      dock_autohide=on|off
+  dock_<MON>=on|off          dock_<MON>_pos/_x/_y/_size
+  bar_smart=on|off           (auto-hide waybar: top-edge dwell reveals it)
+where <MON> is the connector sanitized for the key grammar (DP-1 → DP_1).
+
+Modes:  (default) run docks · --picker [--monitor DP-1] · --ctl CMD
+"""
+import fcntl
+import json
+import os
+import re
+import shlex
+import sys
+import signal
+import socket
+import subprocess
+import tempfile
+import time
+from pathlib import Path
+
+import cairo
+
+import gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, Gdk, GLib, GdkPixbuf
+
+sys.path.insert(0, str(Path.home() / ".local/lib"))
+from hyprdesk import conf, colors, css_rgba        # central config/theme
+from hyprdesk.layer import LayerWindow
+from hyprdesk.monitors import gdk_monitor_map, sanitize
+
+HOME = Path.home()
+LAUNCHER_STATE = HOME / ".local/state/hypr-launcher/state.json"
+PINS = HOME / ".local/state/hypr-appdock/pins.json"
+RESOLVE = HOME / ".cache/hypr-launcher/resolve.json"
+CTL_SOCK = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "hypr-appdock.sock"
+STRIP_H = 4               # reveal-strip height (px)
+HIDE_DELAY_MS = 600       # pointer-left → hide grace
+DWELL_MS = 180            # strip hover before reveal (monitor crossings pass in <50ms)
+BAR_POLL_MS = 400         # cursor poll cadence while the smart bar is revealed
+MANAGER = []              # live Manager instance (signal-exit bar restore)
+# show-all safety net: auto-resume even if arrange dies. Kept ABOVE
+# arrange's own 300s idle-close so a long (thinking) arrange session
+# can't have its docks yanked out from under it mid-edit.
+SUSPEND_MAX_S = 360
+APP_DIRS = [
+    HOME / ".local/share/applications",
+    Path("/usr/share/applications"),
+    Path("/var/lib/flatpak/exports/share/applications"),
+    HOME / ".local/share/flatpak/exports/share/applications",
+]
+
+
+# ---------------- pins state (v2: per-monitor) ----------------
+
+def load_pins():
+    try:
+        return json.loads(PINS.read_text())
+    except json.JSONDecodeError:
+        # mid-write/corrupt: use defaults but DON'T overwrite the file —
+        # the next good save wins, per-workspace pins survive
+        return {"default": [], "workspaces": {}}
+    except OSError:
+        # first run: seed the default set from Hypr Launcher favorites
+        try:
+            favs = json.loads(LAUNCHER_STATE.read_text()).get("favorites", [])
+        except (OSError, json.JSONDecodeError):
+            favs = []
+        state = {"default": favs, "workspaces": {}}
+        save_pins(state)
+        return state
+
+
+def save_pins(state):
+    PINS.parent.mkdir(parents=True, exist_ok=True)
+    # unique tmp per writer: a shared fixed name lets two processes truncate
+    # each other mid-replace
+    fd, tmp = tempfile.mkstemp(dir=PINS.parent, prefix=".pins-")
+    with os.fdopen(fd, "w") as f:
+        f.write(json.dumps(state, indent=1))
+    os.replace(tmp, PINS)
+
+
+PINS_LOCK = PINS.parent / "pins.lock"
+
+
+def pins_update(mutate):
+    """Run ``mutate(state)`` under an exclusive lock and save the result.
+
+    The whole load → mutate → save cycle is guarded, so the picker process
+    and the dock process can no longer silently revert each other's edits.
+    A corrupt pins.json is retried briefly, then moved aside — an edit is
+    NEVER built on the empty fallback (that would wipe all pins on save).
+    Returns the new state, or None if the edit was aborted."""
+    PINS.parent.mkdir(parents=True, exist_ok=True)
+    with open(PINS_LOCK, "w") as lockf:
+        fcntl.flock(lockf, fcntl.LOCK_EX)
+        state = None
+        for _ in range(3):
+            try:
+                state = json.loads(PINS.read_text())
+                break
+            except json.JSONDecodeError:
+                time.sleep(0.05)          # another writer mid-flight? retry
+            except OSError:
+                state = load_pins()       # missing file: seeded default
+                break
+        if state is None:
+            try:                          # persistent corruption: preserve it
+                os.replace(PINS, PINS.parent / "pins.json.bad")
+                print("hypr-appdock: pins.json corrupt — moved to pins.json.bad,"
+                      " edit aborted", file=sys.stderr, flush=True)
+            except OSError:
+                pass
+            return None
+        mutate(state)
+        save_pins(state)
+        return state
+
+
+def pins_for(state, mon, ws):
+    """Resolution: monitor's workspace set → monitor default →
+    legacy workspace set → global default."""
+    m = state.get("monitors", {}).get(mon)
+    if m:
+        if str(ws) in m.get("workspaces", {}):
+            return m["workspaces"][str(ws)]
+        if "default" in m:
+            return m["default"]
+    if str(ws) in state.get("workspaces", {}):
+        return state["workspaces"][str(ws)]
+    return state.get("default", [])
+
+
+def edit_list(state, mon, ws):
+    """The mutable pin list for (mon, ws), materializing lazily.
+
+    First monitor-scoped edit copies BOTH the legacy default and the
+    legacy per-workspace sets into the monitor block, so existing pins
+    never vanish on the monitor's other workspaces (critic fix)."""
+    mons = state.setdefault("monitors", {})
+    if mon not in mons:
+        mons[mon] = {
+            "default": list(state.get("default", [])),
+            "workspaces": {k: list(v)
+                           for k, v in state.get("workspaces", {}).items()},
+        }
+        state["version"] = 2
+    m = mons[mon]
+    if str(ws) not in m["workspaces"]:
+        m["workspaces"][str(ws)] = list(m["default"])
+    return m["workspaces"][str(ws)]
+
+
+# ---------------- app catalogue ----------------
+
+def all_apps():
+    """{stem: entry} for every visible .desktop app, first dir wins."""
+    apps = {}
+    for d in APP_DIRS:
+        if not d.is_dir():
+            continue
+        for p in sorted(d.glob("*.desktop")):
+            if p.stem in apps:
+                continue
+            entry = parse_desktop(p)
+            if entry:
+                apps[p.stem] = entry
+    return apps
+
+
+def parse_desktop(path):
+    entry = {"stem": path.stem, "name": "", "exec": "", "icon": "",
+             "terminal": False}
+    try:
+        for line in path.read_text(errors="replace").splitlines():
+            if line.startswith("[") and "[Desktop Entry]" not in line:
+                break
+            low = line.strip().lower().replace(" ", "")
+            if low in ("nodisplay=true", "hidden=true"):
+                return None
+            for key, field in (("Name=", "name"), ("Exec=", "exec"),
+                               ("Icon=", "icon")):
+                if line.startswith(key) and not entry[field]:
+                    entry[field] = line[len(key):].strip()
+            if line.startswith("Terminal=true"):
+                entry["terminal"] = True
+    except OSError:
+        return None
+    return entry if entry["exec"] else None
+
+
+def safe_pixbuf(path, size):
+    """Some cached icons are unloadable (broken SVG/format) — never crash."""
+    try:
+        return GdkPixbuf.Pixbuf.new_from_file_at_size(path, size, size)
+    except Exception:
+        return None
+
+
+def icon_path(icon_name):
+    if not icon_name:
+        return None
+    if icon_name.startswith("/") and Path(icon_name).is_file():
+        return icon_name
+    try:
+        resolved = json.loads(RESOLVE.read_text()).get(icon_name)
+        if resolved and Path(resolved).is_file():
+            return resolved
+    except (OSError, json.JSONDecodeError):
+        pass
+    return None
+
+
+def launch(entry):
+    try:
+        tokens = shlex.split(entry["exec"])
+    except ValueError:
+        tokens = entry["exec"].split()
+    argv = [a for a in tokens if not a.startswith("%") and not a.startswith("@@")]
+    if not argv:
+        return
+    if entry["terminal"]:
+        argv = ["kitty", "-e"] + argv
+    subprocess.Popen(argv, start_new_session=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+# ---------------- hyprland state ----------------
+
+def hypr_socket_path():
+    sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+    run = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
+    return f"{run}/hypr/{sig}/.socket2.sock"
+
+
+def hypr_json(cmd):
+    try:
+        out = subprocess.run(["hyprctl", "-j", cmd], capture_output=True,
+                             text=True, timeout=2).stdout
+        return json.loads(out)
+    except Exception:
+        return []
+
+
+def monitor_states():
+    """{connector: {"ws": id, "empty": bool, "fullscreen": bool}}.
+
+    'fullscreen' means TRUE fullscreen (mode 2) only — a maximized window
+    (mode 1, which keeps waybar) must NOT suppress the docks, or
+    double-click-maximize would hide them un-revealably."""
+    ws_info = {w["id"]: w for w in hypr_json("workspaces")
+               if isinstance(w, dict)}
+    truefs = set()          # workspace ids with a mode-2 fullscreen client
+    for c in hypr_json("clients"):
+        if isinstance(c, dict) and c.get("fullscreen", 0) == 2:
+            wsid = (c.get("workspace") or {}).get("id")
+            if wsid is not None:
+                truefs.add(wsid)
+    states = {}
+    for m in hypr_json("monitors"):
+        if not isinstance(m, dict):
+            continue
+        ws = (m.get("activeWorkspace") or {}).get("id", 1)
+        info = ws_info.get(ws, {})
+        states[m.get("name")] = {
+            "ws": ws,
+            "empty": info.get("windows", 0) == 0,
+            "fullscreen": ws in truefs,
+        }
+    return states
+
+
+# ---------------- picker ----------------
+
+class Picker(Gtk.Window):
+    """Searchable checklist of installed apps for one monitor + workspace."""
+
+    def __init__(self, apps, mon, ws, on_change=None):
+        super().__init__(title=f"Dock apps — {mon} · workspace {ws}")
+        self.apps, self.mon, self.ws = apps, mon, ws
+        self.on_change = on_change
+        self.set_default_size(420, 520)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6,
+                      margin=10)
+        self.add(box)
+        self.search = Gtk.SearchEntry(placeholder_text="type to filter…")
+        self.search.connect("search-changed",
+                            lambda *_: self.lst.invalidate_filter())
+        box.pack_start(self.search, False, False, 0)
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        box.pack_start(scroll, True, True, 0)
+        self.lst = Gtk.ListBox()
+        self.lst.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.lst.set_filter_func(self.filter_row)
+        scroll.add(self.lst)
+
+        current = set(pins_for(load_pins(), mon, ws))
+        for stem, entry in sorted(apps.items(),
+                                  key=lambda kv: kv[1]["name"].lower()):
+            row = Gtk.ListBoxRow()
+            h = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
+                        margin=4)
+            chk = Gtk.CheckButton()
+            chk.set_active(stem in current)
+            chk.connect("toggled", self.on_toggle, stem)
+            h.pack_start(chk, False, False, 0)
+            path = icon_path(entry["icon"])
+            pix = safe_pixbuf(path, 24) if path else None
+            if pix:
+                h.pack_start(Gtk.Image.new_from_pixbuf(pix), False, False, 0)
+            h.pack_start(Gtk.Label(label=entry["name"], xalign=0), True, True, 0)
+            row.add(h)
+            row.app_name = entry["name"].lower()
+            self.lst.add(row)
+        self.show_all()
+
+    def filter_row(self, row):
+        q = self.search.get_text().lower().strip()
+        return not q or q in row.app_name
+
+    def on_toggle(self, chk, stem):
+        def mutate(state):
+            pins = edit_list(state, self.mon, self.ws)
+            if chk.get_active() and stem not in pins:
+                pins.append(stem)
+            elif not chk.get_active() and stem in pins:
+                pins.remove(stem)
+        if pins_update(mutate) is not None and self.on_change:
+            self.on_change()
+
+
+# ---------------- reveal strip ----------------
+
+class EdgeStrip(LayerWindow):
+    """Invisible 4px strip on the screen-bottom edge: pointer touch
+    reveals that monitor's auto-hidden dock (Fitts-cheap target)."""
+
+    def __init__(self, gdk_mon, san, on_reveal, on_leave=None,
+                 edge="bottom", reserved_top=0):
+        # gtk-layer-shell auto-offsets a top-anchored surface BELOW
+        # waybar's exclusive zone, so margin 0 already sits just under the
+        # bar — adding reserved_top here would double the gap
+        pos = "top_middle" if edge == "top" else "bottom_middle"
+        super().__init__(f"dockedge_{edge}_{san}", default_pos=pos,
+                         default_x=0, default_y=0, layer="top",
+                         namespace=f"hypr-dockedge-{edge}-{san}")
+        self._on_leave = on_leave
+        self.anchor_all(("left", "right", edge))
+        geo = gdk_mon.get_geometry()
+        # GTK allocation doesn't follow layer-shell stretch anchors —
+        # size explicitly from the monitor geometry
+        self.set_size_request(geo.width, STRIP_H)
+        self.set_app_paintable(True)
+        # crossing events must be selected on BOTH the toplevel and the
+        # child area: GDK's client-side subwindows starve the toplevel of
+        # crossing events when the covering child doesn't select them
+        masks = (Gdk.EventMask.ENTER_NOTIFY_MASK |
+                 Gdk.EventMask.LEAVE_NOTIFY_MASK |
+                 Gdk.EventMask.POINTER_MOTION_MASK)
+        self.add_events(masks)
+        area = Gtk.DrawingArea()         # childless app-paintable never draws
+        area.add_events(masks)
+        area.connect("draw", self._draw_clear)
+        self.add(area)
+        self.set_target_monitor(gdk_mon)
+        self.pointer_in = False
+        self._dwell_src = None
+
+        # Dwell before revealing: on DP-1 the bottom edge is the BOUNDARY
+        # to HDMI-A-1, so every downward monitor crossing transits this
+        # strip — an instant reveal would flash the dock on each crossing.
+        # A pointer parked against a true screen edge rests in the strip,
+        # so the dwell is imperceptible there.
+        def _fire():
+            self._dwell_src = None
+            if self.pointer_in:
+                if os.environ.get("HYPRDOCK_DEBUG"):
+                    print(f"strip reveal: {san}", flush=True)
+                on_reveal()
+            return False
+
+        def _enter(*_a):
+            self.pointer_in = True
+            if self._dwell_src is None:
+                self._dwell_src = GLib.timeout_add(DWELL_MS, _fire)
+            return False
+
+        def _leave(*_a):
+            self.pointer_in = False
+            if self._dwell_src is not None:
+                GLib.source_remove(self._dwell_src)
+                self._dwell_src = None
+            # pointer can leave the strip sideways without ever entering
+            # the dock — schedule the hide check from here too
+            if self._on_leave:
+                self._on_leave()
+            return False
+
+        self.connect("enter-notify-event", _enter)
+        self.connect("leave-notify-event", _leave)
+
+    @staticmethod
+    def _draw_clear(_w, cr):
+        cr.set_operator(cairo.OPERATOR_CLEAR)     # fully transparent strip
+        cr.paint()
+        return True
+
+
+# ---------------- dock ----------------
+
+class Dock(LayerWindow):
+    """One monitor's dock."""
+
+    def __init__(self, mgr, gdk_mon, mon_name, san, layer, edge="bottom",
+                 reserved_top=0):
+        c = conf()
+        self.edge = edge
+        self.strip = None                # set by the manager after spawn
+        if edge == "top":                # top dock sits just below waybar
+            # margin 6 only — the waybar offset is automatic (exclusive
+            # zone), so this is a small gap under the bar, not +reserved
+            d_pos, d_x = "top_middle", 0
+            d_y = 6
+            ns = f"hypr-appdock-top-{san}"
+            # distinct positioning key so it doesn't inherit the bottom
+            # dock's saved dock_<san>_pos/_x/_y (it mirrors the same PINS,
+            # not the same placement)
+            key = f"docktop_{san}"
+        else:
+            # per-monitor keys with legacy apps_* fallback
+            d_pos = c.get(f"dock_{san}_pos", c.get("apps_pos", "bottom_middle"))
+            d_x = int(c.get(f"dock_{san}_x", c.get("apps_x", 0)))
+            d_y = int(c.get(f"dock_{san}_y", c.get("apps_y", 12)))
+            ns = f"hypr-appdock-{san}"
+            key = f"dock_{san}"
+        super().__init__(key, default_pos=d_pos, default_x=d_x,
+                         default_y=d_y, layer=layer, namespace=ns)
+        self.set_target_monitor(gdk_mon)
+        self.mgr, self.mon, self.san = mgr, mon_name, san
+        self.ws = 1
+        self.picker = None
+        try:
+            self.icon = max(24, min(96, int(
+                c.get(f"dock_{san}_size", c.get("apps_size", 44)))))
+        except (TypeError, ValueError):
+            self.icon = 44
+        self.box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+        self.box.set_name("dock")
+        self.add(self.box)
+        self.add_events(Gdk.EventMask.ENTER_NOTIFY_MASK |
+                        Gdk.EventMask.LEAVE_NOTIFY_MASK)
+        self.connect("enter-notify-event", self.on_enter)
+        self.connect("leave-notify-event", self.on_leave)
+        self.pointer_in = False
+        self.rebuild()
+
+    # ----- rendering -----
+    def rebuild(self):
+        for child in self.box.get_children():
+            self.box.remove(child)
+        shown = 0
+        for stem in pins_for(self.mgr.pins, self.mon, self.ws):
+            entry = self.mgr.apps.get(stem)
+            if not entry:
+                continue
+            btn = Gtk.Button()
+            btn.set_tooltip_text(f"{entry['name']} — right-click to unpin")
+            path = icon_path(entry["icon"])
+            pix = safe_pixbuf(path, self.icon) if path else None
+            if pix:
+                btn.set_image(Gtk.Image.new_from_pixbuf(pix))
+            else:
+                btn.set_label(entry["name"][:2])
+            btn.connect("clicked", lambda _b, e=entry: launch(e))
+            btn.connect("button-press-event", self.on_icon_press, stem)
+            self.box.pack_start(btn, False, False, 0)
+            shown += 1
+        if not shown:
+            lbl = Gtk.Label(label=f"{self.mon} · ws {self.ws} · no pins")
+            lbl.set_name("hint")
+            self.box.pack_start(lbl, False, False, 0)
+        plus = Gtk.Button(label="＋")
+        plus.set_tooltip_text(f"Choose apps for {self.mon}, workspace {self.ws}")
+        plus.connect("clicked", self.open_picker)
+        self.box.pack_start(plus, False, False, 0)
+        self.box.show_all()
+
+    def on_icon_press(self, _btn, event, stem):
+        if event.button == 3:                       # right-click: unpin here
+            def mutate(state):
+                pins = edit_list(state, self.mon, self.ws)
+                if stem in pins:
+                    pins.remove(stem)
+            state = pins_update(mutate)
+            if state is not None:
+                self.mgr.pins = state
+                # rebuild ALL docks on this monitor (top + bottom mirror
+                # the same pins) so the sibling doesn't show a stale icon
+                self.mgr.on_pins_changed()
+            return True
+        return False
+
+    def open_picker(self, *_):
+        if self.picker:
+            self.picker.destroy()
+        self.picker = Picker(self.mgr.apps, self.mon, self.ws,
+                             on_change=self.mgr.on_pins_changed)
+
+    def set_ws(self, ws):
+        if ws != self.ws:
+            self.ws = ws
+            self.rebuild()
+            if self.picker:                # picker was scoped to the old ws
+                self.picker.destroy()
+                self.picker = None
+
+    # ----- auto-hide pointer tracking -----
+    def on_enter(self, _w, ev):
+        if ev.detail != Gdk.NotifyType.INFERIOR:
+            self.pointer_in = True
+        return False
+
+    def on_leave(self, _w, ev):
+        if ev.detail != Gdk.NotifyType.INFERIOR:
+            self.pointer_in = False
+            self.mgr.schedule_hide(self)
+        return False
+
+
+# ---------------- manager ----------------
+
+class Manager:
+    """Owns the app catalogue, pins, per-monitor docks + strips, the
+    Hyprland event watch and the ctl socket."""
+
+    def __init__(self):
+        c = conf()
+        self.layer = c.get("dock_layer", "top")
+        self.autohide = (self.layer == "top"
+                         and c.get("dock_autohide", "on") == "on")
+        self.dock_top = c.get("dock_top", "off") == "on"   # extra top dock
+        self.bar_smart = c.get("bar_smart", "off") == "on" # auto-hide waybar
+        self.apps = all_apps()
+        self.pins = load_pins()
+        self.docks = {}                  # connector -> bottom Dock
+        self.top_docks = {}              # connector -> top Dock (if dock_top)
+        self.strips = {}                 # connector -> bottom EdgeStrip
+        self.bar_strips = {}             # connector -> top EdgeStrip (bar_smart)
+        self._bar_poll_src = None
+        self.bar_pin = False             # ALT+B: hold the smart bar open
+        self.states = {}                 # connector -> monitor_states() entry
+        self.css = None
+        self.suspend = False             # show-all mode (arrange overlay)
+        self._suspend_src = None
+        self._respawn_src = None
+        self.apply_theme()
+        self.spawn_all()
+        self.refresh(initial=True)
+        self.watch_workspaces()
+        self._pins_mtime = self._pins_stat()
+        GLib.timeout_add_seconds(2, self._check_pins)
+        # armed unconditionally: --ctl reload can enable autohide later,
+        # and the body is a no-op while autohide is off
+        GLib.timeout_add_seconds(5, self._hide_sanity)
+        self.serve_ctl()
+        MANAGER.append(self)
+        if self.bar_smart:
+            # waybar starts visible at login — tuck it away once mapped
+            GLib.timeout_add_seconds(2, self._bar_startup)
+        display = Gdk.Display.get_default()
+        display.connect("monitor-added", lambda *_: self.respawn_soon())
+        display.connect("monitor-removed", lambda *_: self.respawn_soon())
+
+    # ----- theme -----
+    def apply_theme(self):
+        pal = colors()
+        css = Gtk.CssProvider()
+        css.load_from_data(f"""
+            #dock {{
+                background-color: {css_rgba(pal["bg"], 0.80)};
+                border-radius: 12px;
+                border: 1px solid {css_rgba(pal["accent2"], 0.18)};
+                padding: 6px 10px;
+            }}
+            #dock button {{
+                background: transparent; border: none; box-shadow: none;
+                padding: 5px; border-radius: 6px; min-width: 0;
+            }}
+            #dock button:hover {{
+                background: {css_rgba(pal["accent"], 0.25)};
+            }}
+            #hint {{ color: {pal['sub']}; padding: 4px 8px; }}
+        """.encode())
+        screen = Gdk.Screen.get_default()
+        if self.css:
+            Gtk.StyleContext.remove_provider_for_screen(screen, self.css)
+        Gtk.StyleContext.add_provider_for_screen(
+            screen, css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        self.css = css
+
+    def reserved_top(self, mon_name):
+        """Top reserved inset (waybar) for a monitor, px."""
+        for m in hypr_json("monitors"):
+            if isinstance(m, dict) and m.get("name") == mon_name:
+                return (m.get("reserved") or (0, 0, 0, 0))[1]
+        return 0
+
+    def _all_docks(self):
+        return list(self.docks.values()) + list(self.top_docks.values())
+
+    # ----- spawn / teardown -----
+    def spawn_all(self):
+        c = conf()
+        for gdk_mon, name, san in gdk_monitor_map(Gdk.Display.get_default()):
+            # bar_smart strip is independent of the dock being enabled on
+            # this monitor — the panel spans every output
+            if self.bar_smart and name not in self.bar_strips:
+                bstrip = EdgeStrip(
+                    gdk_mon, san,
+                    lambda m=name: self.reveal_bar(m),
+                    self._bar_watch,
+                    edge="top")
+                bstrip.show_all()
+                self.bar_strips[name] = bstrip
+            enabled = c.get(f"dock_{san}", c.get("apps", "on")) == "on"
+            if not enabled or name in self.docks:
+                continue
+            dock = Dock(self, gdk_mon, name, san, self.layer, edge="bottom")
+            self.docks[name] = dock
+            if self.autohide:
+                strip = EdgeStrip(
+                    gdk_mon, san,
+                    lambda d=dock: self.reveal(d),
+                    lambda d=dock: self.schedule_hide(d),
+                    edge="bottom")
+                strip.show_all()
+                dock.strip = strip
+                self.strips[name] = strip
+            else:
+                dock.show_all()
+            # optional top dock: mirrors the same pins, reveals from the
+            # top edge (just below waybar) on hover
+            if self.dock_top:
+                rtop = self.reserved_top(name)
+                top = Dock(self, gdk_mon, name, san, self.layer, edge="top",
+                           reserved_top=rtop)
+                self.top_docks[name] = top
+                if self.autohide:
+                    tstrip = EdgeStrip(
+                        gdk_mon, san,
+                        lambda d=top: self.reveal(d),
+                        lambda d=top: self.schedule_hide(d),
+                        edge="top", reserved_top=rtop)
+                    tstrip.show_all()
+                    top.strip = tstrip
+                else:
+                    top.show_all()
+
+    def teardown(self):
+        for dock in self._all_docks():
+            if dock.picker:
+                dock.picker.destroy()
+            if dock.strip:
+                dock.strip.destroy()
+        for w in self._all_docks():
+            w.destroy()
+        for s in self.bar_strips.values():
+            s.destroy()
+        self.docks, self.top_docks, self.strips = {}, {}, {}
+        self.bar_strips = {}
+
+    def respawn_soon(self):
+        # debounce monitor hotplug bursts: one pending respawn at a time
+        if self._respawn_src is None:
+            self._respawn_src = GLib.timeout_add(500, self._respawn_once)
+
+    def _respawn_once(self):
+        self._respawn_src = None
+        self.teardown()
+        c = conf()
+        self.layer = c.get("dock_layer", "top")
+        self.autohide = (self.layer == "top"
+                         and c.get("dock_autohide", "on") == "on")
+        # re-read the top-dock flag too, so `--ctl reload` can toggle it
+        # at runtime (was only read once at startup)
+        self.dock_top = c.get("dock_top", "off") == "on"
+        was_smart = self.bar_smart
+        self.bar_smart = c.get("bar_smart", "off") == "on"
+        if was_smart and not self.bar_smart and not self.bar_visible():
+            self.bar_toggle()            # smart mode off: leave the bar up
+        if self.bar_smart:
+            self._bar_watch()            # smart mode (re)enabled: tuck soon
+        self.spawn_all()
+        self.refresh(initial=True)
+        return False                     # one-shot
+
+    # ----- auto-hide -----
+    def reveal(self, dock):
+        st = self.states.get(dock.mon, {})
+        if os.environ.get("HYPRDOCK_DEBUG"):
+            print(f"reveal({dock.mon}/{dock.edge}): state={st}", flush=True)
+        if dock and not st.get("fullscreen"):
+            dock.show_all()
+
+    def _hovered(self, dock):
+        strip = dock.strip
+        return dock.pointer_in or (strip is not None and strip.pointer_in)
+
+    def schedule_hide(self, dock):
+        GLib.timeout_add(HIDE_DELAY_MS, self._maybe_hide, dock)
+
+    def _maybe_hide(self, dock):
+        st = self.states.get(dock.mon, {})
+        if (self.autohide and not self.suspend
+                and not self._hovered(dock) and not st.get("empty")):
+            dock.hide()
+        return False
+
+    def _hide_sanity(self):
+        # missed-leave recovery: never let a dock stick over windows
+        # (a pointer resting on the reveal strip counts as hovering)
+        if self.suspend:
+            return True
+        for dock in self._all_docks():
+            st = self.states.get(dock.mon, {})
+            if (self.autohide and dock.get_visible()
+                    and not self._hovered(dock) and not st.get("empty")):
+                dock.hide()
+        # smart-bar equivalent — also catches a respawned waybar, which
+        # always comes back visible
+        if self.bar_smart and self.bar_visible():
+            self._bar_watch()
+        return True
+
+    # ----- smart waybar (bar_smart) -----
+    # waybar is NOT our window: SIGUSR1 toggles it between shown (top
+    # layer, level 2, its normal config) and hidden (bottom layer, level 1
+    # — verified on v0.15). Reveal comes from the per-monitor top
+    # EdgeStrips; while the bar is up we poll the cursor against its layer
+    # boxes (no GTK crossing events for a foreign surface) and toggle it
+    # back down once the pointer has left the band.
+
+    def bar_layers(self):
+        """[(level, x, y, w, h)] of live waybar surfaces. pid<=0 entries
+        are Hyprland 0.55 corpses — always filter them."""
+        out = []
+        data = hypr_json("layers")
+        if not isinstance(data, dict):
+            return out
+        for d in data.values():
+            for lvl, entries in (d.get("levels") or {}).items():
+                for e in entries:
+                    if (isinstance(e, dict) and e.get("namespace") == "waybar"
+                            and e.get("pid", -1) > 0):
+                        out.append((int(lvl), e["x"], e["y"], e["w"], e["h"]))
+        return out
+
+    def bar_visible(self):
+        return any(lvl >= 2 for lvl, *_ in self.bar_layers())
+
+    def bar_toggle(self):
+        subprocess.run(["pkill", "-USR1", "-x", "waybar"], check=False)
+
+    def reveal_bar(self, mon):
+        st = self.states.get(mon, {})
+        if st.get("fullscreen"):         # same rule as the docks
+            return
+        if not self.bar_visible():
+            self.bar_toggle()
+        self._bar_watch()
+
+    def _bar_hovering(self):
+        if any(s.pointer_in for s in self.bar_strips.values()):
+            return True
+        pos = hypr_json("cursorpos")
+        if not isinstance(pos, dict):
+            return False
+        cx, cy = pos.get("x", -1), pos.get("y", -1)
+        for lvl, x, y, w, h in self.bar_layers():
+            if lvl >= 2 and x <= cx <= x + w and y <= cy <= y + h + STRIP_H:
+                return True
+        return False
+
+    def _bar_watch(self):
+        if self.bar_smart and self._bar_poll_src is None:
+            self._bar_poll_src = GLib.timeout_add(BAR_POLL_MS, self._bar_tick)
+
+    def _bar_tick(self):
+        if not (self.bar_smart and self.bar_visible()):
+            self._bar_poll_src = None
+            return False                 # nothing shown: stop polling
+        if self.suspend or self.bar_pin or self._bar_hovering():
+            return True                  # must stay up: keep watching
+        self.bar_toggle()
+        self._bar_poll_src = None
+        return False
+
+    def _bar_startup(self):
+        self._bar_watch()
+        return False
+
+    def apply_visibility(self):
+        if not self.autohide or self.suspend:
+            for dock in self._all_docks():
+                dock.show_all()
+            return
+        for dock in self._all_docks():
+            st = self.states.get(dock.mon, {})
+            if st.get("fullscreen"):
+                dock.hide()
+            elif st.get("empty"):
+                dock.show_all()          # empty desktop: dock stays visible
+            elif not self._hovered(dock):
+                dock.hide()
+
+    # ----- show-all / resume (arrange overlay support) -----
+    def set_suspend(self, on):
+        if self._suspend_src is not None:
+            GLib.source_remove(self._suspend_src)
+            self._suspend_src = None
+        self.suspend = on
+        if on:                           # failsafe: resume even if the
+            self._suspend_src = GLib.timeout_add_seconds(   # caller dies
+                SUSPEND_MAX_S, lambda: self.set_suspend(False) or False)
+        self.apply_visibility()
+
+    # ----- state refresh (workspaces / window counts / fullscreen) -----
+    def refresh(self, initial=False):
+        self.states = monitor_states()
+        # reconcile: docks spawned during a transient hyprctl failure carry
+        # synthetic MON<i> / stale names that never match event state —
+        # respawn once real connector names are available
+        if (self.states and self.docks
+                and not (set(self.docks) & set(self.states))):
+            self.respawn_soon()
+            return
+        for dock in self._all_docks():
+            st = self.states.get(dock.mon)
+            if st:
+                dock.set_ws(st["ws"])
+        # visibility depends on window counts/fullscreen, not just ws ids —
+        # always re-evaluate
+        self.apply_visibility()
+
+    def refresh_soon(self):
+        # debounce event bursts (one hyprctl round per ~120ms max)
+        if getattr(self, "_refresh_pending", False):
+            return
+        self._refresh_pending = True
+
+        def go():
+            self._refresh_pending = False
+            self.refresh()
+            return False
+        GLib.timeout_add(120, go)
+
+    # ----- pins change propagation -----
+    def on_pins_changed(self):
+        self.pins = load_pins()
+        self._pins_mtime = self._pins_stat()
+        for dock in self._all_docks():
+            dock.rebuild()
+
+    def _pins_stat(self):
+        try:
+            return PINS.stat().st_mtime
+        except OSError:
+            return 0
+
+    def _check_pins(self):
+        mt = self._pins_stat()
+        if mt != self._pins_mtime:
+            self._pins_mtime = mt
+            self.pins = load_pins()
+            for dock in self._all_docks():
+                dock.rebuild()
+        return True
+
+    # ----- hyprland event socket -----
+    EVENTS = ("workspacev2>>", "workspace>>", "focusedmon>>", "openwindow>>",
+              "closewindow>>", "movewindow>>", "moveworkspace>>",
+              "moveworkspacev2>>", "fullscreen>>", "monitorremoved>>",
+              "monitoradded>>")
+
+    def watch_workspaces(self):
+        try:
+            self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.sock.connect(hypr_socket_path())
+            self.sock.setblocking(False)
+            self._sock_buf = ""
+            GLib.io_add_watch(self.sock.fileno(), GLib.IO_IN, self.on_event)
+        except OSError:
+            GLib.timeout_add_seconds(3, self.poll_state)
+
+    def on_event(self, _fd, _cond):
+        try:
+            data = self.sock.recv(4096)
+        except OSError:
+            return True
+        if not data:                    # Hyprland restarted: EOF — stop the
+            self.sock.close()           # watch or it busy-loops at 100% CPU
+            GLib.timeout_add_seconds(3, self.poll_state)
+            return False
+        self._sock_buf += data.decode(errors="replace")
+        *lines, self._sock_buf = self._sock_buf.split("\n")
+        if any(line.startswith(self.EVENTS) for line in lines):
+            self.refresh_soon()
+        return True
+
+    def poll_state(self):
+        self.refresh()
+        return True
+
+    # ----- ctl socket -----
+    def serve_ctl(self):
+        # liveness check: never steal the endpoint from a running dock
+        try:
+            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            probe.settimeout(0.5)
+            probe.connect(str(CTL_SOCK))
+            probe.close()
+            # a live dock manager already owns the socket — EXIT rather
+            # than keep a second, duplicate set of docks on screen
+            print("hypr-appdock: another instance is running — exiting",
+                  file=sys.stderr, flush=True)
+            os._exit(0)
+        except OSError:
+            pass                         # unreachable → genuinely stale
+        try:
+            CTL_SOCK.unlink()
+        except OSError:
+            pass
+        try:
+            self.ctl = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.ctl.bind(str(CTL_SOCK))
+            self.ctl.listen(4)
+            self.ctl.setblocking(False)
+            GLib.io_add_watch(self.ctl.fileno(), GLib.IO_IN, self.on_ctl)
+        except OSError:
+            pass                         # ctl is best-effort, dock still works
+
+    def on_ctl(self, _fd, _cond):
+        try:
+            client, _ = self.ctl.accept()
+        except OSError:
+            return True
+        # never block the GTK loop: read when the command actually arrives
+        client.setblocking(False)
+        GLib.io_add_watch(client.fileno(), GLib.IO_IN | GLib.IO_HUP,
+                          self.on_ctl_client, client)
+        return True
+
+    def on_ctl_client(self, _fd, _cond, client):
+        try:
+            cmd = client.recv(256).decode(errors="replace").strip()
+            if cmd == "reload-theme":
+                self.apply_theme()
+                for dock in self._all_docks():
+                    dock.rebuild()
+            elif cmd == "reload":
+                self.on_pins_changed()
+                self.respawn_soon()
+            elif cmd == "bar-pin":       # ALT+B: pin the smart bar open
+                self.bar_pin = not self.bar_pin
+                if self.bar_pin and not self.bar_visible():
+                    self.bar_toggle()
+                if not self.bar_pin:
+                    self._bar_watch()    # released: resume auto-hide
+                client.sendall(b"ok pinned\n" if self.bar_pin
+                               else b"ok released\n")
+                client.close()
+                return False
+            elif cmd == "show-all":      # arrange overlay: map every dock
+                self.set_suspend(True)
+            elif cmd == "resume":        # arrange done: back to auto-hide
+                self.set_suspend(False)
+            elif cmd != "ping":
+                client.sendall(b"err\n")     # an unknown verb must not
+                client.close()               # masquerade as success
+                return False
+            client.sendall(b"ok\n")
+        except OSError:
+            pass
+        finally:
+            try:
+                client.close()
+            except OSError:
+                pass
+        return False                     # one-shot per client
+
+
+# ---------------- entry points ----------------
+
+def focused_monitor():
+    for m in hypr_json("monitors"):
+        if isinstance(m, dict) and m.get("focused"):
+            return m.get("name")
+    mons = hypr_json("monitors")
+    return mons[0].get("name") if mons else "MON0"
+
+
+def ctl_send(cmd):
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(2)
+        s.connect(str(CTL_SOCK))
+        s.sendall(cmd.encode())
+        reply = s.recv(64).decode(errors="replace").strip()
+        s.close()
+        print(reply or "no reply")
+        return 0 if reply.startswith("ok") else 1
+    except OSError as e:
+        print(f"dock not reachable: {e}", file=sys.stderr)
+        return 1
+
+
+def main():
+    if "--ctl" in sys.argv:
+        i = sys.argv.index("--ctl")
+        cmd = sys.argv[i + 1] if len(sys.argv) > i + 1 else "ping"
+        sys.exit(ctl_send(cmd))
+    # GLib-integrated signal handling; exit directly — Gtk.main_quit()
+    # from a unix-signal source does not stop Gtk.main() (verified), and
+    # the dock has no state to flush (pins are saved at edit time)
+    def sig_quit(*_):
+        try:                             # never exit leaving the panel tucked
+            m = MANAGER[0] if MANAGER else None
+            if m and m.bar_smart and not m.bar_visible():
+                m.bar_toggle()
+        except Exception:
+            pass
+        os._exit(130)
+    GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGTERM, sig_quit)
+    GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGINT, sig_quit)
+    GLib.set_prgname("hyprdockpick")     # picker window app_id → windowrule
+    if "--picker" in sys.argv:
+        mon = focused_monitor()
+        if "--monitor" in sys.argv:
+            i = sys.argv.index("--monitor")
+            if len(sys.argv) > i + 1:
+                mon = sys.argv[i + 1]
+        states = monitor_states()
+        ws = states.get(mon, {}).get("ws", 1)
+        win = Picker(all_apps(), mon, ws)
+        win.connect("destroy", Gtk.main_quit)
+    else:
+        Manager()
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

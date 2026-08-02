@@ -1,0 +1,16 @@
+[package]
+name = "hypr-cardhost"
+version = "0.1.0"
+edition = "2021"
+description = "The desktop widget host: one process, N glass cards — rung 3b of the Rust migration; bin/hypr-cardhost (python) is the spec"
+
+[dependencies]
+hyprdesk = { path = "../hyprdesk", features = ["draw"] }
+smithay-client-toolkit = "0.19.2"
+wayland-client = "0.31"
+calloop = "0.14"
+calloop-wayland-source = "0.4"
+tiny-skia = "0.11"
+signal-hook = "0.3"
+serde_json = "1"
+toml = "0.8"

@@ -35,6 +35,26 @@ for f in bin/*; do
     echo "installed: ~/.local/bin/$(basename "$f")"
 done
 
+# Rust tools — built from source when a toolchain exists. Without cargo
+# nothing breaks: desktop-widgets.sh checks -x and falls back to the
+# python grid office, so office_layout=floor is simply unavailable until
+# a `cargo` appears and install.sh runs again.
+if command -v cargo >/dev/null 2>&1 && [ -d rust ]; then
+    if (cd rust && cargo build --release -p hypr-office2d -p hypr-pet -p hypr-cardhost -p hypr-appdock -p hypr-viz -p hypr-claude-studio >/dev/null 2>&1); then
+        install -m755 rust/target/release/hypr-office2d "$HOME/.local/bin/hypr-office2d"
+        # AFTER the bin/ loop above, so the binary wins over the python
+        # script it replaces; without cargo the python copy stands
+        install -m755 rust/target/release/hypr-pet "$HOME/.local/bin/hypr-pet"
+        install -m755 rust/target/release/hypr-cardhost "$HOME/.local/bin/hypr-cardhost"
+        install -m755 rust/target/release/hypr-appdock "$HOME/.local/bin/hypr-appdock"
+        install -m755 rust/target/release/hypr-viz "$HOME/.local/bin/hypr-viz"
+        install -m755 rust/target/release/hypr-claude-studio "$HOME/.local/bin/hypr-claude-studio"
+        echo "installed: ~/.local/bin/{hypr-office2d,hypr-pet,hypr-cardhost,hypr-appdock,hypr-viz,hypr-claude-studio} (built from rust/)"
+    else
+        echo "skipped: rust build failed — the python versions cover it" >&2
+    fi
+fi
+
 # The python package every bin/ script imports. Each one starts with
 # sys.path.insert(~/.local/lib) and then `from hyprdesk import ...`, so
 # without this a fresh machine gets all the scripts and every single one of

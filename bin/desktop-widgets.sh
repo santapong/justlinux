@@ -6,6 +6,7 @@ WIDGET_DIR="$HOME/.config/conky/widgets"
 CONF="$HOME/.config/conky/widgets.conf"
 PET="$HOME/.local/bin/hypr-pet"
 OFFICE="$HOME/.local/bin/hypr-claude-office"
+OFFICE2D="$HOME/.local/bin/hypr-office2d"          # rust floor-plan office
 VIZ="$HOME/.local/bin/hypr-viz"
 DOCK="$HOME/.local/bin/hypr-appdock"
 SERWATCH="$HOME/.local/bin/serial-watch"
@@ -32,27 +33,36 @@ exec 9>"${XDG_RUNTIME_DIR:-/tmp}/desktop-widgets.lock"
 # a wallpaper change because wallpaper.sh runs under `set -e`.
 flock -w 10 9 2>/dev/null || echo "desktop-widgets: lock busy, proceeding" >&2
 
-viz_up() { pgrep -xf "python3 $VIZ" >/dev/null 2>&1; }
+viz_up() { pgrep -xf "python3 $VIZ" >/dev/null 2>&1 || pgrep -xf "$VIZ" >/dev/null 2>&1; }
 
 do_stop() {
     pkill -f "conky -c $WIDGET_DIR" 2>/dev/null
-    pkill -xf "python3 $PET" 2>/dev/null
+    pkill -xf "python3 $PET" 2>/dev/null   # script form
+    pkill -xf "$PET" 2>/dev/null           # rust binary form
     pkill -xf "python3 $OFFICE" 2>/dev/null
+    pkill -xf "$OFFICE2D" 2>/dev/null
     pkill -xf "python3 $VIZ" 2>/dev/null
+    pkill -xf "$VIZ" 2>/dev/null
     pkill -xf "python3 $DOCK" 2>/dev/null
+    pkill -xf "$DOCK" 2>/dev/null
     pkill -xf "python3 $SERWATCH" 2>/dev/null
     pkill -xf "python3 $CARDHOST" 2>/dev/null
+    pkill -xf "$CARDHOST" 2>/dev/null
     # wait for real exit — a half-dead conky makes restart's pgrep guard
     # skip widgets as "already running", and a dying cardhost/dock still
     # owns its ctl socket (the new instance would probe it and disable ctl)
     for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
         pgrep -f "conky -c $WIDGET_DIR" >/dev/null 2>&1 ||
             pgrep -xf "python3 $PET" >/dev/null 2>&1 ||
+            pgrep -xf "$PET" >/dev/null 2>&1 ||
             pgrep -xf "python3 $DOCK" >/dev/null 2>&1 ||
+            pgrep -xf "$DOCK" >/dev/null 2>&1 ||
             pgrep -xf "python3 $CARDHOST" >/dev/null 2>&1 ||
+            pgrep -xf "$CARDHOST" >/dev/null 2>&1 ||
             pgrep -xf "python3 $OFFICE" >/dev/null 2>&1 ||
             pgrep -xf "python3 $SERWATCH" >/dev/null 2>&1 ||
-            pgrep -xf "python3 $VIZ" >/dev/null 2>&1 || break
+            pgrep -xf "python3 $VIZ" >/dev/null 2>&1 ||
+            pgrep -xf "$VIZ" >/dev/null 2>&1 || break
         sleep 0.1
     done
 }
@@ -78,27 +88,39 @@ do_start() {   # $want_viz=1 forces viz back up even when the conf says off
     # its own dock enabled (dock_<MON>=on) even with apps=off
     if [ "$(setting apps on)" = "on" ] ||
        grep -qsE '^dock_[A-Za-z0-9_]+=on' "$CONF"; then
-        pgrep -xf "python3 $DOCK" >/dev/null ||
+        if ! pgrep -xf "python3 $DOCK" >/dev/null && ! pgrep -xf "$DOCK" >/dev/null; then
             "$DOCK" >/dev/null 2>&1 9>&- &
+        fi
     fi
     pgrep -xf "python3 $SERWATCH" >/dev/null ||
         "$SERWATCH" >/dev/null 2>&1 9>&- &
     if [ "$(setting pet on)" = "on" ]; then
-        if ! pgrep -xf "python3 $PET" >/dev/null; then
+        # the pet may be the python script (cmdline "python3 <path>") or
+        # the rust binary (cmdline "<path>") — guard against both forms
+        if ! pgrep -xf "python3 $PET" >/dev/null && ! pgrep -xf "$PET" >/dev/null; then
             layer=$(setting pet_layer bottom)
             [ "$layer" = "bottom" ] && layer=""
             HYPRPET_LAYER="$layer" "$PET" >/dev/null 2>&1 9>&- &
         fi
     fi
     if [ "$(setting claude_office on)" = "on" ]; then
-        pgrep -xf "python3 $OFFICE" >/dev/null ||
-            "$OFFICE" >/dev/null 2>&1 9>&- &
+        # office_layout picks WHICH office: grid = the python original,
+        # floor = the rust 2D one (walking agents, meeting room). Same
+        # toggle, same restart verbs — the layout key is the only switch.
+        if [ "$(setting office_layout grid)" = "floor" ] && [ -x "$OFFICE2D" ]; then
+            pgrep -xf "$OFFICE2D" >/dev/null ||
+                "$OFFICE2D" >/dev/null 2>&1 9>&- &
+        else
+            pgrep -xf "python3 $OFFICE" >/dev/null ||
+                "$OFFICE" >/dev/null 2>&1 9>&- &
+        fi
     fi
     # viz never autostarts at login: only the conf toggle or a bounce that
     # found it already running (ALT+SHIFT+Y leaves no trace in the conf)
     if [ "$(setting viz off)" = "on" ] || [ "$want_viz" = 1 ]; then
-        pgrep -xf "python3 $VIZ" >/dev/null ||
+        if ! pgrep -xf "python3 $VIZ" >/dev/null && ! pgrep -xf "$VIZ" >/dev/null; then
             "$VIZ" >/dev/null 2>&1 9>&- &
+        fi
     fi
 }
 
@@ -125,14 +147,28 @@ restart-conky)
     do_start
     ;;
 restart-office)
-    # bounce ONLY the claude-office widget — conky/cardhost/dock/pet keep
-    # running untouched
+    # bounce ONLY the office widget (whichever layout is running) —
+    # conky/cardhost/dock/pet keep running untouched
     pkill -xf "python3 $OFFICE" 2>/dev/null
+    pkill -xf "$OFFICE2D" 2>/dev/null
     for _ in 1 2 3 4 5 6 7 8 9 10; do
-        pgrep -xf "python3 $OFFICE" >/dev/null 2>&1 || break
+        pgrep -xf "python3 $OFFICE" >/dev/null 2>&1 ||
+            pgrep -xf "$OFFICE2D" >/dev/null 2>&1 || break
         sleep 0.1
     done
     do_start
+    ;;
+toggle-office)
+    # ALT+CTRL+O lands here so the hotkey follows office_layout too.
+    # The office binaries carry their own toggle semantics (run again
+    # kills), so this just picks the right one and exec's it.
+    # 9>&- on the execs: the office inherits our fds, and an inherited
+    # fd 9 holds the widget lock for the office's WHOLE LIFE — the exact
+    # wedge the header comment documents.
+    if [ "$(setting office_layout grid)" = "floor" ] && [ -x "$OFFICE2D" ]; then
+        exec "$OFFICE2D" 9>&-
+    fi
+    exec "$OFFICE" 9>&-
     ;;
 restart-viz)
     # bounce ONLY hypr-viz — conky/cardhost/dock/pet keep running untouched.
@@ -140,6 +176,7 @@ restart-viz)
     # AFTER writing viz=off, so remembering "it was up" would restart it and
     # make the OFF switch a no-op. The conf is authoritative for this verb.
     pkill -xf "python3 $VIZ" 2>/dev/null
+    pkill -xf "$VIZ" 2>/dev/null
     for _ in 1 2 3 4 5 6 7 8 9 10; do
         pgrep -xf "python3 $VIZ" >/dev/null 2>&1 || break
         sleep 0.1

@@ -120,3 +120,11 @@ window#waybar.hidden {
     background: alpha(@status-bad, 0.25);
     border-radius: 6px;
 }
+
+/* smart-bar (hypr-appdock bar_smart): SIGUSR1 "hide" only drops waybar
+   to the bottom layer, which still draws over bare wallpaper. Waybar
+   adds the .hidden class in that state — this is the documented hook —
+   so a tucked bar becomes fully invisible instead of merely covered. */
+window#waybar.hidden {
+    opacity: 0;
+}

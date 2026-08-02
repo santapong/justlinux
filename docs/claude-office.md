@@ -1,5 +1,15 @@
 # Claude Office
 
+> **Two layouts since Aug 2026, one conf key.** `office_layout = grid`
+> (default) is this document's python office. `office_layout = floor` is
+> `rust/hypr-office2d` — the Gather-style floor where agents WALK in from
+> the door to desks at x,y, ghosts sit at empty desks, and a MEETING ROOM
+> fills with mini-Clawds while a workflow runs. Same toggle key
+> (ALT+CTRL+O), same restart verbs, same click contract; the layout key is
+> the only switch, and desktop-widgets.sh falls back to grid when the rust
+> binary is absent. Design + measurements: docs/rust-migration.md rung 2.
+
+
 A layer-shell scene that draws **one desk per live Claude session**, so a glance
 answers the only question that matters while agents are working: *does anything
 need me?*

@@ -470,6 +470,7 @@ main_menu() {
         "  Config — edit Hyprland" \
         "  Config — edit bar (waybar)" \
         "󰑓  Config — reload Hyprland" \
+        "󰢻  Keybinds dead? — diagnose & revive" \
         | rofi -dmenu -i -p "󰍜 Tools" \
             -mesg "Type to search: <b>wall</b>, <b>bar</b>, <b>remind</b>, <b>key</b>… — every tool is here" \
             -theme-str 'listview { lines: 16; } window { width: 640px; }')
@@ -497,6 +498,7 @@ main_menu() {
         *"edit Hyprland")        kitty --title "hyprland.conf" sh -c "\${EDITOR:-nvim} '$CONF'; hyprctl reload" & ;;
         *"edit bar"*)            kitty --title "waybar config" sh -c "\${EDITOR:-nvim} '$HOME/.config/waybar/config' '$HOME/.config/waybar/style.css'; '$HOME/.local/bin/hypr-tools.sh' restart-bar" & ;;
         *"reload Hyprland")      hyprctl reload && notify-send "Hyprland" "Config reloaded ✔" ;;
+        *"Keybinds dead"*)       "$HOME/.local/bin/keybind-doctor.sh" ;;
     esac
 }
 

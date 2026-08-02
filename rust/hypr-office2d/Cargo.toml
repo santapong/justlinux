@@ -1,0 +1,15 @@
+[package]
+name = "hypr-office2d"
+version = "0.1.0"
+edition = "2021"
+description = "The 2D office — desks at x,y, agents that walk, a meeting room for workflows. Born in Rust (docs/rust-migration.md rung 2)."
+
+[dependencies]
+hyprdesk = { path = "../hyprdesk", features = ["draw"] }
+smithay-client-toolkit = "0.19.2"
+wayland-client = "0.31"
+calloop = "0.14"
+calloop-wayland-source = "0.4"
+tiny-skia = "0.11"
+signal-hook = "0.3"
+serde_json = "1"

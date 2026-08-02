@@ -119,10 +119,15 @@ def signal_widget(name):
     if not proc:
         return False
     try:
-        r = subprocess.run(["pkill", "-USR1", "-xf",
-                            f"python3 {HOME}/.local/bin/{proc}"],
-                           capture_output=True, timeout=3)
-        return r.returncode == 0
+        # the widget may be the python script or the rust binary — try both
+        # exact cmdline forms (-xf stays mandatory, see comment above)
+        for cmdline in (f"python3 {HOME}/.local/bin/{proc}",
+                        f"{HOME}/.local/bin/{proc}"):
+            r = subprocess.run(["pkill", "-USR1", "-xf", cmdline],
+                               capture_output=True, timeout=3)
+            if r.returncode == 0:
+                return True
+        return False
     except Exception:
         return False
 
