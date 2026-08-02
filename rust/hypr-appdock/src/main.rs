@@ -162,6 +162,7 @@ struct Btn {
 }
 
 #[derive(PartialEq, Clone, Copy)]
+#[repr(u8)]
 enum EdgeKind {
     DockBottom,
     DockTop,
@@ -1038,6 +1039,9 @@ fn main() {
                     continue;
                 }
                 app.surfs[i].dwell_since = None;
+                if std::env::var("HYPRDOCK_DEBUG").is_ok() {
+                    eprintln!("dwell fire: {mon} kind {}", kind as u8);
+                }
                 let st = app.states.get(&mon).cloned().unwrap_or_default();
                 if st.fullscreen {
                     continue; // same rule as the docks
@@ -1228,7 +1232,7 @@ impl LayerShellHandler for App {
         _: &Connection,
         _: &QueueHandle<Self>,
         layer: &LayerSurface,
-        _: LayerSurfaceConfigure,
+        configure: LayerSurfaceConfigure,
         _: u32,
     ) {
         if let Some(i) = self
@@ -1236,6 +1240,17 @@ impl LayerShellHandler for App {
             .iter()
             .position(|s| s.layer.as_ref().is_some_and(|l| l.wl_surface() == layer.wl_surface()))
         {
+            // adopt the granted size: strips ask for width 0 (= stretch),
+            // and drawing from the stored 0 attached a 1×4 buffer — a
+            // surface IS its buffer, so the strip was one pixel wide and
+            // unhoverable (found live: zero pointer events ever arrived)
+            let (w, h) = configure.new_size;
+            if w > 0 {
+                self.surfs[i].width = w;
+            }
+            if h > 0 {
+                self.surfs[i].height = h;
+            }
             self.surfs[i].configured = true;
             self.draw_surf(i);
         }
@@ -1256,6 +1271,9 @@ impl SeatHandler for App {
     ) {
         if capability == Capability::Pointer && self.pointer.is_none() {
             self.pointer = self.seat_state.get_pointer(qh, &seat).ok();
+            if std::env::var("HYPRDOCK_DEBUG").is_ok() {
+                eprintln!("pointer registered: {}", self.pointer.is_some());
+            }
         }
     }
     fn remove_capability(
@@ -1297,6 +1315,10 @@ impl PointerHandler for App {
                             }
                         } else if self.surfs[i].dwell_since.is_none() {
                             self.surfs[i].dwell_since = Some(Instant::now());
+                            if std::env::var("HYPRDOCK_DEBUG").is_ok() {
+                                eprintln!("strip enter: {} {:?}", self.surfs[i].mon,
+                                          self.surfs[i].kind as u8);
+                            }
                         }
                     }
                 }
