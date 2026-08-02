@@ -4,6 +4,38 @@ All notable changes to this desktop. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] — 2026-08-02
+
+### Changed
+
+- **Every resident surface is now Rust.** The migration ladder completed:
+  hypr-viz (3.7 MB vs ~55), hypr-office2d (11 MB), hypr-pet (10 MB),
+  hypr-cardhost (12 MB vs ~59), hypr-appdock (14 MB) and the Claude
+  Studio launcher + sidebar (4.4 MB, ratatui) all ship as binaries from
+  `rust/`. The resident fleet dropped from ~330 MB to ~56 MB with CPU
+  flat or better. Python remains where the plan keeps it: Settings,
+  Launcher, Kanban and the dock picker (`hypr-appdock-picker`).
+  Every port was parity-proven against its python original — grid
+  placement (1,584 cases), card templates (14, byte-identical), row
+  measurement (exact), live card geometry (14/14 pixel-identical),
+  session rows (diff-identical), viz bands under a real 440 Hz tone.
+- `install.sh` builds and installs all six binaries when cargo exists;
+  `desktop-widgets.sh` and Settings guard both python and binary
+  cmdline forms.
+
+### Fixed
+
+- **Smart-bar reveal and dock reveal actually work.** The 4 px edge
+  strips were one pixel wide since birth: a stretch-anchored layer
+  surface must adopt the compositor-granted size before drawing, or the
+  attached 1 px buffer IS the surface. Found by instrumenting pointer
+  events live — zero had ever arrived.
+- **A tucked waybar is now invisible.** SIGUSR1 "hide" only drops it to
+  the bottom layer, still drawn over bare wallpaper; waybar's documented
+  `.hidden` class now styles to opacity 0.
+- `hyprdesk::conf_set` wrote `key = value` where the fleet grammar is
+  `key=value` — shell `grep "^key="` readers missed rust-written keys.
+
 ## [1.2.0] — 2026-07-30
 
 ### Added
