@@ -245,7 +245,26 @@ python called apply_visibility inside set_suspend), bar-pin toggles
 via the installed path. Cost: 0.10% CPU / 14.1 MB RSS. Not ported:
 button tooltips (layer surfaces have none — documented degradation).
 
-## Rung 4 — studio sidebar in ratatui, costs named
+## Rung 4 — COMPLETE, swapped 2 Aug 2026
+
+rust/hypr-studio ships all modes: launch (summon-or-spawn), --sidebar
+(ratatui, hand-rolled tree + confirm dialog), --split, --palette (fzf,
+choose-tree fallback), plus a new --style verb that re-dresses a LIVE
+studio — used at the swap moment, since the old bindings named the
+python cmdline, and useful for wallpaper recolors after.
+style_tmux's format strings are copied verbatim (ranges, no-scrollport,
+the run-shell ✕ path, session-qualified set-option). session_rows moved
+into hyprdesk::sessions and is PARITY-DIFFED against the python
+(python vs rust dumps identical; the one residual line was this
+session's own transcript changing mtime between runs). The sidebar
+honours the whole learned contract: first-click-aims, q-confirm naming
+its stake (q/Esc/Enter cancel, Tab+Enter kills), 6 s signature-checked
+reload with cursor/expansion restore, 30 s rename pass. Acceptance ran
+against the live studio from a scratch tmux server via capture-pane,
+then window 0 was respawned in place — tabs untouched, 4.2 MB RSS.
+Markup injection is structurally gone: ratatui spans carry no markup.
+
+## Rung 4 (original scoping) — studio sidebar in ratatui, costs named
 
 The studio is mostly tmux orchestration (36 `tmux(...)` call sites —
 trivial subprocess work in any language). The Rust cost is the Textual
