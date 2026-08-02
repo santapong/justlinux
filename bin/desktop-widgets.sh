@@ -43,6 +43,7 @@ do_stop() {
     pkill -xf "$OFFICE2D" 2>/dev/null
     pkill -xf "python3 $VIZ" 2>/dev/null
     pkill -xf "python3 $DOCK" 2>/dev/null
+    pkill -xf "$DOCK" 2>/dev/null
     pkill -xf "python3 $SERWATCH" 2>/dev/null
     pkill -xf "python3 $CARDHOST" 2>/dev/null
     pkill -xf "$CARDHOST" 2>/dev/null
@@ -54,6 +55,7 @@ do_stop() {
             pgrep -xf "python3 $PET" >/dev/null 2>&1 ||
             pgrep -xf "$PET" >/dev/null 2>&1 ||
             pgrep -xf "python3 $DOCK" >/dev/null 2>&1 ||
+            pgrep -xf "$DOCK" >/dev/null 2>&1 ||
             pgrep -xf "python3 $CARDHOST" >/dev/null 2>&1 ||
             pgrep -xf "$CARDHOST" >/dev/null 2>&1 ||
             pgrep -xf "python3 $OFFICE" >/dev/null 2>&1 ||
@@ -84,8 +86,9 @@ do_start() {   # $want_viz=1 forces viz back up even when the conf says off
     # its own dock enabled (dock_<MON>=on) even with apps=off
     if [ "$(setting apps on)" = "on" ] ||
        grep -qsE '^dock_[A-Za-z0-9_]+=on' "$CONF"; then
-        pgrep -xf "python3 $DOCK" >/dev/null ||
+        if ! pgrep -xf "python3 $DOCK" >/dev/null && ! pgrep -xf "$DOCK" >/dev/null; then
             "$DOCK" >/dev/null 2>&1 9>&- &
+        fi
     fi
     pgrep -xf "python3 $SERWATCH" >/dev/null ||
         "$SERWATCH" >/dev/null 2>&1 9>&- &

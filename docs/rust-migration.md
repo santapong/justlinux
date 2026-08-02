@@ -220,6 +220,31 @@ desktop-widgets.sh guards both cmdline forms and install.sh builds
 `-p hypr-cardhost`. Remaining resident python: appdock (rung 3c),
 then studio (rung 4, LAST).
 
+## Rung 3c — appdock, hybrid by design (2 Aug 2026)
+
+**COMPLETE — swapped 2 Aug 2026.** rust/hypr-appdock ports the resident
+half: per-monitor docks (PNG icons via tiny-skia's native decoder,
+2-letter fallback), 4px reveal strips with the 180 ms dwell and 600 ms
+hide grace, the smart waybar (SIGUSR1 toggle + 400 ms cursor poll), the
+Hyprland event socket with EOF→poll fallback, pins.json v2 under the
+shared flock, and the full ctl vocabulary — ping|reload|reload-theme|
+bar-pin|show-all|resume — with the exit-if-owned probe. Auto-hide
+destroys/recreates the LayerSurface instead of GTK map/unmap.
+
+The PICKER stays python on purpose: a GTK search dialog is exactly the
+app class the plan keeps in python. It ships as `hypr-appdock-picker`
+(the old python file, unchanged); the rust ＋ button — and the rust
+binary's own `--picker` flag, kept for old callers — exec it, and its
+pins.json edits propagate back through the 2 s mtime watch.
+
+Live acceptance: 3 docks + 6 strips on the exact python namespaces
+(hypr-appdock-<san>, hypr-dockedge-{bottom,top}-<san>), show-all maps
+3 → resume unmaps to 0 (caught live: resume needed a refresh_soon — the
+python called apply_visibility inside set_suspend), bar-pin toggles
+"ok pinned"/"ok released", unknown verbs → err, hypr-arrange interop
+via the installed path. Cost: 0.10% CPU / 14.1 MB RSS. Not ported:
+button tooltips (layer surfaces have none — documented degradation).
+
 ## Rung 4 — studio sidebar in ratatui, costs named
 
 The studio is mostly tmux orchestration (36 `tmux(...)` call sites —

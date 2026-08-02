@@ -288,6 +288,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 
 [[package]]
+name = "hypr-appdock"
+version = "0.1.0"
+dependencies = [
+ "calloop 0.14.4",
+ "calloop-wayland-source 0.4.1",
+ "hyprdesk",
+ "libc",
+ "serde_json",
+ "signal-hook",
+ "smithay-client-toolkit",
+ "tiny-skia",
+ "wayland-client",
+]
+
+[[package]]
 name = "hypr-cardhost"
 version = "0.1.0"
 dependencies = [
