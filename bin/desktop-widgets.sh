@@ -33,7 +33,7 @@ exec 9>"${XDG_RUNTIME_DIR:-/tmp}/desktop-widgets.lock"
 # a wallpaper change because wallpaper.sh runs under `set -e`.
 flock -w 10 9 2>/dev/null || echo "desktop-widgets: lock busy, proceeding" >&2
 
-viz_up() { pgrep -xf "python3 $VIZ" >/dev/null 2>&1; }
+viz_up() { pgrep -xf "python3 $VIZ" >/dev/null 2>&1 || pgrep -xf "$VIZ" >/dev/null 2>&1; }
 
 do_stop() {
     pkill -f "conky -c $WIDGET_DIR" 2>/dev/null
@@ -42,6 +42,7 @@ do_stop() {
     pkill -xf "python3 $OFFICE" 2>/dev/null
     pkill -xf "$OFFICE2D" 2>/dev/null
     pkill -xf "python3 $VIZ" 2>/dev/null
+    pkill -xf "$VIZ" 2>/dev/null
     pkill -xf "python3 $DOCK" 2>/dev/null
     pkill -xf "$DOCK" 2>/dev/null
     pkill -xf "python3 $SERWATCH" 2>/dev/null
@@ -60,7 +61,8 @@ do_stop() {
             pgrep -xf "$CARDHOST" >/dev/null 2>&1 ||
             pgrep -xf "python3 $OFFICE" >/dev/null 2>&1 ||
             pgrep -xf "python3 $SERWATCH" >/dev/null 2>&1 ||
-            pgrep -xf "python3 $VIZ" >/dev/null 2>&1 || break
+            pgrep -xf "python3 $VIZ" >/dev/null 2>&1 ||
+            pgrep -xf "$VIZ" >/dev/null 2>&1 || break
         sleep 0.1
     done
 }
@@ -116,8 +118,9 @@ do_start() {   # $want_viz=1 forces viz back up even when the conf says off
     # viz never autostarts at login: only the conf toggle or a bounce that
     # found it already running (ALT+SHIFT+Y leaves no trace in the conf)
     if [ "$(setting viz off)" = "on" ] || [ "$want_viz" = 1 ]; then
-        pgrep -xf "python3 $VIZ" >/dev/null ||
+        if ! pgrep -xf "python3 $VIZ" >/dev/null && ! pgrep -xf "$VIZ" >/dev/null; then
             "$VIZ" >/dev/null 2>&1 9>&- &
+        fi
     fi
 }
 
@@ -173,6 +176,7 @@ restart-viz)
     # AFTER writing viz=off, so remembering "it was up" would restart it and
     # make the OFF switch a no-op. The conf is authoritative for this verb.
     pkill -xf "python3 $VIZ" 2>/dev/null
+    pkill -xf "$VIZ" 2>/dev/null
     for _ in 1 2 3 4 5 6 7 8 9 10; do
         pgrep -xf "python3 $VIZ" >/dev/null 2>&1 || break
         sleep 0.1

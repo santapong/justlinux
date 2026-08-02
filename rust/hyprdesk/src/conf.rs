@@ -71,7 +71,7 @@ pub fn conf_set(key: &str, value: &str) {
     for line in old.lines() {
         let k = line.splitn(2, '=').next().unwrap_or("").trim();
         if k == key {
-            out.push_str(&format!("{key} = {value}\n"));
+            out.push_str(&format!("{key}={value}\n"));
             seen = true;
         } else {
             out.push_str(line);
@@ -79,7 +79,7 @@ pub fn conf_set(key: &str, value: &str) {
         }
     }
     if !seen {
-        out.push_str(&format!("{key} = {value}\n"));
+        out.push_str(&format!("{key}={value}\n"));
     }
     let tmp = conf.with_file_name("widgets.conf.tmp");
     if let Ok(mut f) = fs::File::create(&tmp) {
