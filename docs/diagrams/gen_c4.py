@@ -183,6 +183,8 @@ def context():
                "to-dos, dailies, habits, tags")
     d.external(140, 590, 220, 76, "Data APIs", "HTTP",
                "GitHub, CoinGecko, wttr.in")
+    d.external(780, 590, 220, 76, "Docker / k8s", "daemon + kubectl",
+               "containers, compose, pods")
     d.arrow(520, 150, 520, 246, "uses", lx=530, ly=200, anchor="start")
     d.arrow(370, 300, 266, 300, "lays out surfaces on", lx=318, ly=286)
     d.arrow(400, 370, 300, 428, "hides and reveals", lx=250, ly=400)
@@ -193,6 +195,8 @@ def context():
             lx=530, ly=470, anchor="start")
     d.arrow(430, 372, 300, 586, "polls, caches, marks stale",
             lx=372, ly=520, anchor="start")
+    d.arrow(620, 372, 800, 586, "controls, tails logs",
+            lx=640, ly=520, anchor="start")
     d.note(24, 676, "External systems are grey. waybar is outside the "
                     "system on purpose: the fleet drives it, it is not "
                     "part of it.")
@@ -202,50 +206,70 @@ def context():
 # ===================== Level 2 — Containers =========================
 def containers():
     """Laid out in layers, with every connector running in a clear
-    channel between boxes. An earlier version drew the true relationships
-    as straight lines and they went through four boxes each — a diagram
-    you have to squint past is worse than one that says less."""
-    d = Diagram("Containers — justlinux desktop (C4 level 2)", 1240, 1010)
-    d.boundary(30, 60, 1180, 670, "justlinux desktop fleet [Software System]")
+    channel between boxes. Since v1.4.0 the RESIDENT row is 100% Rust
+    (4.65% CPU / 64 MB total, measured); python remains only where a
+    process runs on demand and exits — the permanently-hybrid policy
+    (docs/language-policy.md)."""
+    d = Diagram("Containers — justlinux desktop (C4 level 2)", 1240, 1080)
+    d.boundary(30, 60, 1180, 740, "justlinux desktop fleet [Software System]")
+    d.note(56, 88, "RESIDENT — always running, all Rust "
+                   "(rust/, one binary each, ~2-16 MB)")
     xs = [56, 286, 516, 746, 976]
-    yA = 92
+    yA = 100
     for x, (n, k, dsc) in zip(xs, [
-            ("hypr-cardhost", "Python / GTK3",
-             "all 14 glass cards from TOML, in one process"),
-            ("hypr-appdock", "Python / GTK3",
-             "per-monitor docks and the smart top bar"),
+            ("hypr-cardhost", "Rust / layer-shell",
+             "all 14 glass cards from TOML, one process, ctl socket"),
+            ("hypr-appdock", "Rust / layer-shell",
+             "per-monitor docks, reveal strips, the smart top bar"),
+            ("hypr-office2d", "Rust / layer-shell",
+             "the floor office: a walking agent per Claude session"),
+            ("hypr-pet", "Rust / layer-shell",
+             "the desktop creatures"),
+            ("serial-watch", "Rust",
+             "board hotplug toasts; busts the robotics cache")]):
+        d.box(x, yA, 210, 96, n, k, dsc)
+    yB = 228
+    for x, (n, k, dsc) in zip(xs, [
+            ("hypr-claude-studio", "Rust / kitty+tmux+ratatui",
+             "tabbed session workspace; sidebar is tab 0"),
+            ("hypr-docker", "Rust / ratatui",
+             "containers, compose, images, logs, a Kubernetes pane"),
+            ("hypr-viz", "Rust / layer-shell",
+             "ambient audio visualizer (toggle, not always-on)"),
+            ("hypr-launcher", "Python / Textual",
+             "apps, windows, wallpaper, tools, session recall"),
+            ("hypr-settings", "Python / Textual",
+             "every setting; network, widgets, MCP, Habitica")]):
+        d.box(x, yB, 210, 96, n, k, dsc)
+    d.note(746, 220, "ON DEMAND — opens, does its job, exits (zero resident cost)")
+    yC = 356
+    for x, (n, k, dsc) in zip(xs, [
+            ("hypr-kanban", "Python / Textual",
+             "the Habitica board: today, sprint, week"),
             ("hypr-arrange", "Python / GTK3",
              "ALT+SHIFT+E grid edit mode for movable surfaces"),
             ("hypr-widgetpicker", "Python / GTK3",
              "add, remove and parameterise cards"),
-            ("hypr-claude-office", "Python / GTK3",
-             "a desk per live Claude session")]):
-        d.box(x, yA, 210, 96, n, k, dsc)
-    yB = 224
-    for x, (n, k, dsc) in zip(xs, [
-            ("hypr-settings", "Textual TUI",
-             "every setting, plus Habitica keys and MCP servers"),
-            ("hypr-launcher", "Textual TUI",
-             "apps, windows, wallpaper, tools, session recall"),
-            ("hypr-kanban", "Textual TUI",
-             "the Habitica board: today, sprint, week"),
-            ("hypr-claude-studio", "kitty + tmux + Textual",
-             "tabbed session workspace with splits"),
+            ("appdock picker", "Python / GTK3",
+             "the dock's searchable app checklist"),
             ("hypr-tools.sh", "bash",
              "the dispatcher every keybind goes through")]):
-        d.box(x, yB, 210, 96, n, k, dsc)
-    yC = 356
-    d.box(56, yC, 320, 90, "desktop-widgets.sh", "bash",
-          "exec-once supervisor: spawns and restarts the fleet at login")
-    d.box(396, yC, 320, 90, "widget-*.sh", "bash",
+        d.box(x, yC, 210, 96, n, k, dsc)
+    yD = 484
+    d.box(56, yD, 320, 84, "desktop-widgets.sh", "bash",
+          "exec-once supervisor; guards BOTH python and binary cmdlines")
+    d.box(396, yD, 320, 84, "widget-*.sh", "bash",
           "data fetchers; --fields emits key=value for the card host")
-    d.box(736, yC, 450, 90, "wallpaper.sh · check-contrast.sh", "bash",
-          "re-theme the desktop and refuse a palette that is unreadable")
-    yD = 496
-    d.box(56, yD, 1130, 76, "lib/hyprdesk", "Python library",
-          "conf · theme · layer-shell via ctypes · grid · rows · pixel "
-          "icons · claudesessions · habitica · secrets")
-    yE = 606
+    d.box(736, yD, 450, 84, "wallpaper.sh · check-contrast.sh", "bash",
+          "re-theme everything (wallust -> fleet USR2/ctl -> kitty USR1)")
+    yE = 600
+    d.box(56, yE, 550, 76, "rust/hyprdesk", "Rust crate",
+          "conf · theme · grid · cardspec · rows · draw · sessions — "
+          "parity-tested against the python twin")
+    d.box(636, yE, 550, 76, "lib/hyprdesk", "Python library",
+          "same contracts for the on-demand python: conf · theme · "
+          "layer · claudesessions · habitica · secrets")
+    yF = 700
     for x, (n, k, dsc) in zip([56, 326, 596, 866], [
             ("widgets.conf", "key=value",
              "single source of truth; atomic flock'd writes"),
@@ -254,37 +278,30 @@ def containers():
              "Habitica credentials — never the public repo"),
             ("~/.claude", "JSONL + JSON",
              "Claude's transcripts, job state, daemon roster")]):
-        d.store(x, yE, 240, 104, n, k, dsc)
-    # channels between boxes, so nothing is drawn over anything
-    for x in (386, 726):
-        d.arrow(x, yD, x, yC + 94)
-    for x in (216, 556, 826, 1096):
-        d.arrow(x, yE + 2, x, yD + 80)
-    d.note(60, yD - 14, "every surface above imports it")
-    d.note(60, yE - 12, "read and written only through hyprdesk.conf, "
-                        "confwrite and secrets")
+        d.store(x, yF, 240, 84, n, k, dsc)
+    d.note(60, yF - 10, "the FILES are the interface: both libraries parse the "
+                        "same bytes, so the two implementations cannot drift "
+                        "apart without a visible symptom")
     ext = [("Hyprland", "compositor", "hyprctl -j, socket2 events",
             "hosted by"),
            ("wallust", "palette", "wallpaper colours", "re-colours from"),
-           ("Habitica", "REST v3", "tasks, tags, scoring",
-            "reads and writes"),
+           ("Docker / kubectl", "daemons",
+            "ps, compose, logs, pods", "controls"),
            ("Claude Code", "CLI + daemon",
-            "claude --resume, claude mcp, jobs", "opens and reads")]
+            "claude --resume, jobs, transcripts", "opens and reads")]
     for x, (n, k, dsc, rel) in zip([56, 326, 596, 866], ext):
-        d.external(x, 800, 240, 96, n, k, dsc)
-        # the system points AT what it leans on, not the other way round
-        d.arrow(x + 120, 736, x + 120, 796, rel, lx=x + 128, ly=770,
+        d.external(x, 880, 240, 96, n, k, dsc)
+        d.arrow(x + 120, 804, x + 120, 876, rel, lx=x + 128, ly=845,
                 anchor="start")
-    d.note(60, 960,
+    d.note(60, 1030,
            "Two rules hold it together. One config file: everything "
            "user-tunable lives in widgets.conf and every write goes "
            "through one atomic writer.\n"
-           "One process per concern over one library: every GTK surface "
-           "is a hyprdesk.layer.LayerWindow themed by hyprdesk.theme, so "
-           "the desktop re-colours together.\n"
-           "Terminal panels take the palette and the ink hierarchy but "
-           "never the pixel icons — Textual and tmux draw characters, "
-           "not sprites.")
+           "One process per concern over one SHARED CONTRACT: palette "
+           "roles, conf grammar, ctl verbs and layer namespaces are "
+           "identical in both languages,\n"
+           "so the desktop re-colours together. Terminal panels take the "
+           "palette and the ink hierarchy but never the pixel icons.")
     d.write("c4-container.svg")
 
 
@@ -489,7 +506,7 @@ def smartbar():
     d.person(60, 110, 200, 66, "santapong", "moves the pointer")
     d.component(320, 96, 230, 96, "EdgeStrip (top)", "4 px layer surface",
                 "invisible; 180 ms dwell")
-    d.component(320, 260, 230, 96, "Manager.bar_*", "Python",
+    d.component(320, 260, 230, 96, "bar_* (appdock)", "Rust",
                 "the smart-bar controller")
     d.external(650, 96, 230, 96, "waybar", "panel",
                "runs exclusive: false")
@@ -519,6 +536,179 @@ def smartbar():
     d.write("c4-dynamic-smartbar.svg")
 
 
+# ===================== 4+1 — Process view ===========================
+def process_view():
+    """Kruchten 4+1 process view: what RUNS, and every IPC edge between
+    the running things. This is the diagram to read before touching a
+    socket, a signal or the conf file."""
+    d = Diagram("Process view — runtime processes and IPC (4+1)", 1240, 800)
+    d.boundary(30, 56, 720, 380, "resident fleet [one Rust process each]")
+    d.component(60, 96, 200, 76, "hypr-cardhost", "ctl: hyprcard.sock",
+                "ping | reload | reload-theme")
+    d.component(290, 96, 200, 76, "hypr-appdock", "ctl: hypr-appdock.sock",
+                "+ bar-pin | show-all | resume")
+    d.component(520, 96, 200, 76, "hypr-office2d", "SIGUSR1 / USR2",
+                "reposition / retheme")
+    d.component(60, 200, 200, 76, "hypr-pet", "SIGUSR1 / USR2", "")
+    d.component(290, 200, 200, 76, "hypr-viz", "SIGUSR1 / USR2",
+                "run-again kills (toggle)")
+    d.component(520, 200, 200, 76, "serial-watch", "2 s poll",
+                "/dev/serial/by-id")
+    d.component(60, 304, 430, 76, "claude-studio tmux server",
+                "own socket -L claude-studio",
+                "sidebar (ratatui) is pane 0; tabs run claude")
+    d.component(520, 304, 200, 76, "hypr-docker", "child streams",
+                "docker/kubectl logs -f")
+    d.external(800, 96, 180, 76, "Hyprland", "socket2",
+               "events: workspaces, monitors")
+    d.external(800, 200, 180, 76, "waybar", "SIGUSR1/USR2",
+               "toggle / restyle")
+    d.external(800, 304, 180, 76, "docker daemon", "unix socket",
+               "via the docker CLI")
+    d.store(1010, 96, 180, 76, "widgets.conf", "flock + rename",
+            "every writer atomic")
+    d.store(1010, 200, 180, 76, "pins.json", "flock",
+            "dock <-> picker handshake")
+    d.store(1010, 304, 180, 76, "~/.claude", "mtime watch",
+            "transcripts drive trees")
+    d.arrow(724, 134, 796, 134, "watch", ly=126)
+    d.arrow(724, 238, 796, 238, "SIGUSR1", ly=230)
+    d.arrow(724, 342, 796, 342, "spawn", ly=334)
+    d.arrow(984, 134, 1006, 134)
+    d.arrow(984, 238, 1006, 238)
+    d.arrow(984, 342, 1006, 342)
+    d.note(40, 470,
+           "Contracts every process honours:\n"
+           "  - ctl sockets answer ok/err and PROBE-EXIT if another "
+           "instance owns the endpoint (no duplicate fleets)\n"
+           "  - USR1 = reposition, USR2 = retheme, everywhere a surface "
+           "can move or re-ink\n"
+           "  - conf writes: flock + tmp + rename, undo file kept; "
+           "readers grep key=value (NO spaces — measured trap)\n"
+           "  - process guards match BOTH cmdline forms (python3 <path> "
+           "and <path>) with pgrep/pkill -xf, never -f\n"
+           "  - async child streams carry generation tokens: a "
+           "superseded fetch can never write into the pane it lost")
+    d.note(40, 720,
+           "Wake sources, not busy loops: calloop timers (cardhost 1 s, "
+           "appdock 200 ms), tmux/ratatui event polls,\n"
+           "socket2 line events. Total resident cost, measured 4 Aug "
+           "2026: 4.65% CPU / 64 MB.")
+    d.write("c4-process-view.svg")
+
+
+# ===================== 4+1 — Development view =======================
+def development():
+    d = Diagram("Development view — repo layout and build (4+1)", 1240, 620)
+    d.boundary(30, 56, 560, 470, "rust/ [cargo workspace]")
+    d.component(56, 96, 240, 70, "hyprdesk", "shared crate",
+                "conf, theme, grid, cardspec, rows, draw, sessions")
+    d.component(316, 96, 240, 70, "examples/", "parity harnesses",
+                "run python + rust on real data, diff outputs")
+    for i, (n, dsc) in enumerate([
+            ("hypr-cardhost", "cards"), ("hypr-appdock", "docks"),
+            ("hypr-office2d", "office"), ("hypr-pet", "pet"),
+            ("hypr-viz", "visualizer"), ("hypr-studio", "studio"),
+            ("hypr-docker", "docker+k8s"), ("hypr-serialwatch", "hotplug")]):
+        x = 56 + (i % 2) * 260
+        y = 196 + (i // 2) * 80
+        d.component(x, y, 240, 64, n, "bin crate", dsc)
+    d.boundary(640, 56, 560, 470, "python + bash [on-demand]")
+    d.box(666, 96, 240, 70, "bin/", "python TUIs + shell",
+          "settings, launcher, kanban, pickers, arrange, widget-*.sh")
+    d.box(926, 96, 240, 70, "lib/hyprdesk/", "python library",
+          "the same contracts, for the on-demand half")
+    d.box(666, 196, 500, 64, "config/", "deployed dotfiles",
+          "hypr, waybar, kitty, wallust templates, applications")
+    d.box(666, 290, 500, 64, "docs/ + docs/diagrams/gen_c4.py", "this",
+          "diagrams are GENERATED - edit the script, not the svg")
+    d.box(666, 384, 500, 64, "install.sh", "one entry point",
+          "copies bin+lib+config, then cargo builds and installs the "
+          "eight binaries LAST so the binary wins")
+    d.note(40, 560,
+           "Branch model: develop is the integration branch, main gets "
+           "--no-ff release merges + annotated tags (v1.4.0).\n"
+           "Policy: docs/language-policy.md — resident = Rust, "
+           "on-demand = python, the files are the interface.")
+    d.write("c4-development-view.svg")
+
+
+# ===================== 4+1 — Physical view ==========================
+def deployment():
+    d = Diagram("Physical view — where things land and draw (4+1)", 1240, 640)
+    d.boundary(30, 56, 1180, 300, "one machine [Kali linux, Wayland]")
+    d.store(56, 96, 260, 84, "~/.local/bin", "install target",
+            "8 rust binaries + python tools; PATH runs these")
+    d.store(346, 96, 260, 84, "~/.config", "hypr, waybar, kitty,\n"
+            "wallust, conky", "widgets.conf lives in conky/")
+    d.store(636, 96, 260, 84, "~/.local/state + runtime", "pins, caches,\n"
+            "ctl sockets", "$XDG_RUNTIME_DIR/*.sock")
+    d.store(926, 96, 260, 84, "~/.claude", "transcripts",
+            "sessions the studio and office render")
+    d.component(56, 220, 360, 100, "3 monitors x layer shell",
+                "background < bottom < top < overlay",
+                "cards+office+viz on bottom; docks, strips, bar on top; "
+                "arrange overlay on top of everything")
+    d.component(446, 220, 360, 100, "kitty windows", "floating, blurred",
+                "studio (hyprclaudestudio), docker (hyprdocker), "
+                "exec shells (hyprdockerexec)")
+    d.component(836, 220, 350, 100, "layerrules", "blur + ignore_alpha",
+                "namespaces are the CONTRACT: hypr-card-*, "
+                "hypr-appdock*, hypr-dockedge-*, hypr-viz")
+    d.note(40, 400,
+           "Install is one script: install.sh copies configs and python, "
+           "then cargo-builds the workspace and installs binaries over "
+           "the python twins.\n"
+           "A box without cargo still works - it simply keeps the python "
+           "fleet. That is the whole portability story, and why the "
+           "python twins stay in bin/.")
+    d.note(40, 500,
+           "Layer discipline: a display-only surface has an EMPTY input "
+           "region; an interactive one claims exactly its pixels.\n"
+           "A stretch-anchored surface must adopt the configure-granted "
+           "size before drawing - a wayland surface IS its buffer "
+           "(the 1 px strip trap, v1.3.0).")
+    d.write("c4-physical-view.svg")
+
+
+# ============ Dynamic — wallpaper recolor (the +1 scenario) =========
+def recolor():
+    d = Diagram("Dynamic — one wallpaper change re-inks everything (+1)",
+                1140, 620)
+    d.person(40, 96, 180, 66, "santapong", "picks a wallpaper")
+    d.component(280, 96, 220, 76, "wallpaper.sh", "bash",
+                "the ONE entry point")
+    d.external(560, 96, 200, 76, "wallust", "palette",
+               "wallpaper -> colours")
+    d.store(820, 96, 260, 76, "generated palettes",
+            "colors.lua, colors-kitty.conf,\ncolors-*.css, colors.conf", "")
+    d.component(280, 260, 220, 76, "rust fleet", "ctl + USR2",
+                "cardhost, appdock, office2d, pet, viz")
+    d.component(560, 260, 200, 76, "kitty windows", "SIGUSR1",
+                "studio + docker + terminals re-ink live")
+    d.component(820, 260, 260, 76, "studio tab bar", "--style",
+                "tmux re-dressed in place")
+    d.component(280, 400, 220, 76, "waybar + swaync", "USR2 / -rs", "")
+    d.component(560, 400, 200, 76, "check-contrast.sh", "gate",
+                "refuses an unreadable palette")
+    d.arrow(224, 130, 276, 130, "runs", ly=122)
+    d.arrow(504, 130, 556, 130, "1", ly=122)
+    d.arrow(764, 130, 816, 130, "2 writes", ly=122)
+    d.arrow(390, 176, 390, 256, "3 reload-theme / USR2", lx=398, ly=215,
+            anchor="start")
+    d.arrow(660, 176, 660, 256, "4 USR1", lx=668, ly=215, anchor="start")
+    d.arrow(950, 176, 950, 256, "5 --style", lx=958, ly=215, anchor="start")
+    d.arrow(390, 340, 390, 396, "6", lx=398, ly=368, anchor="start")
+    d.arrow(660, 340, 660, 396, "7 verify", lx=668, ly=368, anchor="start")
+    d.note(40, 520,
+           "Every step is LIVE - nothing restarts except a python pet "
+           "(bakes its palette at spawn). The v1.4.0 fix that makes this "
+           "true:\nthe pipeline guards match both python and binary "
+           "cmdline forms, so the rust fleet actually hears about the "
+           "new palette.")
+    d.write("c4-dynamic-recolor.svg")
+
+
 if __name__ == "__main__":
     context()
     containers()
@@ -527,4 +717,8 @@ if __name__ == "__main__":
     habitica()
     appdock()
     smartbar()
+    process_view()
+    development()
+    deployment()
+    recolor()
     print("  all diagrams regenerated")

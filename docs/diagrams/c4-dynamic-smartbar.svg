@@ -16,8 +16,8 @@
   </g>
   <rect x="320" y="260" width="230" height="96" rx="8" fill="#85bbf0"/>
   <g text-anchor="middle">
-    <text x="435" y="282" font-size="13" font-weight="600" fill="#0b2545">Manager.bar_*</text>
-    <text x="435" y="297" font-size="10" font-style="italic" fill="#123a63">[Python]</text>
+    <text x="435" y="282" font-size="13" font-weight="600" fill="#0b2545">bar_* (appdock)</text>
+    <text x="435" y="297" font-size="10" font-style="italic" fill="#123a63">[Rust]</text>
     <text x="435" y="312" font-size="10" fill="#123a63">the smart-bar controller</text>
   </g>
   <rect x="650" y="96" width="230" height="96" rx="8" fill="#999999"/>

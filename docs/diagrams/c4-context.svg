@@ -55,6 +55,12 @@
     <text x="250" y="627" font-size="10" font-style="italic" fill="#d0e0f0">[HTTP]</text>
     <text x="250" y="642" font-size="10" fill="#d0e0f0">GitHub, CoinGecko, wttr.in</text>
   </g>
+  <rect x="780" y="590" width="220" height="76" rx="8" fill="#999999"/>
+  <g text-anchor="middle">
+    <text x="890" y="612" font-size="13" font-weight="600" fill="#ffffff">Docker / k8s</text>
+    <text x="890" y="627" font-size="10" font-style="italic" fill="#d0e0f0">[daemon + kubectl]</text>
+    <text x="890" y="642" font-size="10" fill="#d0e0f0">containers, compose, pods</text>
+  </g>
   <line x1="520" y1="150" x2="520" y2="246" stroke="#888888" stroke-width="1.6"/>
   <polygon points="520.0,246.0 517.1,239.6 522.9,239.6" fill="#888888"/>
   <text x="530" y="200" font-size="10" text-anchor="start" fill="#888888">uses</text>
@@ -77,5 +83,8 @@
   <line x1="430" y1="372" x2="300" y2="586" stroke="#888888" stroke-width="1.6"/>
   <polygon points="300.0,586.0 300.9,579.1 305.8,582.0" fill="#888888"/>
   <text x="372" y="520" font-size="10" text-anchor="start" fill="#888888">polls, caches, marks stale</text>
+  <line x1="620" y1="372" x2="800" y2="586" stroke="#888888" stroke-width="1.6"/>
+  <polygon points="800.0,586.0 793.7,582.9 798.1,579.3" fill="#888888"/>
+  <text x="640" y="520" font-size="10" text-anchor="start" fill="#888888">controls, tails logs</text>
   <text x="24" y="676" font-size="10" text-anchor="start" fill="#888888">External systems are grey. waybar is outside the system on purpose: the fleet drives it, it is not part of it.</text>
 </svg>
