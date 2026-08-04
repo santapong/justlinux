@@ -428,6 +428,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hypr-docker"
+version = "0.1.0"
+dependencies = [
+ "crossterm",
+ "hyprdesk",
+ "ratatui",
+ "serde_json",
+]
+
+[[package]]
 name = "hypr-office2d"
 version = "0.1.0"
 dependencies = [
