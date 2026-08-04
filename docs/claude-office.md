@@ -247,3 +247,23 @@ the bare command, which would *close* the office you just clicked to see.
 - [`architecture.md`](architecture.md) — the fleet as a whole
 - `bin/hypr-claude-studio` — tabbed session workspace (**ALT+CTRL+U**)
 - `lib/hyprdesk/claudesessions.py` — shared session discovery
+
+## The design-handoff floor (Aug 2026)
+
+`office_layout = floor` is now the FULLSCREEN 1600×900 scene from the
+design handoff (docs/design-brief-terminals.md): role-colored worker
+sprites (body + monitor screen wear the state — a worker is never
+accent), 224×192 desk plates with two-line glass labels, the meeting
+room panel showing the workflow's real facts (name, live subagent
+count, minis — no invented progress), header counts (needs-you / working
+/ asleep / to-pick-up, ghosts counted separately), a bottom hover strip
+with the accent rule, and the walk-in along the dashed door path as the
+only cross-floor motion. needs-you moves nothing, by design law.
+
+The input region is the union of desk plates and the meeting room —
+the rest of the desktop stays click-through. `office_motion = off`
+substitutes stillness (workers appear seated, state fully readable
+from color) rather than deleting the scene. CPU holds the <2% law via
+per-slot damage tracking: only the rects that animate are copied,
+swapped and damaged each tick. The grid layout (python) remains the
+compact arrange-movable widget.
