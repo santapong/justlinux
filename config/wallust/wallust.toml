@@ -23,3 +23,6 @@ wlogout.target = "~/.config/wlogout/colors.css"
 
 conky.template = "colors-conky.lua"
 conky.target = "~/.config/conky/colors.lua"
+
+kitty.template = "colors-kitty.conf"
+kitty.target = "~/.config/kitty/colors-kitty.conf"
