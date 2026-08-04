@@ -17,6 +17,13 @@ mkdir -p "$HOME/.config"
 for c in config/*/; do
     [ -d "$c" ] || continue
     name=$(basename "$c")
+    if [ "$name" = "applications" ]; then
+        # .desktop entries live under ~/.local/share, not ~/.config
+        mkdir -p "$HOME/.local/share/applications"
+        cp config/applications/*.desktop "$HOME/.local/share/applications/"
+        echo "installed: ~/.local/share/applications/*.desktop"
+        continue
+    fi
     target="$HOME/.config/$name"
     keep "$target"
     cp -r "$c" "$target"

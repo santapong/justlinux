@@ -20,6 +20,9 @@ pub struct Container {
     pub status: String, // human line ("Up 2 hours", "Exited (0) 3 days ago")
     pub cpu: String,    // from docker stats, running only
     pub mem: String,
+    pub project: String, // com.docker.compose.project ("" = standalone)
+    pub project_dir: String, // …project.working_dir, for compose verbs
+    pub compose_file: String, // …project.config_files (first), if it still exists
 }
 
 #[derive(Clone, Default, PartialEq)]
@@ -48,6 +51,14 @@ pub fn ps_all() -> Vec<Container> {
     for line in docker_lines(&["ps", "-a", "--format", "{{json .}}"]) {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
         let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let labels = s("Labels");
+        let label = |key: &str| -> String {
+            labels
+                .split(',')
+                .find_map(|kv| kv.strip_prefix(&format!("{key}=")))
+                .unwrap_or("")
+                .to_string()
+        };
         out.push(Container {
             id: s("ID"),
             name: s("Names"),
@@ -56,14 +67,17 @@ pub fn ps_all() -> Vec<Container> {
             status: s("Status"),
             cpu: String::new(),
             mem: String::new(),
+            project: label("com.docker.compose.project"),
+            project_dir: label("com.docker.compose.project.working_dir"),
+            compose_file: label("com.docker.compose.project.config_files")
+                .split(',')
+                .next()
+                .filter(|f| std::path::Path::new(f).is_file())
+                .unwrap_or("")
+                .to_string(),
         });
     }
-    // running first, then by name — the fleet's "live things lead" order
-    out.sort_by(|a, b| {
-        (a.state != "running")
-            .cmp(&(b.state != "running"))
-            .then(a.name.cmp(&b.name))
-    });
+    out.sort_by(|a, b| a.name.cmp(&b.name));
     out
 }
 
@@ -162,7 +176,7 @@ impl LogSink {
     }
 }
 
-fn stream_into(mut cmd: Command, sink: LogSink) {
+pub fn stream_into(mut cmd: Command, sink: LogSink) {
     std::thread::spawn(move || {
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         let Ok(mut child) = cmd.spawn() else {
@@ -235,4 +249,39 @@ pub fn daemon_version() -> String {
         .first()
         .cloned()
         .unwrap_or_default()
+}
+
+/// compose verbs run against the project's recorded working_dir; a
+/// project whose dir vanished degrades to per-container start/stop.
+pub fn compose_action(verb: &'static str, file: String, project: String, sink: LogSink) {
+    std::thread::spawn(move || {
+        let mut args: Vec<&str> = vec!["compose", "-f", &file, "-p", &project];
+        let extra: Vec<&str> = match verb {
+            "up" => vec!["up", "-d"],
+            v => vec![v],
+        };
+        args.extend(extra);
+        let out = Command::new("docker").args(&args).output();
+        let msg = match out {
+            Ok(o) if o.status.success() => format!("✔ compose {verb} {project}"),
+            Ok(o) => format!(
+                "✘ compose {verb} {project}: {}",
+                String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("").trim()
+            ),
+            Err(e) => format!("✘ compose {verb} {project}: {e}"),
+        };
+        sink.push_status(msg);
+    });
+}
+
+/// Merged, service-prefixed logs for a whole compose project.
+pub fn compose_logs(file: &str, project: &str, sink: LogSink) {
+    let mut cmd = Command::new("docker");
+    cmd.args(["compose", "-f", file, "-p", project, "logs", "-f", "--tail", "200"]);
+    stream_into(cmd, sink);
+}
+
+/// public alias for sibling modules (kube) — same stream semantics.
+pub fn stream_into_pub(cmd: Command, sink: LogSink) {
+    stream_into(cmd, sink);
 }

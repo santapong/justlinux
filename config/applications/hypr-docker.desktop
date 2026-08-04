@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Docker
+Comment=Containers, compose projects, logs, images and Kubernetes — the desktop's control panel
+Exec=/home/santapong/.local/bin/hypr-docker
+Icon=docker-desktop
+Terminal=false
+Categories=Development;System;
