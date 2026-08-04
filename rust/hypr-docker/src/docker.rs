@@ -23,6 +23,7 @@ pub struct Container {
     pub project: String, // com.docker.compose.project ("" = standalone)
     pub project_dir: String, // …project.working_dir, for compose verbs
     pub compose_file: String, // …project.config_files (first), if it still exists
+    pub service: String, // com.docker.compose.service — the short in-project name
 }
 
 #[derive(Clone, Default, PartialEq)]
@@ -75,6 +76,7 @@ pub fn ps_all() -> Vec<Container> {
                 .filter(|f| std::path::Path::new(f).is_file())
                 .unwrap_or("")
                 .to_string(),
+            service: label("com.docker.compose.service"),
         });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -292,4 +294,76 @@ pub fn compose_logs(file: &str, project: &str, sink: LogSink) {
 /// public alias for sibling modules (kube) — same stream semantics.
 pub fn stream_into_pub(cmd: Command, sink: LogSink) {
     stream_into(cmd, sink);
+}
+
+/// "Exited (0) 2 hours ago" → ("exited (0)", "2h"); "Up 3 seconds" →
+/// ("up 3s", ""). The design's status column wants short, aligned facts.
+pub fn short_status(status: &str) -> (String, String) {
+    let s = status.trim();
+    let age = |txt: &str| -> String {
+        // last "N unit ago" run, compressed
+        let words: Vec<&str> = txt.split_whitespace().collect();
+        for w in words.windows(3) {
+            if w[2] == "ago" {
+                let n = w[0];
+                let u = match w[1].trim_end_matches('s') {
+                    "second" => "s",
+                    "minute" => "m",
+                    "hour" => "h",
+                    "day" => "d",
+                    "week" => "w",
+                    "month" => "mo",
+                    "year" => "y",
+                    other => other,
+                };
+                return format!("{n}{u}");
+            }
+        }
+        String::new()
+    };
+    if let Some(rest) = s.strip_prefix("Exited ") {
+        let code = rest.split(')').next().map(|c| format!("exited {c})")).unwrap_or_default();
+        return (code, age(s));
+    }
+    if s.starts_with("Up ") {
+        let mut it = s.split_whitespace();
+        let (_, n, unit) = (it.next(), it.next().unwrap_or(""), it.next().unwrap_or(""));
+        let u = match unit.trim_end_matches('s') {
+            "second" => "s",
+            "minute" => "m",
+            "hour" => "h",
+            "day" => "d",
+            "week" => "w",
+            "month" => "mo",
+            other => other,
+        };
+        return (format!("up {n}{u}"), String::new());
+    }
+    if s.starts_with("Created") {
+        return ("created".into(), "—".into());
+    }
+    (s.to_lowercase().chars().take(16).collect(), age(s))
+}
+
+/// "500MB" / "1.2GB" → bytes, best effort, for repo-group sums.
+pub fn size_bytes(sz: &str) -> f64 {
+    let t = sz.trim();
+    let num: String = t.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+    let v: f64 = num.parse().unwrap_or(0.0);
+    let unit = t[num.len()..].trim();
+    match unit.to_uppercase().as_str() {
+        "KB" | "KIB" => v * 1e3,
+        "MB" | "MIB" => v * 1e6,
+        "GB" | "GIB" => v * 1e9,
+        "TB" => v * 1e12,
+        _ => v,
+    }
+}
+
+pub fn human_gb(bytes: f64) -> String {
+    if bytes >= 1e9 {
+        format!("{:.1} GB", bytes / 1e9)
+    } else {
+        format!("{:.0} MB", bytes / 1e6)
+    }
 }

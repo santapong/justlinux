@@ -109,10 +109,11 @@ enum Pane {
 
 #[derive(Clone, PartialEq)]
 enum RowRef {
-    Header(&'static str),
+    Header(&'static str), // COMPOSE / STANDALONE / IMAGES
     Proj(usize),
     Cont(usize),
-    Img(usize),
+    Repo(usize),          // image repository group
+    Img(usize, usize),    // (repo group, member index into images)
     Blank,
 }
 
@@ -121,6 +122,14 @@ struct Project {
     dir: String,
     members: Vec<usize>, // indexes into containers
     running: usize,
+    expanded: bool,
+    exited_bad: usize, // members with a nonzero exit code
+}
+
+struct Repo {
+    key: String,
+    members: Vec<usize>, // indexes into images
+    bytes: f64,
     expanded: bool,
 }
 
@@ -142,7 +151,12 @@ struct App {
     containers: Vec<docker::Container>,
     images: Vec<docker::Image>,
     projects: Vec<Project>,
-    collapsed: HashSet<String>, // project names the user folded
+    repos: Vec<Repo>,
+    collapsed: HashSet<String>,      // project names the user folded
+    expanded_repos: HashSet<String>, // image repos the user opened (default folded)
+    filter: String,                  // live substring filter ("" = off)
+    filter_input: bool,              // typing in the footer filter
+    paused_at: usize,                // ring length when follow was paused
     rows: Vec<RowRef>,
     sel: usize,
     pane: Pane,
@@ -152,6 +166,7 @@ struct App {
     kube_err: String,
     sel_pod: usize,
     logs: docker::LogSink,
+    logs_for: String, // container id the pane follows ("" = none)
     logs_title: String,
     log_scroll: usize,
     modal: Modal,
@@ -201,6 +216,9 @@ impl App {
                     if c.state == "running" {
                         p.running += 1;
                     }
+                    if c.status.contains("Exited") && !c.status.contains("Exited (0)") {
+                        p.exited_bad += 1;
+                    }
                     if p.dir.is_empty() {
                         p.dir = c.compose_file.clone();
                     }
@@ -211,6 +229,8 @@ impl App {
                     members: vec![i],
                     running: (c.state == "running") as usize,
                     expanded: true,
+                    exited_bad: (c.status.contains("Exited")
+                        && !c.status.contains("Exited (0)")) as usize,
                 }),
             }
         }
@@ -219,34 +239,103 @@ impl App {
             p.expanded = !self.collapsed.contains(&p.name);
         }
         self.projects = projects;
+        // image repositories: registry path -> first segment; local names ->
+        // the hyphen prefix when >=2 share it, else the whole repo
+        let mut repos: Vec<Repo> = Vec::new();
+        let key_of = |repo: &str| -> String {
+            if let Some((head, _)) = repo.split_once('/') {
+                head.to_string()
+            } else if let Some((head, _)) = repo.split_once('-') {
+                head.to_string()
+            } else {
+                repo.to_string()
+            }
+        };
+        // only group under a shared prefix when it is actually shared
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for im in &self.images {
+            *counts.entry(key_of(&im.repo)).or_insert(0) += 1;
+        }
+        for (i, im) in self.images.iter().enumerate() {
+            let k = key_of(&im.repo);
+            let key = if counts.get(&k).copied().unwrap_or(0) >= 2 { k } else { im.repo.clone() };
+            match repos.iter_mut().find(|r| r.key == key) {
+                Some(r) => {
+                    r.members.push(i);
+                    r.bytes += docker::size_bytes(&im.size);
+                }
+                None => repos.push(Repo {
+                    key,
+                    members: vec![i],
+                    bytes: docker::size_bytes(&im.size),
+                    expanded: false,
+                }),
+            }
+        }
+        repos.sort_by(|a, b| b.bytes.partial_cmp(&a.bytes).unwrap_or(std::cmp::Ordering::Equal));
+        for r in repos.iter_mut() {
+            r.expanded = self.expanded_repos.contains(&r.key);
+        }
+        self.repos = repos;
         self.rebuild_rows();
     }
 
     fn rebuild_rows(&mut self) {
         let sel_key = self.rows.get(self.sel).cloned();
-        let mut rows = vec![RowRef::Header("Containers")];
+        let f = self.filter.to_lowercase();
+        let hit = |t: &str| f.is_empty() || t.to_lowercase().contains(&f);
+        let mut rows = Vec::new();
         let mut grouped: HashSet<usize> = HashSet::new();
-        for (pi, p) in self.projects.iter().enumerate() {
-            rows.push(RowRef::Proj(pi));
-            for &m in &p.members {
-                grouped.insert(m);
-                if p.expanded {
-                    rows.push(RowRef::Cont(m));
+        if !self.projects.is_empty() {
+            rows.push(RowRef::Header("COMPOSE"));
+            for (pi, p) in self.projects.iter().enumerate() {
+                for &m in &p.members {
+                    grouped.insert(m);
+                }
+                let member_hit = p
+                    .members
+                    .iter()
+                    .any(|&m| hit(&self.containers[m].name));
+                if !hit(&p.name) && !member_hit {
+                    continue;
+                }
+                rows.push(RowRef::Proj(pi));
+                if p.expanded || (!f.is_empty() && member_hit) {
+                    for &m in &p.members {
+                        if f.is_empty() || hit(&self.containers[m].name) || hit(&p.name) {
+                            rows.push(RowRef::Cont(m));
+                        }
+                    }
                 }
             }
         }
-        for i in 0..self.containers.len() {
-            if !grouped.contains(&i) {
+        let standalone: Vec<usize> = (0..self.containers.len())
+            .filter(|i| !grouped.contains(i) && hit(&self.containers[*i].name))
+            .collect();
+        if !standalone.is_empty() {
+            rows.push(RowRef::Blank);
+            rows.push(RowRef::Header("STANDALONE"));
+            for i in standalone {
                 rows.push(RowRef::Cont(i));
             }
         }
         rows.push(RowRef::Blank);
-        rows.push(RowRef::Header("Images"));
-        for i in 0..self.images.len() {
-            rows.push(RowRef::Img(i));
+        rows.push(RowRef::Header("IMAGES"));
+        for (ri, r) in self.repos.iter().enumerate() {
+            let member_hit = r.members.iter().any(|&m| {
+                hit(&format!("{}:{}", self.images[m].repo, self.images[m].tag))
+            });
+            if !hit(&r.key) && !member_hit {
+                continue;
+            }
+            rows.push(RowRef::Repo(ri));
+            if r.expanded || (!f.is_empty() && member_hit) {
+                for &m in &r.members {
+                    rows.push(RowRef::Img(ri, m));
+                }
+            }
         }
         self.rows = rows;
-        // keep the selection on the same row when it survived the rebuild
         if let Some(k) = sel_key {
             if let Some(i) = self.rows.iter().position(|r| *r == k) {
                 self.sel = i;
@@ -262,7 +351,7 @@ impl App {
     fn selectable(&self, i: usize) -> bool {
         matches!(
             self.rows.get(i),
-            Some(RowRef::Proj(_) | RowRef::Cont(_) | RowRef::Img(_))
+            Some(RowRef::Proj(_) | RowRef::Cont(_) | RowRef::Repo(_) | RowRef::Img(_, _))
         )
     }
 
@@ -292,9 +381,10 @@ impl App {
         match self.rows.get(self.sel).cloned() {
             Some(RowRef::Cont(i)) => {
                 let c = self.containers[i].clone();
+                self.logs_for = c.id.clone();
                 let sink = self.logs.rebind();
                 docker::follow_logs(&c.id, sink);
-                self.retitle(format!("{} — logs", c.name));
+                self.retitle(format!("logs · {}", c.name));
             }
             Some(RowRef::Proj(pi)) => {
                 let (dir, name) = (self.projects[pi].dir.clone(), self.projects[pi].name.clone());
@@ -304,9 +394,10 @@ impl App {
                     ));
                     self.dirty = true;
                 } else {
+                    self.logs_for.clear();
                     let sink = self.logs.rebind();
                     docker::compose_logs(&dir, &name, sink);
-                    self.retitle(format!("{name} — compose logs"));
+                    self.retitle(format!("compose logs · {name}"));
                 }
             }
             _ => {}
@@ -377,7 +468,7 @@ impl App {
                     );
                 }
             }
-            Some(RowRef::Img(i)) => {
+            Some(RowRef::Img(_, i)) => {
                 let im = &self.images[i];
                 self.modal = Modal::Confirm(
                     ConfirmAction::Docker("rmi", format!("{}:{}", im.repo, im.tag)),
@@ -388,6 +479,15 @@ impl App {
             _ => return,
         }
         self.dirty = true;
+    }
+
+    fn toggle_repo(&mut self, ri: usize) {
+        let key = self.repos[ri].key.clone();
+        if !self.expanded_repos.remove(&key) {
+            self.expanded_repos.insert(key);
+        }
+        self.repos[ri].expanded = !self.repos[ri].expanded;
+        self.rebuild_rows();
     }
 
     fn toggle_proj(&mut self, pi: usize) {
@@ -410,6 +510,27 @@ impl App {
     // ----- input -----
     fn on_key(&mut self, k: KeyEvent) {
         if k.kind != KeyEventKind::Press {
+            return;
+        }
+        if self.filter_input {
+            match k.code {
+                KeyCode::Esc => {
+                    self.filter.clear();
+                    self.filter_input = false;
+                }
+                KeyCode::Enter => self.filter_input = false,
+                KeyCode::Backspace => {
+                    self.filter.pop();
+                }
+                KeyCode::Char(c) => self.filter.push(c),
+                _ => {}
+            }
+            self.rebuild_rows();
+            return;
+        }
+        if k.code == KeyCode::Esc && !self.filter.is_empty() && matches!(self.modal, Modal::None) {
+            self.filter.clear();
+            self.rebuild_rows();
             return;
         }
         match &mut self.modal {
@@ -485,6 +606,9 @@ impl App {
                 return;
             }
             KeyCode::PageUp => {
+                if self.log_scroll == 0 {
+                    self.paused_at = self.logs.lines.lock().unwrap().len();
+                }
                 self.log_scroll += 20;
                 self.dirty = true;
                 return;
@@ -509,21 +633,27 @@ impl App {
             Pane::Docker => match k.code {
                 KeyCode::Up | KeyCode::Char('k') => self.step_sel(-1),
                 KeyCode::Down | KeyCode::Char('j') => self.step_sel(1),
-                KeyCode::Left => {
-                    if let Some(RowRef::Proj(pi)) = self.rows.get(self.sel).cloned() {
-                        if self.projects[pi].expanded {
-                            self.toggle_proj(pi);
-                        }
+                KeyCode::Left => match self.rows.get(self.sel).cloned() {
+                    Some(RowRef::Proj(pi)) if self.projects[pi].expanded => self.toggle_proj(pi),
+                    Some(RowRef::Repo(ri)) if self.repos[ri].expanded => self.toggle_repo(ri),
+                    _ => {}
+                },
+                KeyCode::Right => match self.rows.get(self.sel).cloned() {
+                    Some(RowRef::Proj(pi)) if !self.projects[pi].expanded => self.toggle_proj(pi),
+                    Some(RowRef::Repo(ri)) if !self.repos[ri].expanded => self.toggle_repo(ri),
+                    _ => {}
+                },
+                KeyCode::Enter | KeyCode::Char('l') => {
+                    if let Some(RowRef::Repo(ri)) = self.rows.get(self.sel).cloned() {
+                        self.toggle_repo(ri);
+                    } else {
+                        self.open_logs();
                     }
                 }
-                KeyCode::Right => {
-                    if let Some(RowRef::Proj(pi)) = self.rows.get(self.sel).cloned() {
-                        if !self.projects[pi].expanded {
-                            self.toggle_proj(pi);
-                        }
-                    }
+                KeyCode::Char('/') => {
+                    self.filter_input = true;
+                    self.dirty = true;
                 }
-                KeyCode::Enter | KeyCode::Char('l') => self.open_logs(),
                 KeyCode::Char('s') => self.start_stop(),
                 KeyCode::Char('r') => self.restart(),
                 KeyCode::Char('x') => self.remove(),
@@ -557,7 +687,7 @@ impl App {
                         return;
                     }
                     let prefill = match self.rows.get(self.sel) {
-                        Some(RowRef::Img(i)) => {
+                        Some(RowRef::Img(_, i)) => {
                             let im = &self.images[*i];
                             format!("{}:{}", im.repo, im.tag)
                         }
@@ -641,6 +771,7 @@ impl App {
                         self.sel = row;
                         match self.rows[row].clone() {
                             RowRef::Proj(pi) => self.toggle_proj(pi), // free to undo
+                            RowRef::Repo(ri) => self.toggle_repo(ri),
                             _ if again => self.open_logs(),           // click-again opens
                             _ => {}
                         }
@@ -695,33 +826,45 @@ impl App {
         let running = self.containers.iter().filter(|c| c.state == "running").count();
         let mut head = vec![Span::styled(
             " 󰡨 Docker ",
-            Style::default()
-                .fg(if self.pane == Pane::Docker { col(pal.accent) } else { col(pal.sub) })
-                .add_modifier(Modifier::BOLD),
+            if self.pane == Pane::Docker {
+                Style::default().bg(col(pal.accent)).fg(col(pal.bg)).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(col(pal.sub))
+            },
         )];
         if self.kube_on {
+            head.push(Span::raw(" "));
             head.push(Span::styled(
-                "󱃾 Kubernetes ",
-                Style::default()
-                    .fg(if self.pane == Pane::Kube { col(pal.accent) } else { col(pal.sub) })
-                    .add_modifier(Modifier::BOLD),
+                " 󱃾 Kubernetes ",
+                if self.pane == Pane::Kube {
+                    Style::default().bg(col(pal.accent)).fg(col(pal.bg)).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(col(pal.sub))
+                },
             ));
-            head.push(Span::styled("(Tab)  ", Style::default().fg(col(pal.sub))));
+            head.push(Span::styled(" ⇥", Style::default().fg(col(pal.muted))));
         }
-        head.push(Span::styled(
-            format!(
-                "v{} · {} running / {} containers · {} compose · {} images",
-                self.version,
-                running,
-                self.containers.len(),
-                self.projects.len(),
-                self.images.len()
-            ),
-            Style::default().fg(col(pal.sub)),
-        ));
+        head.push(Span::raw("            "));
+        head.push(Span::styled("● ", Style::default().fg(col(pal.good))));
+        let sep = || Span::styled(" · ", Style::default().fg(col(pal.muted)));
+        let num = |n: String| Span::styled(n, Style::default().fg(col(pal.fg)));
+        let noun = |t: &str| Span::styled(t.to_string(), Style::default().fg(col(pal.sub)));
+        head.push(num(format!("{running}")));
+        head.push(noun(" running"));
+        head.push(sep());
+        head.push(num(format!("{}", self.containers.len())));
+        head.push(noun(" containers"));
+        head.push(sep());
+        head.push(num(format!("{}", self.projects.len())));
+        head.push(noun(" compose"));
+        head.push(sep());
+        head.push(num(format!("{}", self.images.len())));
+        head.push(noun(" images"));
+        head.push(sep());
+        head.push(noun(&format!("v{}", self.version)));
         f.render_widget(Paragraph::new(Line::from(head)), outer[0]);
 
-        let cols = Layout::horizontal([Constraint::Percentage(46), Constraint::Percentage(54)])
+        let cols = Layout::horizontal([Constraint::Percentage(42), Constraint::Percentage(58)])
             .split(outer[1]);
         self.list_area = cols[0];
         self.log_area = cols[1];
@@ -763,63 +906,155 @@ impl App {
 
     fn draw_docker_list(&self, f: &mut Frame, area: Rect) {
         let pal = self.pal;
+        let width = area.width as usize;
+        // one right-aligned status column: right text ends 2 cells in
+        let pad_to = |left_len: usize, right_len: usize| -> String {
+            " ".repeat(width.saturating_sub(left_len + right_len + 2).max(1))
+        };
         let mut lines: Vec<Line> = Vec::new();
+        let up_total = self.containers.iter().filter(|c| c.state == "running").count();
         for (ri, row) in self.rows.iter().enumerate().take(area.height as usize) {
             let mut line = match row {
-                RowRef::Header(h) => Line::from(Span::styled(
-                    h.to_string(),
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
+                RowRef::Header(h) => {
+                    let (left, right) = match *h {
+                        "COMPOSE" => (
+                            format!(" COMPOSE  · {} projects", self.projects.len()),
+                            format!("{}/{} up", up_total, self.containers.len()),
+                        ),
+                        "STANDALONE" => {
+                            let n = self
+                                .containers
+                                .iter()
+                                .filter(|c| c.project.is_empty())
+                                .count();
+                            let up = self
+                                .containers
+                                .iter()
+                                .filter(|c| c.project.is_empty() && c.state == "running")
+                                .count();
+                            (format!(" STANDALONE  · {n}"), format!("{up}/{n} up"))
+                        }
+                        _ => (
+                            format!(
+                                " 󰋊 IMAGES  · {} · {} repos",
+                                self.images.len(),
+                                self.repos.len()
+                            ),
+                            docker::human_gb(self.repos.iter().map(|r| r.bytes).sum()),
+                        ),
+                    };
+                    Line::from(vec![
+                        Span::styled(left.clone(), Style::default().fg(col(pal.fg)).add_modifier(Modifier::BOLD)),
+                        Span::raw(pad_to(left.chars().count(), right.chars().count())),
+                        Span::styled(right, Style::default().fg(col(pal.sub))),
+                    ])
+                }
                 RowRef::Blank => Line::from(""),
                 RowRef::Proj(pi) => {
                     let p = &self.projects[*pi];
                     let arrow = if p.expanded { "▾" } else { "▸" };
-                    let ink = if p.running == p.members.len() {
-                        col(pal.good)
-                    } else if p.running > 0 {
-                        col(pal.warn)
-                    } else {
-                        col(pal.sub)
-                    };
-                    Line::from(vec![
-                        Span::styled(format!("  {arrow} "), Style::default().fg(col(pal.sub))),
-                        Span::styled("󰡨 ", Style::default().fg(ink)),
-                        Span::raw(p.name.clone()),
-                        Span::styled(
-                            format!("  {}/{} up", p.running, p.members.len()),
-                            Style::default().fg(ink),
-                        ),
-                    ])
+                    let full = p.running == p.members.len() && !p.members.is_empty();
+                    let right = format!("{}/{}", p.running, p.members.len());
+                    let mut spans = vec![
+                        Span::styled(format!(" {arrow} "), Style::default().fg(col(pal.sub))),
+                        Span::styled("󰡨 ", Style::default().fg(col(pal.sub))),
+                        Span::styled(p.name.clone(), Style::default().fg(col(pal.fg))),
+                    ];
+                    let mut left_len = 3 + 2 + p.name.chars().count();
+                    // a collapsed project states its failure (design)
+                    if !p.expanded && p.exited_bad > 0 {
+                        let t = format!("  {} exited (≠0)", p.exited_bad);
+                        left_len += t.chars().count();
+                        spans.push(Span::styled(t, Style::default().fg(col(pal.bad))));
+                    }
+                    spans.push(Span::raw(pad_to(left_len, right.chars().count())));
+                    // N/M up: sub while anything is down, good at full strength,
+                    // NEVER warn — partial is normal, not transitional
+                    spans.push(Span::styled(
+                        right,
+                        Style::default().fg(if full { col(pal.good) } else { col(pal.sub) }),
+                    ));
+                    Line::from(spans)
                 }
                 RowRef::Cont(i) => {
                     let c = &self.containers[*i];
                     let (glyph, ink) = self.state_mark(&c.state);
-                    let indent = if c.project.is_empty() { "  " } else { "      " };
+                    let failed = c.status.contains("Exited") && !c.status.contains("Exited (0)");
+                    let (glyph, ink) = if failed { ("✘", col(pal.bad)) } else { (glyph, ink) };
+                    let name = if c.service.is_empty() { c.name.clone() } else { c.service.clone() };
+                    let indent = if c.project.is_empty() { "   " } else { "      " };
+                    let (mid, right) = if c.state == "running" {
+                        (
+                            if c.cpu.is_empty() { String::new() } else { format!("{} cpu", c.cpu) },
+                            c.mem.clone(),
+                        )
+                    } else {
+                        docker::short_status(&c.status)
+                    };
+                    let name_w = 16usize;
+                    let name_pad: String = format!("{name:<name_w$}").chars().take(name_w.max(name.chars().count())).collect();
                     let mut spans = vec![
                         Span::raw(indent.to_string()),
                         Span::styled(format!("{glyph} "), Style::default().fg(ink)),
-                        Span::raw(c.name.clone()),
+                        Span::styled(name_pad.clone(), Style::default().fg(col(pal.fg))),
+                        Span::raw(" "),
                     ];
-                    if c.state == "running" && !c.cpu.is_empty() {
-                        spans.push(Span::styled(
-                            format!("  {} {}", c.cpu, c.mem),
-                            Style::default().fg(col(pal.sub)),
-                        ));
+                    let mid_ink = if failed {
+                        col(pal.bad)
+                    } else if c.state == "running" {
+                        col(pal.fg)
                     } else {
-                        spans.push(Span::styled(
-                            format!("  {}", c.status),
-                            Style::default().fg(col(pal.sub)),
-                        ));
-                    }
+                        col(pal.sub)
+                    };
+                    spans.push(Span::styled(mid.clone(), Style::default().fg(mid_ink)));
+                    let left_len =
+                        indent.len() + 2 + name_pad.chars().count() + 1 + mid.chars().count();
+                    spans.push(Span::raw(pad_to(left_len, right.chars().count())));
+                    spans.push(Span::styled(
+                        right,
+                        Style::default().fg(if c.state == "running" { col(pal.fg) } else { col(pal.sub) }),
+                    ));
                     Line::from(spans)
                 }
-                RowRef::Img(i) => {
+                RowRef::Repo(ri2) => {
+                    let r = &self.repos[*ri2];
+                    let arrow = if r.expanded { "▾" } else { "▸" };
+                    let tags = format!(
+                        "{} tag{}",
+                        r.members.len(),
+                        if r.members.len() == 1 { "" } else { "s" }
+                    );
+                    let right = docker::human_gb(r.bytes);
+                    let left = format!(" {arrow} {}", r.key);
+                    let mut spans = vec![
+                        Span::styled(format!(" {arrow} "), Style::default().fg(col(pal.sub))),
+                        Span::styled(r.key.clone(), Style::default().fg(col(pal.sub))),
+                    ];
+                    let mid_pad = pad_to(
+                        left.chars().count() + tags.chars().count() + right.chars().count() + 4,
+                        0,
+                    );
+                    spans.push(Span::raw(mid_pad));
+                    spans.push(Span::styled(format!("{tags}    "), Style::default().fg(col(pal.sub))));
+                    spans.push(Span::styled(right, Style::default().fg(col(pal.sub))));
+                    Line::from(spans)
+                }
+                RowRef::Img(ri2, i) => {
+                    let r = &self.repos[*ri2];
                     let im = &self.images[*i];
+                    // strip the group key prefix: aegis-backend:latest -> backend:latest
+                    let full = format!("{}:{}", im.repo, im.tag);
+                    let short = full
+                        .strip_prefix(&format!("{}-", r.key))
+                        .or_else(|| full.strip_prefix(&format!("{}/", r.key)))
+                        .unwrap_or(&full)
+                        .to_string();
+                    let right = im.size.clone();
+                    let left = format!("     {short}");
                     Line::from(vec![
-                        Span::raw("  "),
-                        Span::styled("󰋊 ", Style::default().fg(col(pal.sub))),
-                        Span::raw(format!("{}:{}", im.repo, im.tag)),
-                        Span::styled(format!("  {}", im.size), Style::default().fg(col(pal.sub))),
+                        Span::styled(left.clone(), Style::default().fg(col(pal.sub))),
+                        Span::raw(pad_to(left.chars().count(), right.chars().count())),
+                        Span::styled(right, Style::default().fg(col(pal.sub))),
                     ])
                 }
             };
@@ -891,79 +1126,157 @@ impl App {
 
     fn draw_logs(&self, f: &mut Frame, area: Rect) {
         let pal = self.pal;
-        let title = if self.logs_title.is_empty() {
-            " logs — Enter follows the selection ".to_string()
+        let lock = self.logs.lines.lock().unwrap();
+        let total = lock.len();
+        let follow_state = if self.log_scroll == 0 {
+            "following".to_string()
         } else {
-            let tail = if self.log_scroll == 0 { "" } else { " (scrolled)" };
-            format!(" {}{tail} ", self.logs_title)
+            format!("paused · {} new", total.saturating_sub(self.paused_at))
+        };
+        let title = if self.logs_title.is_empty() {
+            " logs — ↵ follows the selection ".to_string()
+        } else {
+            format!(" {} · {follow_state} ", self.logs_title)
         };
         let block = Block::default()
             .borders(Borders::LEFT)
-            .border_style(Style::default().fg(col(pal.sub)))
-            .title(Span::styled(title, Style::default().fg(col(pal.accent2))));
+            .border_style(Style::default().fg(col(pal.muted)))
+            .title(Span::styled(title, Style::default().fg(col(pal.sub))));
         let inner = block.inner(area);
         f.render_widget(block, area);
-        let lock = self.logs.lines.lock().unwrap();
-        let total = lock.len();
         let h = inner.height as usize;
+        // the followed container's stopped state earns a closing rule
+        let stopped = self
+            .containers
+            .iter()
+            .find(|c| c.id == self.logs_for)
+            .filter(|c| c.state != "running")
+            .map(|c| docker::short_status(&c.status));
+        let extra = usize::from(stopped.is_some());
         let end = total.saturating_sub(self.log_scroll);
-        let start = end.saturating_sub(h);
-        let log_lines: Vec<Line> = lock
+        let start = end.saturating_sub(h.saturating_sub(extra));
+        let mut log_lines: Vec<Line> = lock
             .iter()
             .skip(start)
             .take(end - start)
             .map(|l| {
-                let ink = if l.starts_with('✘') {
+                if l.starts_with('✘') {
+                    return Line::from(Span::styled(l.clone(), Style::default().fg(col(pal.bad))));
+                }
+                if l.starts_with('✔') || l.starts_with('⇣') {
+                    return Line::from(Span::styled(l.clone(), Style::default().fg(col(pal.good))));
+                }
+                // level inks: timestamp sub · INFO sub · WARN warn · ERROR bad
+                let mut spans: Vec<Span> = Vec::new();
+                let mut rest = l.as_str();
+                let ts_len = rest
+                    .find(|c: char| !(c.is_ascii_digit() || c == ':' || c == '.' || c == '-' || c == 'T' || c == 'Z'))
+                    .unwrap_or(rest.len());
+                if ts_len >= 8 {
+                    spans.push(Span::styled(
+                        rest[..ts_len].to_string(),
+                        Style::default().fg(col(pal.sub)),
+                    ));
+                    rest = &rest[ts_len..];
+                }
+                let ink = if rest.contains("ERROR") || rest.contains("FATAL") {
                     col(pal.bad)
-                } else if l.starts_with('✔') || l.starts_with('⇣') {
-                    col(pal.good)
+                } else if rest.contains("WARN") {
+                    col(pal.warn)
+                } else if rest.trim_start().starts_with("File ")
+                    || rest.starts_with("    ")
+                {
+                    col(pal.sub) // traceback continuation
                 } else {
                     col(pal.fg)
                 };
-                Line::from(Span::styled(l.clone(), Style::default().fg(ink)))
+                spans.push(Span::styled(rest.to_string(), Style::default().fg(ink)));
+                Line::from(spans)
             })
             .collect();
         drop(lock);
+        if let Some((_, age)) = stopped {
+            if self.log_scroll == 0 && !self.logs_title.is_empty() {
+                let label = if age.is_empty() {
+                    " ─── container stopped ─── ".to_string()
+                } else {
+                    format!(" ─── container stopped · {age} ago ─── ")
+                };
+                log_lines.push(Line::from(vec![
+                    Span::styled("─── ", Style::default().fg(col(pal.muted))),
+                    Span::styled(label, Style::default().fg(col(pal.sub))),
+                    Span::styled(" ───", Style::default().fg(col(pal.muted))),
+                ]));
+            }
+        }
         f.render_widget(Paragraph::new(log_lines), inner);
     }
 
     fn draw_footer(&self, f: &mut Frame, area: Rect) {
         let pal = self.pal;
+        if self.filter_input || !self.filter.is_empty() {
+            let mut spans = vec![
+                Span::styled(" / ", Style::default().fg(col(pal.accent2)).add_modifier(Modifier::BOLD)),
+                Span::styled("filter: ", Style::default().fg(col(pal.sub))),
+                Span::styled(self.filter.clone(), Style::default().fg(col(pal.fg))),
+            ];
+            if self.filter_input {
+                spans.push(Span::styled("▌", Style::default().fg(col(pal.accent))));
+                spans.push(Span::styled(
+                    "   ↵ keep · Esc clear",
+                    Style::default().fg(col(pal.sub)),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    "   Esc clears",
+                    Style::default().fg(col(pal.sub)),
+                ));
+            }
+            f.render_widget(Paragraph::new(Line::from(spans)), area);
+            return;
+        }
         let keys: &[(&str, &str)] = match (self.pane, self.rows.get(self.sel)) {
             (Pane::Kube, _) => &[
-                ("Enter", "Logs"),
-                ("d", "Describe"),
-                ("c", "Shell"),
-                ("x", "Delete pod"),
-                ("C", "Context"),
-                ("Tab", "Docker"),
-                ("q", "Quit"),
+                ("↵", "logs"),
+                ("d", "describe"),
+                ("c", "shell"),
+                ("x", "delete"),
+                ("C", "context"),
+                ("⇥", "docker"),
+                ("q", "quit"),
             ],
             (_, Some(RowRef::Proj(_))) => &[
-                ("Enter", "Logs"),
-                ("s", "Up/Stop"),
-                ("r", "Restart"),
-                ("p", "Pull imgs"),
-                ("x", "Down"),
-                ("←→", "Fold"),
-                ("Tab", "K8s"),
-                ("q", "Quit"),
+                ("↵", "logs"),
+                ("s", "up/stop"),
+                ("r", "restart"),
+                ("p", "pull"),
+                ("x", "down"),
+                ("↔", "fold"),
+                ("/", "filter"),
+                ("q", "quit"),
             ],
-            (_, Some(RowRef::Img(_))) => &[
-                ("p", "Pull"),
-                ("x", "Remove"),
-                ("Tab", "K8s"),
-                ("q", "Quit"),
+            (_, Some(RowRef::Repo(_))) => &[
+                ("↵", "fold"),
+                ("/", "filter"),
+                ("⇥", "k8s"),
+                ("q", "quit"),
+            ],
+            (_, Some(RowRef::Img(_, _))) => &[
+                ("p", "pull"),
+                ("x", "remove"),
+                ("/", "filter"),
+                ("q", "quit"),
             ],
             _ => &[
-                ("Enter", "Logs"),
-                ("s", "Start/Stop"),
-                ("r", "Restart"),
-                ("c", "Connect"),
-                ("x", "Remove"),
-                ("p", "Pull"),
-                ("Tab", "K8s"),
-                ("q", "Quit"),
+                ("↵", "logs"),
+                ("s", "start/stop"),
+                ("r", "restart"),
+                ("c", "connect"),
+                ("x", "remove"),
+                ("p", "pull"),
+                ("/", "filter"),
+                ("⇥", "k8s"),
+                ("q", "quit"),
             ],
         };
         let spans: Vec<Span> = keys
@@ -1078,7 +1391,12 @@ fn tui() {
         containers: Vec::new(),
         images: Vec::new(),
         projects: Vec::new(),
+        repos: Vec::new(),
         collapsed: HashSet::new(),
+        expanded_repos: HashSet::new(),
+        filter: String::new(),
+        filter_input: false,
+        paused_at: 0,
         rows: Vec::new(),
         sel: 1,
         pane: Pane::Docker,
@@ -1088,6 +1406,7 @@ fn tui() {
         kube_err: String::new(),
         sel_pod: 0,
         logs: docker::LogSink::new(),
+        logs_for: String::new(),
         logs_title: String::new(),
         log_scroll: 0,
         modal: Modal::None,
