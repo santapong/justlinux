@@ -116,7 +116,9 @@ fn launch() {
 // See bin/hypr-claude-studio for the full commentary on every choice
 // here — the ranges, the missing scrollport, the run-shell ✕ path. The
 // format strings are copied verbatim; only the interpolation moved.
-const CLOSE_X: &str = "#{?#{!=:#{window_index},0},#[range=user|x#{window_index}] ✕ #[norange],}";
+// every window is a real tab in the per-window-tree model — the old
+// "tab 0 is the sidebar" exemptions are gone with it
+const CLOSE_X: &str = "#[range=user|x#{window_index}] ✕ #[norange]";
 
 fn pane_n(ink: &str, restore: &str) -> String {
     // the tree pane rides along in the selected window — the bare count
@@ -129,9 +131,8 @@ fn pane_n(ink: &str, restore: &str) -> String {
 
 fn attn(good: &str, sub: &str, restore: &str) -> String {
     format!(
-        "#{{?#{{==:#{{window_index}},0}},,\
-         #{{?window_bell_flag,{good}● {restore},\
-         #{{?window_activity_flag,{sub}○ {restore},}}}}}}"
+        "#{{?window_bell_flag,{good}● {restore},\
+         #{{?window_activity_flag,{sub}○ {restore},}}}}"
     )
 }
 
@@ -678,41 +679,53 @@ fn palette() {
     }
 }
 
-/// The tree pane follows the selected window (handoff: the sessions
-/// pane is permanently on screen beside whatever you are reading).
-/// join-pane MOVES the single tree instance; its old window dies with
-/// it if the tree was alone there — which is exactly the design's
-/// "there is no tab 0 to accidentally close".
-fn tree_follow() {
+/// Every conversation window carries its OWN tree pane (spawned on
+/// demand). The single-moving-pane design flickered on every tab
+/// switch — the pane visibly left one window and re-joined the next —
+/// and a mistimed close could strand it. Instances are cheap (~4 MB)
+/// and only the visible one polls (the sidebar throttles itself when
+/// its window is not active).
+fn tree_attach() {
     let cur = tmux_out(&["display-message", "-p", "#{window_index}"]).trim().to_string();
     if cur.is_empty() {
         return;
     }
-    let mut tree: Option<(String, String)> = None; // (pane_id, window_index)
-    for line in tmux_out(&["list-panes", "-s", "-F", "#{pane_id}|#{window_index}|#{pane_start_command}"]).lines() {
-        let p: Vec<&str> = line.splitn(3, '|').collect();
-        if p.len() == 3 && p[2].contains("--sidebar") {
-            tree = Some((p[0].to_string(), p[1].to_string()));
-            break;
+    let panes = tmux_out(&[
+        "list-panes", "-t", &format!("{TMUX_SESSION}:{cur}"), "-F", "#{pane_start_command}",
+    ]);
+    if !panes.lines().any(|c| c.contains("--sidebar")) {
+        tmux(&[
+            "split-window", "-d", "-b", "-h", "-l", "34",
+            "-t", &format!("{TMUX_SESSION}:{cur}"),
+            &format!("{} --sidebar --attached", me()),
+        ]);
+    }
+    // the launch-time pure-sessions window is a spare once real tabs
+    // exist — retire it (its own tree lives full-window there)
+    let wins = tmux_out(&["list-windows", "-F", "#{window_index}|#{window_name}|#{window_panes}"]);
+    let total = wins.lines().count();
+    if total > 1 {
+        for l in wins.lines() {
+            let p: Vec<&str> = l.splitn(3, '|').collect();
+            if p.len() == 3 && p[1] == "sessions" && p[2] == "1" && p[0] != cur {
+                tmux(&["kill-window", "-t", &format!("{TMUX_SESSION}:{}", p[0])]);
+            }
         }
     }
-    let Some((pane, win)) = tree else { return };
-    if win == cur {
-        return; // already beside you
-    }
-    // is the current window the tree's own (pure-sessions) window? no-op
-    tmux(&[
-        "join-pane", "-d", "-b", "-h", "-l", "34", "-s", &pane,
-        "-t", &format!("{TMUX_SESSION}:{cur}"),
-    ]);
 }
 
-/// Close a tab WITHOUT taking the tree with it: if the tree pane lives
-/// in that window, kill only its siblings and the window becomes the
-/// sessions window again; otherwise a plain kill-window.
+/// Close a tab. Each window owns its tree pane now, so the tree dies
+/// with its window by design — EXCEPT the last window, which keeps its
+/// tree and becomes the sessions window (an empty studio still shows
+/// the tree, never a dead session).
 fn close_tab(idx: &str) {
-    let mut tree_here = false;
+    let total = tmux_out(&["list-windows", "-F", "x"]).lines().count();
+    if total > 1 {
+        tmux(&["kill-window", "-t", &format!("{TMUX_SESSION}:{idx}")]);
+        return;
+    }
     let mut others: Vec<String> = Vec::new();
+    let mut tree_here = false;
     for line in tmux_out(&[
         "list-panes", "-t", &format!("{TMUX_SESSION}:{idx}"), "-F",
         "#{pane_id}|#{pane_start_command}",
@@ -744,8 +757,8 @@ fn main() {
         }
         return;
     }
-    if args.iter().any(|a| a == "--tree-follow") {
-        tree_follow();
+    if args.iter().any(|a| a == "--tree-follow") || args.iter().any(|a| a == "--tree-attach") {
+        tree_attach(); // --tree-follow kept for stale bindings
         return;
     }
     if args.iter().any(|a| a == "--sidebar") {

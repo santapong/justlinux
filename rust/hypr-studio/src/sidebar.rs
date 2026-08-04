@@ -489,6 +489,19 @@ impl App {
             KeyCode::Char('m') => super::open_settings_tab("integrations"),
             KeyCode::Char('x') => self.action_kill_bg(),
             KeyCode::Char('r') => self.reload(true),
+            KeyCode::Char('w') => {
+                // expand/shrink the pane (design ask: "make it can expand")
+                let pane = std::env::var("TMUX_PANE").unwrap_or_default();
+                if !pane.is_empty() {
+                    let cur = super::tmux_out(&["display-message", "-p", "-t", &pane, "#{pane_width}"])
+                        .trim()
+                        .parse::<u32>()
+                        .unwrap_or(34);
+                    let next = if cur <= 40 { "56" } else { "34" };
+                    super::tmux(&["resize-pane", "-t", &pane, "-x", next]);
+                    self.dirty = true;
+                }
+            }
             KeyCode::Char('q') => self.action_quit(),
             _ => {}
         }
@@ -734,7 +747,7 @@ impl App {
                     [key("↵", "open"), key("s", "beside"), key("n", "new")].concat(),
                 ));
                 lines.push(Line::from(
-                    [key("t", "term"), key("x", "stop"), key("q", "quit")].concat(),
+                    [key("t", "term"), key("w", "wide"), key("q", "quit")].concat(),
                 ));
             }
             f.render_widget(Paragraph::new(lines), chunks[2]);
@@ -864,8 +877,20 @@ impl App {
 }
 
 pub fn run() {
-    super::style_tmux();
-    super::rename_open_tabs();
+    // --attached instances are spawned per window by tree_attach; the
+    // launch instance already styled the server — do not restyle N times
+    let attached = std::env::args().any(|a| a == "--attached");
+    if !attached {
+        super::style_tmux();
+        super::rename_open_tabs();
+    }
+    let my_pane = std::env::var("TMUX_PANE").unwrap_or_default();
+    let window_active = |pane: &str| -> bool {
+        pane.is_empty()
+            || super::tmux_out(&["display-message", "-p", "-t", pane, "#{window_active}"])
+                .trim()
+                == "1"
+    };
 
     let mut stdout = std::io::stdout();
     let _ = crossterm::terminal::enable_raw_mode();
@@ -881,6 +906,8 @@ pub fn run() {
     app.reload(true);
     let mut last_reload = Instant::now();
     let mut last_rename = Instant::now();
+    let mut last_active_check = Instant::now();
+    let mut active = true;
 
     loop {
         if app.dirty {
@@ -896,14 +923,24 @@ pub fn run() {
             }
         }
         let now = Instant::now();
-        // the tree goes stale the moment a tab closes or a session starts
-        // elsewhere; r still forces it, this just keeps up (6 s, python)
-        if now.duration_since(last_reload) >= Duration::from_secs(6) {
+        // only the VISIBLE tree polls the world — with one instance per
+        // window, N instances all polling would multiply the cost
+        if now.duration_since(last_active_check) >= Duration::from_secs(2) {
+            last_active_check = now;
+            let was = active;
+            active = window_active(&my_pane);
+            if active && !was {
+                app.reload(false); // catch up the moment we come on screen
+                last_reload = now;
+            }
+        }
+        if active && now.duration_since(last_reload) >= Duration::from_secs(6) {
             last_reload = now;
             app.reload(false);
         }
-        // Claude names a conversation a little after it starts (30 s)
-        if now.duration_since(last_rename) >= Duration::from_secs(30) {
+        // Claude names a conversation a little after it starts (30 s);
+        // one renamer is plenty — the active instance owns the pass
+        if active && now.duration_since(last_rename) >= Duration::from_secs(30) {
             last_rename = now;
             super::rename_open_tabs();
         }
