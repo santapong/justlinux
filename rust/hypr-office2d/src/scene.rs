@@ -18,24 +18,29 @@ use tiny_skia::Pixmap;
 use crate::sprites::{self, R};
 use hyprdesk::draw::Text;
 
-pub const HEADER_H: f32 = 44.0;
-pub const STRIP_H: f32 = 44.0;
-const PLATE_W: f32 = 224.0;
-const PLATE_H: f32 = 192.0;
-const SPRITE: f32 = 4.0; // px per sprite pixel
-const WALK_PX: f32 = 14.0; // per 160 ms tick — door to desk ≈ 1 s
+// The handoff floor at HALF SCALE: the fullscreen version read as "too
+// big" on this desktop, so the design keeps its anatomy and becomes an
+// arrange-movable widget again (user call, 4 Aug 2026).
+pub const CARD_W: u32 = 720;
+pub const CARD_H: u32 = 430;
+pub const HEADER_H: f32 = 26.0;
+pub const STRIP_H: f32 = 26.0;
+const PLATE_W: f32 = 112.0;
+const PLATE_H: f32 = 96.0;
+const SPRITE: f32 = 2.0; // px per sprite pixel (design: 4 at fullscreen)
+const WALK_PX: f32 = 8.0; // per 160 ms tick — door to desk ≈ 1 s
 const GHOST_MIN_IDLE: f64 = 120.0;
-const MEET_W: f32 = 300.0;
-const MEET_H: f32 = 398.0;
+const MEET_W: f32 = 150.0;
+const MEET_H: f32 = 200.0;
 
-/// Plate origins on the 1600×900 floor (handoff coords × 4/3).
+/// Plate origins (handoff floor coords × 1/2, tucked for the card).
 const DESK_SLOTS: [(f32, f32); 6] = [
-    (357.0, 104.0),
-    (357.0, 371.0),
-    (357.0, 627.0),
-    (693.0, 104.0),
-    (693.0, 371.0),
-    (693.0, 627.0),
+    (150.0, 46.0),
+    (150.0, 175.0),
+    (150.0, 304.0),
+    (300.0, 46.0),
+    (300.0, 175.0),
+    (300.0, 304.0),
 ];
 
 #[derive(Clone, PartialEq)]
@@ -97,25 +102,25 @@ pub struct Scene {
 }
 
 fn door_pos(h: f32) -> (f32, f32) {
-    (28.0, h - STRIP_H - 140.0)
+    (18.0, h - STRIP_H - 80.0)
 }
 
 fn seat_of(desk: usize) -> (f32, f32) {
     let (px, py) = DESK_SLOTS[desk];
-    (px + 52.0, py + 40.0)
+    (px + 26.0, py + 20.0)
 }
 
 fn path_to_desk(desk: usize, h: f32) -> Vec<(f32, f32)> {
     let (sx, sy) = seat_of(desk);
     let (_, dy) = door_pos(h);
-    vec![(180.0, dy), (180.0, sy + 30.0), (sx, sy + 30.0), (sx, sy)]
+    vec![(90.0, dy), (90.0, sy + 16.0), (sx, sy + 16.0), (sx, sy)]
 }
 
 impl Scene {
     pub fn new() -> Scene {
         Scene {
-            w: 1600.0,
-            h: 900.0,
+            w: CARD_W as f32,
+            h: CARD_H as f32,
             hover: None,
             actors: Vec::new(),
             ghosts: Vec::new(),
@@ -428,7 +433,7 @@ impl Scene {
     }
 
     fn meet_rect(&self) -> (f32, f32, f32, f32) {
-        (self.w - MEET_W - 32.0, 93.0, MEET_W, MEET_H)
+        (self.w - MEET_W - 16.0, 46.0, MEET_W, MEET_H)
     }
 
     /// The interactive pixels — main.rs turns this into the input region
@@ -469,7 +474,7 @@ impl Scene {
                 }
                 _ => {
                     // walker bbox with one tick of travel margin
-                    out.push((a.pos.0 as i32 - 20, a.pos.1 as i32 - 20, 88, 100));
+                    out.push((a.pos.0 as i32 - 12, a.pos.1 as i32 - 12, 50, 56));
                 }
             }
         }
@@ -538,31 +543,40 @@ impl Scene {
             }
         };
 
-        // floor lattice: 48 px grid, muted at 22%
+        // glass card base (this is a widget again — bg tint like the cards)
+        {
+            let Rgb(br, bgc, bb) = pal.bg;
+            let mut p = tiny_skia::Paint::default();
+            p.set_color(tiny_skia::Color::from_rgba8(br, bgc, bb, 205));
+            if let Some(rc) = tiny_skia::Rect::from_xywh(0.0, 0.0, w, h) {
+                pix.fill_rect(rc, &p, tiny_skia::Transform::identity(), None);
+            }
+        }
+        // floor lattice: 24 px grid, muted at 22%
         let mut gx = 0.0;
         while gx < w {
             fill(pix, gx, HEADER_H, 1.0, h - HEADER_H, pal.muted, 56);
-            gx += 48.0;
+            gx += 24.0;
         }
         let mut gy = HEADER_H;
         while gy < h {
             fill(pix, 0.0, gy, w, 1.0, pal.muted, 56);
-            gy += 48.0;
+            gy += 24.0;
         }
 
         // header strip
         dark(pix, 0.0, 0.0, w, HEADER_H, 107); // rgba(0,0,0,.42)
         fill(pix, 0.0, HEADER_H - 1.0, w, 1.0, pal.muted, 255);
-        text.draw_weight(pix, 20.0, 28.0, 15.0, pal.accent2, "󰚩 CLAUDE OFFICE", true);
+        text.draw_weight(pix, 10.0, 17.0, 11.0, pal.accent2, "󰚩 CLAUDE OFFICE", true);
         let needs = self.count(|s| matches!(s, WorkState::NeedsYou));
         let working = self.count(|s| matches!(s, WorkState::Working | WorkState::Reading));
         let asleep = self.count(|s| matches!(s, WorkState::Idle | WorkState::Asleep));
-        let mut hx = w - 24.0;
+        let mut hx = w - 12.0;
         let mut put_right = |pix: &mut Pixmap, s: &str, ink: Rgb| {
-            let adv = text.advance(12.0, false, s);
+            let adv = text.advance(9.0, false, s);
             hx -= adv;
-            text.draw(pix, hx, 27.0, 12.0, ink, s);
-            hx -= 22.0;
+            text.draw(pix, hx, 17.0, 9.0, ink, s);
+            hx -= 12.0;
         };
         if !self.ghosts.is_empty() {
             put_right(pix, &format!("{} to pick up", self.ghosts.len()), pal.sub);
@@ -579,12 +593,12 @@ impl Scene {
 
         // door + dashed walk-in path
         let (dx0, dy0) = door_pos(h);
-        sprites::blit_role(pix, sprites::DOOR, dx0 - 20.0, dy0 - 44.0, SPRITE, pal, pal.muted, 255);
-        text.draw(pix, dx0 - 16.0, dy0 + 60.0, 11.0, pal.sub, "DOOR");
-        let mut px = dx0 + 40.0;
-        while px < 340.0 {
-            fill(pix, px, dy0 + 4.0, 8.0, 2.0, pal.muted, 140);
-            px += 16.0;
+        sprites::blit_role(pix, sprites::DOOR, dx0 - 10.0, dy0 - 22.0, SPRITE, pal, pal.muted, 255);
+        text.draw(pix, dx0 - 8.0, dy0 + 32.0, 8.0, pal.sub, "DOOR");
+        let mut px = dx0 + 20.0;
+        while px < 140.0 {
+            fill(pix, px, dy0 + 2.0, 5.0, 1.0, pal.muted, 140);
+            px += 10.0;
         }
 
         // desk plates
@@ -616,22 +630,22 @@ impl Scene {
             ] {
                 fill(pix, bx, by, bw, bh, pal.muted, 255);
             }
-            fill(pix, mx, my + 34.0, mw, 1.0, pal.muted, 255);
-            text.draw(pix, mx + 12.0, my + 23.0, 11.0, pal.sub, "MEETING ROOM");
-            let run = "● running";
-            let adv = text.advance(11.0, false, run);
-            text.draw(pix, mx + mw - 12.0 - adv, my + 23.0, 11.0, pal.good, run);
+            fill(pix, mx, my + 20.0, mw, 1.0, pal.muted, 255);
+            text.draw(pix, mx + 8.0, my + 14.0, 8.0, pal.sub, "MEETING ROOM");
+            let run = "● run";
+            let adv = text.advance(8.0, false, run);
+            text.draw(pix, mx + mw - 8.0 - adv, my + 14.0, 8.0, pal.good, run);
             let name = if self.meeting_title.is_empty() {
                 "multi-agent workflow".to_string()
             } else {
-                self.meeting_title.chars().take(34).collect()
+                self.meeting_title.chars().take(20).collect()
             };
-            text.draw(pix, mx + 16.0, my + 58.0, 13.0, pal.fg, &name);
+            text.draw(pix, mx + 8.0, my + 36.0, 9.0, pal.fg, &name);
             text.draw(
                 pix,
-                mx + 16.0,
-                my + 78.0,
-                12.0,
+                mx + 8.0,
+                my + 50.0,
+                8.0,
                 pal.sub,
                 &format!(
                     "{} subagent{} · live",
@@ -654,19 +668,19 @@ impl Scene {
                 dark(pix, 0.0, h - STRIP_H, w, STRIP_H, 128); // rgba .5
                 fill(pix, 0.0, h - STRIP_H, w, 2.0, pal.accent, 255);
                 if let Some(a) = occ {
-                    text.draw_weight(pix, 20.0, h - 26.0, 13.0, pal.fg, &a.row.title, true);
+                    text.draw_weight(pix, 10.0, h - 15.0, 10.0, pal.fg, &a.row.title, true);
                     let cwd = format!("󰉋 {}", a.row.cwd.replace(&hyprdesk::home().display().to_string(), "~"));
-                    text.draw(pix, 20.0, h - 9.0, 11.0, pal.sub, &cwd);
+                    text.draw(pix, 10.0, h - 4.0, 8.0, pal.sub, &cwd);
                     let (_, ink, _, _, word) = self.state_bits(&a.row.state, pal);
-                    let adv = text.advance(12.0, false, word);
-                    text.draw(pix, w - 24.0 - adv, h - 18.0, 12.0, ink, word);
+                    let adv = text.advance(9.0, false, word);
+                    text.draw(pix, w - 12.0 - adv, h - 11.0, 9.0, ink, word);
                 } else if let Some(g) = gho {
-                    text.draw_weight(pix, 20.0, h - 26.0, 13.0, pal.fg, &g.title, true);
+                    text.draw_weight(pix, 10.0, h - 15.0, 10.0, pal.fg, &g.title, true);
                     text.draw(
                         pix,
-                        20.0,
-                        h - 9.0,
-                        11.0,
+                        10.0,
+                        h - 4.0,
+                        8.0,
                         pal.sub,
                         &format!("󰥔 {} · click to reopen", g.age),
                     );
@@ -676,9 +690,9 @@ impl Scene {
         if self.overflow > 0 {
             text.draw(
                 pix,
-                24.0,
-                HEADER_H + 24.0,
                 12.0,
+                HEADER_H + 14.0,
+                9.0,
                 pal.sub,
                 &format!("+{} more — open the studio", self.overflow),
             );
@@ -738,42 +752,42 @@ impl Scene {
         let state_rgb = occupant
             .map(|a| self.state_bits(&a.row.state, pal).3)
             .unwrap_or(pal.muted);
-        sprites::blit_role(pix, sprites::DESK2, x + 46.0, y + 8.0, SPRITE, pal, state_rgb, a8(255));
-        sprites::blit_role(pix, sprites::CHAIR, x + 18.0, y + 52.0, SPRITE, pal, pal.muted, a8(255));
+        sprites::blit_role(pix, sprites::DESK2, x + 23.0, y + 4.0, SPRITE, pal, state_rgb, a8(255));
+        sprites::blit_role(pix, sprites::CHAIR, x + 9.0, y + 26.0, SPRITE, pal, pal.muted, a8(255));
         if let Some(a) = occupant {
             let body = self.state_bits(&a.row.state, pal).2;
             let (wx, art): (f32, &[sprites::SpriteRect]) = match a.row.state {
-                WorkState::Asleep => (52.0, sprites::WORKER_ASLEEP),
-                WorkState::Working => (60.0, if blink { sprites::WORKER_B } else { sprites::WORKER }),
-                _ => (52.0, sprites::WORKER),
+                WorkState::Asleep => (26.0, sprites::WORKER_ASLEEP),
+                WorkState::Working => (30.0, if blink { sprites::WORKER_B } else { sprites::WORKER }),
+                _ => (26.0, sprites::WORKER),
             };
-            sprites::blit_role(pix, art, x + wx, y + 44.0, SPRITE, pal, body, 255);
+            sprites::blit_role(pix, art, x + wx, y + 22.0, SPRITE, pal, body, 255);
             if a.row.subagents > 0 {
                 sprites::blit_role(
                     pix,
                     sprites::SUBAGENT,
-                    x + 172.0,
-                    y + 56.0,
-                    3.5,
+                    x + 86.0,
+                    y + 28.0,
+                    1.8,
                     pal,
                     pal.good,
                     255,
                 );
                 text.draw(
                     pix,
-                    x + 172.0 + 30.0,
-                    y + 84.0,
-                    11.0,
+                    x + 86.0 + 16.0,
+                    y + 42.0,
+                    8.0,
                     pal.sub,
                     &format!("×{}", a.row.subagents),
                 );
             }
         }
         // glass label: name over two lines, then mark + state word
-        let ly = y + 104.0;
+        let ly = y + 52.0;
         let mut p = tiny_skia::Paint::default();
         p.set_color(tiny_skia::Color::from_rgba8(0, 0, 0, a8(87))); // .34
-        if let Some(rc) = tiny_skia::Rect::from_xywh(x, ly, PLATE_W, PLATE_H - 104.0) {
+        if let Some(rc) = tiny_skia::Rect::from_xywh(x, ly, PLATE_W, PLATE_H - 52.0) {
             pix.fill_rect(rc, &p, tiny_skia::Transform::identity(), None);
         }
         fill(pix, x, ly, PLATE_W, 1.0, pal.muted, a8(255));
@@ -786,11 +800,11 @@ impl Scene {
             (None, Some(g)) => (g.title.clone(), pal.sub, false),
             _ => (String::new(), pal.sub, false),
         };
-        // two lines of ~26 chars at 13 px, wrapped at word boundaries
-        let (l1, l2) = wrap2(&name, 26);
-        text.draw_weight(pix, x + 10.0, ly + 20.0, 13.0, name_ink, &l1, bold);
+        // two lines of ~20 chars at 9 px, wrapped at word boundaries
+        let (l1, l2) = wrap2(&name, 20);
+        text.draw_weight(pix, x + 5.0, ly + 12.0, 9.0, name_ink, &l1, bold);
         if !l2.is_empty() {
-            text.draw_weight(pix, x + 10.0, ly + 36.0, 13.0, name_ink, &l2, bold);
+            text.draw_weight(pix, x + 5.0, ly + 23.0, 9.0, name_ink, &l2, bold);
         }
         let state_line = match (occupant, ghost) {
             (Some(a), _) => {
@@ -807,7 +821,7 @@ impl Scene {
             ),
             _ => (String::new(), pal.sub),
         };
-        text.draw(pix, x + 10.0, ly + 58.0, 12.0, state_line.1, &state_line.0);
+        text.draw(pix, x + 5.0, ly + 37.0, 8.0, state_line.1, &state_line.0);
     }
 
     fn render_dynamic(&self, pix: &mut Pixmap, pal: &Palette, text: &Text, blink: bool) {
@@ -815,17 +829,17 @@ impl Scene {
         if self.meeting > 0 {
             let (mx, my, ..) = self.meet_rect();
             for i in 0..self.meeting.min(6) {
-                let sx = mx + 24.0 + (i % 3) as f32 * 90.0;
-                let sy = my + 110.0 + (i / 3) as f32 * 120.0;
-                let hop = if self.motion && (self.frame as usize + i) % 2 == 0 { 2.0 } else { 0.0 };
+                let sx = mx + 14.0 + (i % 3) as f32 * 44.0;
+                let sy = my + 66.0 + (i / 3) as f32 * 60.0;
+                let hop = if self.motion && (self.frame as usize + i) % 2 == 0 { 1.0 } else { 0.0 };
                 sprites::blit_role(pix, sprites::SUBAGENT, sx, sy - hop, SPRITE, pal, pal.good, 255);
             }
             if self.meeting > 6 {
                 text.draw(
                     pix,
-                    mx + 24.0,
-                    my + MEET_H - 20.0,
-                    12.0,
+                    mx + 14.0,
+                    my + MEET_H - 10.0,
+                    8.0,
                     pal.sub,
                     &format!("+{} more", self.meeting - 6),
                 );

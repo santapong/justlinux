@@ -103,13 +103,12 @@ fn anchor_for(pos: hyprdesk::Pos) -> Anchor {
     }
 }
 
-// fullscreen floor: anchored to every edge, size follows the monitor.
-// The plates carve the input region; the rest of the desktop stays
-// click-through (layer law).
 fn apply_placement(layer: &LayerSurface) {
-    layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
-    layer.set_size(0, 0);
-    layer.set_exclusive_zone(-1); // cover the whole monitor, waybar included
+    let (pos, x, y) = hyprdesk::placement("office2d", hyprdesk::Pos::BottomLeft, 24, 76);
+    layer.set_anchor(anchor_for(pos));
+    layer.set_margin(y, x, y, x);
+    layer.set_size(scene::CARD_W, scene::CARD_H);
+    layer.set_exclusive_zone(0);
 }
 
 fn parse_clients(s: &str) -> std::collections::HashMap<i32, String> {
@@ -459,7 +458,10 @@ fn main() {
         .insert_source(rx, |ev, _, app: &mut App| {
             if let channel::Event::Msg(sig) = ev {
                 match sig {
-                    Sig::Move => {} // fullscreen: nothing to reposition
+                    Sig::Move => {
+                        apply_placement(&app.layer);
+                        app.layer.commit();
+                    }
                     Sig::Theme => {
                         app.pal = hyprdesk::colors();
                         app.static_dirty = true;

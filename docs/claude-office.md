@@ -250,8 +250,9 @@ the bare command, which would *close* the office you just clicked to see.
 
 ## The design-handoff floor (Aug 2026)
 
-`office_layout = floor` is now the FULLSCREEN 1600×900 scene from the
-design handoff (docs/design-brief-terminals.md): role-colored worker
+`office_layout = floor` is the design-handoff scene at WIDGET scale
+(720×430, arrange-movable — the fullscreen version was built first and
+read as too big on this desktop; same anatomy at half scale) (docs/design-brief-terminals.md): role-colored worker
 sprites (body + monitor screen wear the state — a worker is never
 accent), 224×192 desk plates with two-line glass labels, the meeting
 room panel showing the workflow's real facts (name, live subagent

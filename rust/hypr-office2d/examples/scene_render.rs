@@ -10,8 +10,8 @@ fn main() {
     let pal = hyprdesk::colors();
     let text = hyprdesk::draw::Text::load();
     let mut sc = Scene::new();
-    sc.w = 1600.0;
-    sc.h = 900.0;
+    sc.w = scene::CARD_W as f32;
+    sc.h = scene::CARD_H as f32;
     let mk = |key: &str, title: &str, st: WorkState, subs: usize| SessionRow {
         key: key.into(),
         pid: 0,
@@ -57,12 +57,12 @@ fn main() {
     sc.meeting = 3;
     sc.meeting_title = "rust-migration rung 2 — parity harness".into();
 
-    let mut pix = tiny_skia::Pixmap::new(1600, 900).unwrap();
+    let mut pix = tiny_skia::Pixmap::new(scene::CARD_W, scene::CARD_H).unwrap();
     // wallpaper stand-in so the glass reads like on the desktop
     let mut p = tiny_skia::Paint::default();
     p.set_color(tiny_skia::Color::from_rgba8(38, 32, 30, 255));
     pix.fill_rect(
-        tiny_skia::Rect::from_xywh(0.0, 0.0, 1600.0, 900.0).unwrap(),
+        tiny_skia::Rect::from_xywh(0.0, 0.0, scene::CARD_W as f32, scene::CARD_H as f32).unwrap(),
         &p,
         tiny_skia::Transform::identity(),
         None,
