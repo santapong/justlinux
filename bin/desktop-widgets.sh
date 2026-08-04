@@ -46,6 +46,7 @@ do_stop() {
     pkill -xf "python3 $DOCK" 2>/dev/null
     pkill -xf "$DOCK" 2>/dev/null
     pkill -xf "python3 $SERWATCH" 2>/dev/null
+    pkill -xf "$SERWATCH" 2>/dev/null
     pkill -xf "python3 $CARDHOST" 2>/dev/null
     pkill -xf "$CARDHOST" 2>/dev/null
     # wait for real exit — a half-dead conky makes restart's pgrep guard
@@ -92,8 +93,9 @@ do_start() {   # $want_viz=1 forces viz back up even when the conf says off
             "$DOCK" >/dev/null 2>&1 9>&- &
         fi
     fi
-    pgrep -xf "python3 $SERWATCH" >/dev/null ||
+    if ! pgrep -xf "python3 $SERWATCH" >/dev/null && ! pgrep -xf "$SERWATCH" >/dev/null; then
         "$SERWATCH" >/dev/null 2>&1 9>&- &
+    fi
     if [ "$(setting pet on)" = "on" ]; then
         # the pet may be the python script (cmdline "python3 <path>") or
         # the rust binary (cmdline "<path>") — guard against both forms
