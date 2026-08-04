@@ -580,6 +580,13 @@ impl App {
                     self.dirty = true;
                 }
                 KeyCode::Enter | KeyCode::Char('l') => self.kube_follow_selected(),
+                KeyCode::Char('d') => {
+                    if let Some(p) = self.pods.get(self.sel_pod).cloned() {
+                        let sink = self.logs.rebind();
+                        kube::describe(&p.ns, &p.name, sink);
+                        self.retitle(format!("{}/{} — describe", p.ns, p.name));
+                    }
+                }
                 KeyCode::Char('c') => {
                     if let Some(p) = self.pods.get(self.sel_pod) {
                         kube::exec_shell(&p.ns, &p.name);
@@ -925,6 +932,7 @@ impl App {
         let keys: &[(&str, &str)] = match (self.pane, self.rows.get(self.sel)) {
             (Pane::Kube, _) => &[
                 ("Enter", "Logs"),
+                ("d", "Describe"),
                 ("c", "Shell"),
                 ("x", "Delete pod"),
                 ("C", "Context"),
