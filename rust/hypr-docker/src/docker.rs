@@ -274,6 +274,14 @@ pub fn compose_action(verb: &'static str, file: String, project: String, sink: L
     });
 }
 
+/// Pull every image a compose project references, progress streamed.
+pub fn compose_pull(file: &str, project: &str, sink: LogSink) {
+    sink.push_status(format!("⇣ compose pull {project} …"));
+    let mut cmd = Command::new("docker");
+    cmd.args(["compose", "-f", file, "-p", project, "pull"]);
+    stream_into(cmd, sink);
+}
+
 /// Merged, service-prefixed logs for a whole compose project.
 pub fn compose_logs(file: &str, project: &str, sink: LogSink) {
     let mut cmd = Command::new("docker");

@@ -542,6 +542,22 @@ impl App {
                     }
                 }
                 KeyCode::Char('p') => {
+                    // on a compose project: pull ALL its images
+                    if let Some(RowRef::Proj(pi)) = self.rows.get(self.sel) {
+                        let p = &self.projects[*pi];
+                        if p.dir.is_empty() {
+                            self.logs.push_status(format!(
+                                "✘ {}: compose file missing — pull images individually",
+                                p.name
+                            ));
+                            self.dirty = true;
+                        } else {
+                            let (file, name) = (p.dir.clone(), p.name.clone());
+                            docker::compose_pull(&file, &name, self.logs.rebind());
+                            self.retitle(format!("compose pull {name}"));
+                        }
+                        return;
+                    }
                     let prefill = match self.rows.get(self.sel) {
                         Some(RowRef::Img(i)) => {
                             let im = &self.images[*i];
@@ -921,6 +937,7 @@ impl App {
                 ("Enter", "Logs"),
                 ("s", "Up/Stop"),
                 ("r", "Restart"),
+                ("p", "Pull imgs"),
                 ("x", "Down"),
                 ("←→", "Fold"),
                 ("Tab", "K8s"),
