@@ -4,6 +4,22 @@ All notable changes to this desktop. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] — 2026-08-04
+
+### Fixed
+
+- **Studio: switching tabs no longer flickers the tree.** The single
+  moving pane became one tree per window (spawned on first visit; only
+  the visible one polls, so cost stays flat). The obsolete "tab 0"
+  exemptions went with it — every tab has its ✕.
+- **Studio: closing your last session no longer closes the studio.**
+  A window reduced to just its tree retires itself in the background
+  or becomes the sessions view when current/last — implemented as a
+  sweep, because `#{window_index}` inside a hook's run-shell expands
+  against the active window, not the changed one.
+- **Studio: the tree expands by mouse** — a ⟷ header button toggles
+  34 ↔ 56 cells; the pane border drags; `w` remains.
+
 ## [1.6.0] — 2026-08-04
 
 ### Added
