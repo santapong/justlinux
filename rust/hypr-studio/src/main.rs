@@ -90,8 +90,6 @@ fn launch() {
             "kitty",
             "--class",
             KITTY_CLASS,
-            "-o",
-            "background_opacity=0.93",
             "--title",
             "Claude Studio",
             "-e",

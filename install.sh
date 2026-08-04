@@ -17,6 +17,13 @@ mkdir -p "$HOME/.config"
 for c in config/*/; do
     [ -d "$c" ] || continue
     name=$(basename "$c")
+    if [ "$name" = "applications" ]; then
+        # .desktop entries live under ~/.local/share, not ~/.config
+        mkdir -p "$HOME/.local/share/applications"
+        cp config/applications/*.desktop "$HOME/.local/share/applications/"
+        echo "installed: ~/.local/share/applications/*.desktop"
+        continue
+    fi
     target="$HOME/.config/$name"
     keep "$target"
     cp -r "$c" "$target"
@@ -40,7 +47,7 @@ done
 # python grid office, so office_layout=floor is simply unavailable until
 # a `cargo` appears and install.sh runs again.
 if command -v cargo >/dev/null 2>&1 && [ -d rust ]; then
-    if (cd rust && cargo build --release -p hypr-office2d -p hypr-pet -p hypr-cardhost -p hypr-appdock -p hypr-viz -p hypr-claude-studio >/dev/null 2>&1); then
+    if (cd rust && cargo build --release -p hypr-office2d -p hypr-pet -p hypr-cardhost -p hypr-appdock -p hypr-viz -p hypr-claude-studio -p hypr-docker -p serial-watch >/dev/null 2>&1); then
         install -m755 rust/target/release/hypr-office2d "$HOME/.local/bin/hypr-office2d"
         # AFTER the bin/ loop above, so the binary wins over the python
         # script it replaces; without cargo the python copy stands
@@ -49,7 +56,9 @@ if command -v cargo >/dev/null 2>&1 && [ -d rust ]; then
         install -m755 rust/target/release/hypr-appdock "$HOME/.local/bin/hypr-appdock"
         install -m755 rust/target/release/hypr-viz "$HOME/.local/bin/hypr-viz"
         install -m755 rust/target/release/hypr-claude-studio "$HOME/.local/bin/hypr-claude-studio"
-        echo "installed: ~/.local/bin/{hypr-office2d,hypr-pet,hypr-cardhost,hypr-appdock,hypr-viz,hypr-claude-studio} (built from rust/)"
+        install -m755 rust/target/release/hypr-docker "$HOME/.local/bin/hypr-docker"
+        install -m755 rust/target/release/serial-watch "$HOME/.local/bin/serial-watch"
+        echo "installed: ~/.local/bin/{hypr-office2d,hypr-pet,hypr-cardhost,hypr-appdock,hypr-viz,hypr-claude-studio,hypr-docker} (built from rust/)"
     else
         echo "skipped: rust build failed — the python versions cover it" >&2
     fi

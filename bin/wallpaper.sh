@@ -98,18 +98,30 @@ swaync-client -rs 2>/dev/null || true           # swaync reloads css
 # deliberately disabled dock/host must not condemn every recolor to a
 # full fleet bounce
 live_ok=1
-if pgrep -xf "python3 $HOME/.local/bin/hypr-cardhost" >/dev/null 2>&1; then
+if pgrep -xf "python3 $HOME/.local/bin/hypr-cardhost" >/dev/null 2>&1 ||
+   pgrep -xf "$HOME/.local/bin/hypr-cardhost" >/dev/null 2>&1; then
     ~/.local/bin/hypr-cardhost --ctl reload-theme >/dev/null 2>&1 || live_ok=0
 fi
-if pgrep -xf "python3 $HOME/.local/bin/hypr-appdock" >/dev/null 2>&1; then
+if pgrep -xf "python3 $HOME/.local/bin/hypr-appdock" >/dev/null 2>&1 ||
+   pgrep -xf "$HOME/.local/bin/hypr-appdock" >/dev/null 2>&1; then
     ~/.local/bin/hypr-appdock --ctl reload-theme >/dev/null 2>&1 || live_ok=0
 fi
 pkill -USR2 -xf "python3 $HOME/.local/bin/hypr-claude-office" 2>/dev/null || true
+pkill -USR2 -xf "$HOME/.local/bin/hypr-office2d" 2>/dev/null || true
+pkill -USR2 -xf "$HOME/.local/bin/hypr-pet" 2>/dev/null || true
 # viz bakes its palette too, and `start` below deliberately leaves a running
 # one alone — without this it keeps the previous theme's colours forever
 pkill -USR2 -xf "python3 $HOME/.local/bin/hypr-viz" 2>/dev/null || true
+pkill -USR2 -xf "$HOME/.local/bin/hypr-viz" 2>/dev/null || true
+# every kitty window re-inks from the fresh colors-kitty.conf (wallust)
+pkill -USR1 -x kitty 2>/dev/null || true
+# a LIVE studio re-dresses its tmux bar in the new palette
+if pgrep -xf "$HOME/.local/bin/hypr-claude-studio --sidebar" >/dev/null 2>&1; then
+    ~/.local/bin/hypr-claude-studio --style >/dev/null 2>&1 || true
+fi
 if [ $live_ok = 1 ]; then
     # the pet bakes its palette at spawn — bounce only the pet
+    # rust pet handles USR2 above; only a python pet still needs the bounce
     pkill -xf "python3 $HOME/.local/bin/hypr-pet" 2>/dev/null || true
     for _ in $(seq 30); do
         pgrep -xf "python3 $HOME/.local/bin/hypr-pet" >/dev/null 2>&1 || break

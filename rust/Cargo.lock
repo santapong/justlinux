@@ -428,6 +428,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hypr-docker"
+version = "0.1.0"
+dependencies = [
+ "crossterm",
+ "hyprdesk",
+ "ratatui",
+ "serde_json",
+]
+
+[[package]]
 name = "hypr-office2d"
 version = "0.1.0"
 dependencies = [
@@ -896,6 +906,10 @@ checksum = "bf41e0cfaf7226dca15e8197172c295a782857fcb97fad1808a166870dee75a3"
 dependencies = [
  "serde",
 ]
+
+[[package]]
+name = "serial-watch"
+version = "0.1.0"
 
 [[package]]
 name = "shlex"

@@ -128,3 +128,10 @@ window#waybar.hidden {
 window#waybar.hidden {
     opacity: 0;
 }
+
+/* docker panel launcher: the count is STATUS ink by the fleet rule —
+   good while containers run, sub at rest, bad when the daemon is down */
+#custom-docker { padding: 0 8px; color: @subtext; }
+#custom-docker.on { color: @status-good; }
+#custom-docker.down { color: @status-bad; }
+#custom-docker:hover { background: alpha(@accent, 0.2); border-radius: 6px; }

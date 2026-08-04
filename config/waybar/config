@@ -22,6 +22,7 @@
         "tray",
         "custom/firewall",
         "custom/clamav",
+        "custom/docker",
         "custom/claude",
         "custom/notification",
         "custom/power"
@@ -155,6 +156,13 @@
         "interval": 30,
         "on-click": "~/.local/bin/hypr-tools.sh settings security",
         "on-click-right": "~/.local/bin/hypr-tools.sh clamav"
+    },
+    "custom/docker": {
+        "return-type": "json",
+        "exec": "~/.local/bin/hypr-docker --waybar",
+        "interval": 10,
+        "on-click": "~/.local/bin/hypr-docker",
+        "tooltip": true
     },
     "custom/claude": {
         "return-type": "json",
