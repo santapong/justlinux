@@ -57,7 +57,7 @@ fn open_windows() -> Vec<OpenWin> {
     .lines()
     .filter_map(|l| {
         let p: Vec<&str> = l.splitn(6, '|').collect();
-        if p.len() < 6 || p[0] == "0" {
+        if p.len() < 6 || p[1] == "sessions" {
             return None; // the tree's own window is furniture
         }
         Some(OpenWin {
@@ -563,10 +563,11 @@ impl App {
     // ----- drawing -----
     fn draw(&mut self, f: &mut Frame) {
         let pal = &self.pal;
+        let narrow = f.area().width < 60;
         let chunks = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(1),
-            Constraint::Length(1),
+            Constraint::Length(if narrow { 3 } else { 1 }),
         ])
         .split(f.area());
         // hint row: the MOUSE contract — the one thing the footer's keys
@@ -577,7 +578,8 @@ impl App {
                 Style::default().fg(col(pal.accent)).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "click picks · click again opens · C-b g jumps",
+                if narrow { "C-b g jumps" } else { "click picks · click again opens · C-b g jumps" }
+                    .to_string(),
                 Style::default().fg(col(pal.sub)),
             ),
         ]);
@@ -705,7 +707,42 @@ impl App {
         }
         f.render_widget(Paragraph::new(lines), chunks[1]);
 
-        // footer: the keys, in sub ink — the Textual Footer's job
+        // footer: the keys, in sub ink. In the 34-cell pane the handoff
+        // gives it a rule and two rows.
+        if narrow {
+            let key = |k: &str, v: &str| {
+                vec![
+                    Span::styled(
+                        format!(" {k} "),
+                        Style::default().fg(col(pal.accent2)).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(v.to_string(), Style::default().fg(col(pal.sub))),
+                ]
+            };
+            let mut lines = vec![Line::from(Span::styled(
+                "─".repeat(f.area().width as usize),
+                Style::default().fg(col(pal.muted)),
+            ))];
+            if let Some((msg, _, warn)) = &self.notify {
+                lines.push(Line::from(Span::styled(
+                    format!(" {msg}"),
+                    Style::default().fg(if *warn { col(pal.warn) } else { col(pal.good) }),
+                )));
+                lines.push(Line::from(""));
+            } else {
+                lines.push(Line::from(
+                    [key("↵", "open"), key("s", "beside"), key("n", "new")].concat(),
+                ));
+                lines.push(Line::from(
+                    [key("t", "term"), key("x", "stop"), key("q", "quit")].concat(),
+                ));
+            }
+            f.render_widget(Paragraph::new(lines), chunks[2]);
+            if self.confirm.is_some() {
+                self.draw_confirm(f);
+            }
+            return;
+        }
         let footer = if let Some((msg, _, warn)) = &self.notify {
             Line::from(Span::styled(
                 format!(" {msg}"),

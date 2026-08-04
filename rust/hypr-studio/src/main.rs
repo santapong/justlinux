@@ -119,9 +119,11 @@ fn launch() {
 const CLOSE_X: &str = "#{?#{!=:#{window_index},0},#[range=user|x#{window_index}] ✕ #[norange],}";
 
 fn pane_n(ink: &str, restore: &str) -> String {
+    // the tree pane rides along in the selected window — the bare count
+    // subtracts it, and only shows once a REAL second pane exists
     format!(
         "#{{?#{{@beside}},{ink}+#{{=/10/…:@beside}} {restore},\
-         #{{?#{{>:#{{window_panes}},1}},{ink}·#{{window_panes}} {restore},}}}}"
+         #{{?#{{>:#{{window_panes}},2}},{ink}·#{{e|-:#{{window_panes}},1}} {restore},}}}}"
     )
 }
 
@@ -150,9 +152,9 @@ pub fn style_tmux() {
     let _ = &warn; // centre uses it via format capture
     let me_ = me();
     let popup_cmd = format!("display-popup -E -w 70% -h 60% \"{me_} --palette\"");
-    let kill_cmd = format!(
-        "run-shell 'tmux -L {TMUX_SESSION} kill-window -t #{{s/^x//:mouse_status_range}}'"
-    );
+    // every mouse close routes through --close-tab, which rescues the
+    // tree pane before the window dies (the handoff's join-pane design)
+    let kill_cmd = format!("run-shell '{me_} --close-tab #{{s/^x//:mouse_status_range}}'");
     let split_cmd = format!("run-shell '{me_} --split #{{mouse_status_range}}'");
     let mouse_else = format!(
         "if -F '#{{m/r:^s[hv]$,#{{mouse_status_range}}}}' \
@@ -222,8 +224,10 @@ pub fn style_tmux() {
         "-g",
         "pane-border-format",
         &format!(
-            "#{{?pane_active, #[fg={acc},bold]#{{pane_index}} #{{pane_current_command}} ,\
-             #[fg={sub}] #{{pane_index}} #{{pane_current_command}} }}"
+            "#{{?pane_active, #[fg={acc},bold]#{{pane_index}} \
+             #{{?#{{m/r:sidebar,#{{pane_start_command}}}},sessions,#{{pane_current_command}}}} ,\
+             #[fg={sub}] #{{pane_index}} \
+             #{{?#{{m/r:sidebar,#{{pane_start_command}}}},sessions,#{{pane_current_command}}}} }}"
         ),
     ]);
     tmux(&[
@@ -254,7 +258,25 @@ pub fn style_tmux() {
         &kill_cmd,
         &mouse_else,
     ]);
-    tmux(&["bind-key", "-n", "MouseUp2Status", "kill-window", "-t="]);
+    tmux(&[
+        "bind-key",
+        "-n",
+        "MouseUp2Status",
+        "if",
+        "-F",
+        "#{m/r:^window\\|,#{mouse_status_range}}",
+        &format!("run-shell '{me_} --close-tab #{{s/^window\\|//:mouse_status_range}}'"),
+        "",
+    ]);
+    // the tree pane follows the selected window (join-pane moves it)
+    tmux(&[
+        "set-hook", "-g", "after-select-window",
+        &format!("run-shell -b '{me_} --tree-follow'"),
+    ]);
+    tmux(&[
+        "set-hook", "-g", "after-new-window",
+        &format!("run-shell -b '{me_} --tree-follow'"),
+    ]);
     tmux(&["bind-key", "C-Space", "display-popup", "-E", "-w", "70%", "-h", "60%", &palette_popup]);
     tmux(&["bind-key", "g", "display-popup", "-E", "-w", "70%", "-h", "60%", &palette_popup]);
 }
@@ -335,8 +357,8 @@ pub fn rename_open_tabs() {
             it.next().unwrap_or(""),
             it.next().unwrap_or(""),
         );
-        if idx == "0" {
-            continue; // the sidebar owns its window; never renamed
+        if cmd.contains("--sidebar") {
+            continue; // the tree pane is furniture, not identity
         }
         windows.entry(idx.to_string()).or_default().push((
             pane.parse().unwrap_or(0),
@@ -345,6 +367,9 @@ pub fn rename_open_tabs() {
         ));
     }
     for (idx, mut panes) in windows {
+        if panes.is_empty() {
+            continue; // pure-sessions window keeps its name
+        }
         // LOWEST surviving pane index is the tab's identity (python)
         panes.sort_by_key(|p| p.0);
         let ident = &panes[0];
@@ -547,10 +572,10 @@ pub fn studio_stake() -> (usize, usize, Vec<String>) {
             it.next().unwrap_or(""),
             it.next().unwrap_or(""),
         );
-        if idx == "0" {
-            continue;
+        if cmd.contains("--sidebar") || name == "sessions" {
+            continue; // the tree is the studio's own furniture
         }
-        if pane == "0" {
+        if !names.contains(&name.to_string()) {
             names.push(name.to_string());
         }
         if find_uuid(cmd).is_some() {
@@ -653,8 +678,76 @@ fn palette() {
     }
 }
 
+/// The tree pane follows the selected window (handoff: the sessions
+/// pane is permanently on screen beside whatever you are reading).
+/// join-pane MOVES the single tree instance; its old window dies with
+/// it if the tree was alone there — which is exactly the design's
+/// "there is no tab 0 to accidentally close".
+fn tree_follow() {
+    let cur = tmux_out(&["display-message", "-p", "#{window_index}"]).trim().to_string();
+    if cur.is_empty() {
+        return;
+    }
+    let mut tree: Option<(String, String)> = None; // (pane_id, window_index)
+    for line in tmux_out(&["list-panes", "-s", "-F", "#{pane_id}|#{window_index}|#{pane_start_command}"]).lines() {
+        let p: Vec<&str> = line.splitn(3, '|').collect();
+        if p.len() == 3 && p[2].contains("--sidebar") {
+            tree = Some((p[0].to_string(), p[1].to_string()));
+            break;
+        }
+    }
+    let Some((pane, win)) = tree else { return };
+    if win == cur {
+        return; // already beside you
+    }
+    // is the current window the tree's own (pure-sessions) window? no-op
+    tmux(&[
+        "join-pane", "-d", "-b", "-h", "-l", "34", "-s", &pane,
+        "-t", &format!("{TMUX_SESSION}:{cur}"),
+    ]);
+}
+
+/// Close a tab WITHOUT taking the tree with it: if the tree pane lives
+/// in that window, kill only its siblings and the window becomes the
+/// sessions window again; otherwise a plain kill-window.
+fn close_tab(idx: &str) {
+    let mut tree_here = false;
+    let mut others: Vec<String> = Vec::new();
+    for line in tmux_out(&[
+        "list-panes", "-t", &format!("{TMUX_SESSION}:{idx}"), "-F",
+        "#{pane_id}|#{pane_start_command}",
+    ])
+    .lines()
+    {
+        let (id, cmd) = line.split_once('|').unwrap_or(("", ""));
+        if cmd.contains("--sidebar") {
+            tree_here = true;
+        } else {
+            others.push(id.to_string());
+        }
+    }
+    if tree_here {
+        for id in others {
+            tmux(&["kill-pane", "-t", &id]);
+        }
+        tmux(&["rename-window", "-t", &format!("{TMUX_SESSION}:{idx}"), "sessions"]);
+    } else {
+        tmux(&["kill-window", "-t", &format!("{TMUX_SESSION}:{idx}")]);
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--close-tab") {
+        if let Some(idx) = args.get(i + 1) {
+            close_tab(idx);
+        }
+        return;
+    }
+    if args.iter().any(|a| a == "--tree-follow") {
+        tree_follow();
+        return;
+    }
     if args.iter().any(|a| a == "--sidebar") {
         sidebar::run();
     } else if let Some(i) = args.iter().position(|a| a == "--split") {
