@@ -4,6 +4,40 @@ All notable changes to this desktop. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] — 2026-08-04
+
+### Added
+
+- **The design-handoff pass** across all three Claude-facing surfaces
+  (mockups from Claude design; `docs/design-brief-terminals.md` was the
+  brief). One rule everywhere: colours are roles, refilled by wallust.
+- **Studio — the sessions tree is a pane, not a tab.** One ratatui tree
+  join-paned beside whichever window is selected, following every tab
+  switch; window 0 is gone as a concept. Every mouse close rescues the
+  tree before its window dies. Plus: an OPEN section mapping 1:1 onto
+  the tabs, two ink levels per row, │ tab separators (in `sub` — muted
+  vanished on real wallpapers), no stale marks on the selected tab, and
+  a narrow-pane footer.
+- **Docker panel** — one right-aligned status column (compose service
+  names, compressed ages, exit codes in bad ink), collapsed projects
+  state their failure, images fold by repository with summed sizes,
+  `/` live filter, log-level inks with following/paused and an
+  end-of-stream rule, `d` describes a pod (see inside: containers,
+  events).
+- **Office** — the handoff floor at widget scale (720×430,
+  arrange-movable): role-sprite workers whose body and desk screen wear
+  the state, glass plates with word-wrapped names, needs-you from the
+  studio bell (zero motion, by design law), ghost desks, a meeting room
+  showing real workflow facts only, header counts and a hover strip.
+  `office_motion=off` substitutes stillness. hypr-arrange learns the
+  office2d namespace and both cmdline forms.
+
+### Fixed
+
+- The fullscreen office draft cost 6.3% CPU; per-slot damage tracking,
+  a pre-swapped background and cache buckets brought the shipped widget
+  to 1.6% — under the fleet's 2% law.
+
 ## [1.5.0] — 2026-08-04
 
 ### Added
