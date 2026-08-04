@@ -240,7 +240,10 @@ pub fn style_tmux() {
     tmux(&["bind-key", "Down", "select-pane", "-D"]);
     tmux(&["set", "-g", "window-status-format", &ws_format]);
     tmux(&["set", "-g", "window-status-current-format", &ws_current]);
-    tmux(&["set", "-g", "window-status-separator", &format!("#[fg={muted}]│#[default]")]);
+    // sub, not muted: muted is ~1.5:1 against the bar and the rule
+    // disappeared on real wallpapers — a separator you cannot see fails
+    // its one job (found live)
+    tmux(&["set", "-g", "window-status-separator", &format!("#[fg={sub}]│#[default]")]);
     tmux(&[
         "bind-key",
         "-n",
