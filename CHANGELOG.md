@@ -4,6 +4,44 @@ All notable changes to this desktop. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] — 2026-08-04
+
+### Added
+
+- **hypr-docker** — a docker-desktop-shaped control panel (Rust/ratatui,
+  `ALT+CTRL+D`, 󰡨 waybar module with running count, launcher entry).
+  Containers with live CPU/MEM: start/stop/restart, remove behind an
+  armed confirm, connect (shell in the container in its own kitty
+  window), per-container logs following live. Compose projects group
+  under expandable rows: up/stop, restart, down, merged service logs,
+  and `p` pulls every image the project references — a project whose
+  compose file vanished degrades to per-container verbs and says so.
+  Images list + `docker pull` for any registry ref with streamed
+  progress. A Kubernetes pane (Tab): pods across namespaces, logs,
+  exec, delete, context cycling — every kubectl call carries a 3 s
+  timeout, so a stopped cluster renders "unreachable", never a hang.
+- **Kitty follows the wallpaper.** A wallust template now generates
+  `colors-kitty.conf` (included last, so it overrides the static
+  Catppuccin block): the plain terminal, the studio and the docker
+  panel all re-ink with the wallpaper, live on every recolor.
+
+### Changed
+
+- **serial-watch ported to Rust** — the last resident python process
+  (13 → 2.1 MB). The whole resident fleet now measures 4.65% CPU /
+  64 MB against ~9% / ~350 MB in the python era; on-demand python
+  (Settings, Launcher, Kanban, pickers) stays by design at zero
+  resident cost.
+- The studio and docker windows inherit kitty.conf's glass opacity
+  instead of carrying their own.
+
+### Fixed
+
+- **Wallpaper recolor reaches the rust fleet.** wallpaper.sh still
+  named the python cmdlines: cardhost/appdock reload-theme guards now
+  match both forms, office2d/pet/viz get USR2 as binaries, kitty
+  reloads, and a live studio re-dresses its tab bar via `--style`.
+
 ## [1.3.0] — 2026-08-02
 
 ### Changed
