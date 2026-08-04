@@ -144,13 +144,10 @@ pub fn style_tmux() {
         &format!("#[fg={sub}]"),
         &format!("#[fg={sub}]"),
     );
-    let attn_cur = attn(
-        &format!("#[fg={good}]"),
-        &format!("#[fg={sub}]"),
-        &format!("#[bg={acc},fg={bg},bold]"),
-    );
+
     let pane_n_plain = pane_n(&format!("#[fg={sub}]"), &format!("#[fg={sub}]"));
     let pane_n_cur = pane_n("", "");
+    let _ = &warn; // centre uses it via format capture
     let me_ = me();
     let popup_cmd = format!("display-popup -E -w 70% -h 60% \"{me_} --palette\"");
     let kill_cmd = format!(
@@ -171,14 +168,18 @@ pub fn style_tmux() {
     );
     let status_right = format!("{palette_button}  {split_buttons}  #[fg={sub}]#S ");
     let centre = format!(
-        "#[fg={sub}]#{{=/20/…:#{{b:pane_current_path}}}}\
-         · #{{session_windows}} tabs\
+        "#[fg={sub}]󰉋 #{{=/20/…:#{{b:pane_current_path}}}}\
+         #[fg={muted}] · #[fg={fg}]#{{session_windows}}#[fg={sub}] tabs\
          #{{?window_zoomed_flag,#[fg={warn}] [zoom],}}\
          #{{?pane_in_mode,#[fg={acc2}] #{{pane_mode}},}}"
     );
-    let ws_format = format!("  #I #W {pane_n_plain}{attn_plain}{CLOSE_X} ");
+    let ws_format = format!(
+        "  #[fg={sub}]#I #[fg={fg}]#W {pane_n_plain}{attn_plain}{CLOSE_X} "
+    );
+    // the selected tab carries NO attention marks — selecting is what
+    // clears them, so a mark here is always stale (design)
     let ws_current = format!(
-        "#[bg={acc},fg={bg},bold]  #I #W {pane_n_cur}{attn_cur}{CLOSE_X}#[bg={acc},fg={bg}] #[default]"
+        "#[bg={acc},fg={bg},bold]  #I #W {pane_n_cur}{CLOSE_X}#[bg={acc},fg={bg}] #[default]"
     );
     let palette_popup = format!("{me_} --palette");
     let sets: Vec<Vec<&str>> = vec![
@@ -214,13 +215,16 @@ pub fn style_tmux() {
         "status-format[1]",
         "#[align=left]#{W:#[range=window|#{window_index}]#{E:window-status-format}#[norange],#[range=window|#{window_index}]#{E:window-status-current-format}#[norange]}",
     ]);
-    tmux(&["set", "-g", "pane-border-style", &format!("fg={sub}")]);
+    tmux(&["set", "-g", "pane-border-style", &format!("fg={muted}")]);
     tmux(&["set", "-g", "pane-active-border-style", &format!("fg={acc}")]);
     tmux(&[
         "set",
         "-g",
         "pane-border-format",
-        &format!(" #[fg={acc2},bold]#{{pane_index}}#[default] #[fg={sub}]#{{pane_current_command}} "),
+        &format!(
+            "#{{?pane_active, #[fg={acc},bold]#{{pane_index}} #{{pane_current_command}} ,\
+             #[fg={sub}] #{{pane_index}} #{{pane_current_command}} }}"
+        ),
     ]);
     tmux(&[
         "set-hook",
@@ -236,7 +240,7 @@ pub fn style_tmux() {
     tmux(&["bind-key", "Down", "select-pane", "-D"]);
     tmux(&["set", "-g", "window-status-format", &ws_format]);
     tmux(&["set", "-g", "window-status-current-format", &ws_current]);
-    tmux(&["set", "-g", "window-status-separator", ""]);
+    tmux(&["set", "-g", "window-status-separator", &format!("#[fg={muted}]│#[default]")]);
     tmux(&[
         "bind-key",
         "-n",
