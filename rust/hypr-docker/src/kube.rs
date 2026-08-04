@@ -123,3 +123,11 @@ pub fn exec_shell(ns: &str, pod: &str) {
         .stderr(Stdio::null())
         .spawn();
 }
+
+/// Everything inside a pod — containers, images, mounts, conditions,
+/// events — streamed into the pane (the "see inside" view).
+pub fn describe(ns: &str, pod: &str, sink: LogSink) {
+    let mut cmd = std::process::Command::new("kubectl");
+    cmd.args(["describe", "pod", "-n", ns, pod, TIMEOUT]);
+    crate::docker::stream_into_pub(cmd, sink);
+}

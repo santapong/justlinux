@@ -83,3 +83,120 @@ pub fn blit(
         }
     }
 }
+
+// ---------------- the design-handoff sprite sheet ----------------
+// (docs/design-brief-terminals.md + ~/Pictures/design-brief/handoff)
+// Every fill is a palette role; `State` is the parameterized slot the
+// worker body and the desk monitor screen wear. 4 px per sprite pixel.
+
+/// Which role a rect wears. State resolves at blit time.
+#[derive(Clone, Copy)]
+pub enum R {
+    Sub,
+    Fg,
+    Bg,
+    Muted,
+    State,
+}
+
+pub type SpriteRect = (f32, f32, f32, f32, R);
+
+/// worker 12×15 — antenna sub, head fg, eye holes bg, body+arms STATE,
+/// legs sub. Frame B swaps the arm rows for the typing bob.
+pub const WORKER: &[SpriteRect] = &[
+    (5.0, 0.0, 2.0, 1.0, R::Sub),
+    (3.0, 1.0, 6.0, 5.0, R::Fg),
+    (4.0, 3.0, 1.0, 1.0, R::Bg),
+    (7.0, 3.0, 1.0, 1.0, R::Bg),
+    (2.0, 6.0, 8.0, 5.0, R::State),
+    (1.0, 7.0, 1.0, 3.0, R::State),
+    (10.0, 7.0, 1.0, 3.0, R::State),
+    (3.0, 11.0, 2.0, 4.0, R::Sub),
+    (7.0, 11.0, 2.0, 4.0, R::Sub),
+];
+/// arms one pixel up — the 2-frame typing bob (160 ms alternation on a
+/// tiny region: motion, not a luminance flash; WCAG area threshold holds)
+pub const WORKER_B: &[SpriteRect] = &[
+    (5.0, 0.0, 2.0, 1.0, R::Sub),
+    (3.0, 1.0, 6.0, 5.0, R::Fg),
+    (4.0, 3.0, 1.0, 1.0, R::Bg),
+    (7.0, 3.0, 1.0, 1.0, R::Bg),
+    (2.0, 6.0, 8.0, 5.0, R::State),
+    (1.0, 6.0, 1.0, 3.0, R::State),
+    (10.0, 6.0, 1.0, 3.0, R::State),
+    (3.0, 11.0, 2.0, 4.0, R::Sub),
+    (7.0, 11.0, 2.0, 4.0, R::Sub),
+];
+/// asleep: head drops one pixel, antenna folds
+pub const WORKER_ASLEEP: &[SpriteRect] = &[
+    (3.0, 2.0, 6.0, 5.0, R::Fg),
+    (2.0, 7.0, 8.0, 4.0, R::State),
+    (1.0, 8.0, 1.0, 2.0, R::State),
+    (10.0, 8.0, 1.0, 2.0, R::State),
+    (3.0, 11.0, 2.0, 4.0, R::Sub),
+    (7.0, 11.0, 2.0, 4.0, R::Sub),
+];
+pub const SUBAGENT: &[SpriteRect] = &[
+    (2.0, 0.0, 4.0, 4.0, R::Fg),
+    (3.0, 2.0, 1.0, 1.0, R::Bg),
+    (5.0, 2.0, 1.0, 1.0, R::Bg),
+    (1.0, 4.0, 6.0, 4.0, R::State),
+    (2.0, 8.0, 1.0, 2.0, R::Sub),
+    (5.0, 8.0, 1.0, 2.0, R::Sub),
+];
+/// desk 22×13 — frame/stand/top/legs muted, the SCREEN is the state light
+pub const DESK2: &[SpriteRect] = &[
+    (6.0, 0.0, 10.0, 4.0, R::Muted),
+    (7.0, 1.0, 8.0, 2.0, R::State),
+    (10.0, 4.0, 2.0, 2.0, R::Muted),
+    (0.0, 6.0, 22.0, 2.0, R::Muted),
+    (1.0, 8.0, 2.0, 5.0, R::Muted),
+    (19.0, 8.0, 2.0, 5.0, R::Muted),
+];
+pub const CHAIR: &[SpriteRect] = &[
+    (0.0, 0.0, 8.0, 4.0, R::Muted),
+    (3.0, 4.0, 2.0, 4.0, R::Muted),
+    (1.0, 8.0, 6.0, 2.0, R::Muted),
+];
+pub const PLANT: &[SpriteRect] = &[
+    (1.0, 0.0, 6.0, 3.0, R::Sub),
+    (0.0, 2.0, 8.0, 2.0, R::Sub),
+    (2.0, 4.0, 4.0, 2.0, R::Sub),
+    (3.0, 6.0, 2.0, 1.0, R::Sub),
+    (2.0, 7.0, 4.0, 5.0, R::Muted),
+];
+pub const DOOR: &[SpriteRect] = &[
+    (0.0, 0.0, 12.0, 22.0, R::Muted),
+    (2.0, 2.0, 8.0, 20.0, R::Bg),
+    (8.0, 11.0, 1.0, 2.0, R::Sub),
+];
+
+/// Blit a role sprite at 4 px per pixel (or any scale), resolving R::State
+/// to `state` — the one slot that changes with what the session is doing.
+pub fn blit_role(
+    pix: &mut Pixmap,
+    art: &[SpriteRect],
+    x: f32,
+    y: f32,
+    scale: f32,
+    pal: &Palette,
+    state: Rgb,
+    alpha: u8,
+) {
+    let mut paint = tiny_skia::Paint::default();
+    for &(rx, ry, rw, rh, role) in art {
+        let Rgb(r, g, b) = match role {
+            R::Sub => pal.sub,
+            R::Fg => pal.fg,
+            R::Bg => pal.bg,
+            R::Muted => pal.muted,
+            R::State => state,
+        };
+        paint.set_color(tiny_skia::Color::from_rgba8(r, g, b, alpha));
+        if let Some(rect) =
+            tiny_skia::Rect::from_xywh(x + rx * scale, y + ry * scale, rw * scale, rh * scale)
+        {
+            pix.fill_rect(rect, &paint, tiny_skia::Transform::identity(), None);
+        }
+    }
+}

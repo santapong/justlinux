@@ -23,11 +23,53 @@ fn col(c: hyprdesk::Rgb) -> Color {
     Color::Rgb(c.0, c.1, c.2)
 }
 
+/// a ~12% wash of `ink` over `base` — the hover tone the design wants,
+/// visually distinct from the muted cursor block
+fn wash(base: hyprdesk::Rgb, ink: hyprdesk::Rgb, t: f32) -> Color {
+    let m = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t) as u8;
+    Color::Rgb(m(base.0, ink.0), m(base.1, ink.1), m(base.2, ink.2))
+}
+
 #[derive(Clone, PartialEq)]
 enum NodeKind {
     Section,
     Project,
     Leaf,
+    OpenTab, // a studio window; Enter/second-click selects it
+}
+
+#[derive(Clone, PartialEq)]
+struct OpenWin {
+    idx: String,
+    name: String,
+    beside: String,
+    active: bool,
+    bell: bool,
+    activity: bool,
+}
+
+fn open_windows() -> Vec<OpenWin> {
+    super::tmux_out(&[
+        "list-windows",
+        "-F",
+        "#{window_index}|#{window_name}|#{@beside}|#{window_active}|#{window_bell_flag}|#{window_activity_flag}",
+    ])
+    .lines()
+    .filter_map(|l| {
+        let p: Vec<&str> = l.splitn(6, '|').collect();
+        if p.len() < 6 || p[1] == "sessions" {
+            return None; // the tree's own window is furniture
+        }
+        Some(OpenWin {
+            idx: p[0].into(),
+            name: p[1].into(),
+            beside: p[2].into(),
+            active: p[3] == "1",
+            bell: p[4] == "1",
+            activity: p[5] == "1",
+        })
+    })
+    .collect()
 }
 
 #[derive(Clone)]
@@ -38,6 +80,7 @@ struct Node {
     expanded: bool,
     row: Option<Row>,
     project_cwd: String,
+    win: Option<OpenWin>,
 }
 
 struct Confirm {
@@ -95,10 +138,15 @@ impl App {
     /// every poll must do nothing — the signature check carries that.
     fn reload(&mut self, force: bool) {
         let rows = hyprdesk::session_rows();
-        let sig: Vec<(String, String, String, i32, String)> = rows
+        let winsig: String = open_windows()
+            .iter()
+            .map(|w| format!("{}|{}|{}{}{}|{};", w.idx, w.name, w.active as u8, w.bell as u8, w.activity as u8, w.beside))
+            .collect();
+        let mut sig: Vec<(String, String, String, i32, String)> = rows
             .iter()
             .map(|r| (r.kind.clone(), r.label.clone(), r.sid.clone(), r.pid, r.detail.clone()))
             .collect();
+        sig.push((winsig, String::new(), String::new(), 0, String::new()));
         if !force && sig == self.sig {
             return;
         }
@@ -115,11 +163,34 @@ impl App {
             None
         };
         let mut nodes = Vec::new();
+        let wins = open_windows();
+        if !wins.is_empty() {
+            nodes.push(Node {
+                key: format!("OPEN  · {}", wins.len()),
+                depth: 0,
+                kind: NodeKind::Section,
+                expanded: true,
+                row: None,
+                project_cwd: String::new(),
+                win: None,
+            });
+            for w in &wins {
+                nodes.push(Node {
+                    key: format!("open:{}", w.idx),
+                    depth: 1,
+                    kind: NodeKind::OpenTab,
+                    expanded: false,
+                    row: None,
+                    project_cwd: String::new(),
+                    win: Some(w.clone()),
+                });
+            }
+        }
         let running: Vec<&Row> =
             self.rows.iter().filter(|r| r.kind == "run" || r.kind == "bg").collect();
         if !running.is_empty() {
-            let key = format!("Running ({})", running.len());
-            let open = !self.collapsed_sections.contains("Running");
+            let key = format!("RUNNING  · {}", running.len());
+            let open = !self.collapsed_sections.contains("RUNNING");
             nodes.push(Node {
                 key,
                 depth: 0,
@@ -127,6 +198,7 @@ impl App {
                 expanded: open,
                 row: None,
                 project_cwd: String::new(),
+                win: None,
             });
             if open {
                 for r in &running {
@@ -137,6 +209,7 @@ impl App {
                         expanded: false,
                         row: Some((*r).clone()),
                         project_cwd: String::new(),
+                        win: None,
                     });
                 }
             }
@@ -149,8 +222,8 @@ impl App {
             }
         }
         projects.sort_by(|a, b| a.0.cmp(&b.0));
-        let pkey = format!("Projects ({})", projects.len());
-        let popen = !self.collapsed_sections.contains("Projects");
+        let pkey = format!("PROJECTS  · {}", projects.len());
+        let popen = !self.collapsed_sections.contains("PROJECTS");
         nodes.push(Node {
             key: pkey,
             depth: 0,
@@ -158,6 +231,7 @@ impl App {
             expanded: popen,
             row: None,
             project_cwd: String::new(),
+            win: None,
         });
         if popen {
             for (label, items) in &projects {
@@ -169,6 +243,7 @@ impl App {
                     expanded: open,
                     row: None,
                     project_cwd: items[0].cwd.clone(),
+                    win: None,
                 });
                 if open {
                     for it in items {
@@ -179,6 +254,7 @@ impl App {
                             expanded: false,
                             row: Some((*it).clone()),
                             project_cwd: String::new(),
+                            win: None,
                         });
                     }
                 }
@@ -198,7 +274,13 @@ impl App {
         let (kind, key) = (self.nodes[i].kind.clone(), self.nodes[i].key.clone());
         match kind {
             NodeKind::Section => {
-                let name = if key.starts_with("Running") { "Running" } else { "Projects" };
+                let name = if key.starts_with("RUNNING") {
+                    "RUNNING"
+                } else if key.starts_with("OPEN") {
+                    "OPEN"
+                } else {
+                    "PROJECTS"
+                };
                 if !self.collapsed_sections.remove(name) {
                     self.collapsed_sections.insert(name.to_string());
                 }
@@ -208,7 +290,7 @@ impl App {
                     self.expanded_projects.insert(key);
                 }
             }
-            NodeKind::Leaf => return,
+            NodeKind::Leaf | NodeKind::OpenTab => return,
         }
         self.rebuild(true);
     }
@@ -257,6 +339,10 @@ impl App {
     }
 
     fn action_open(&mut self) {
+        if let Some(w) = self.nodes.get(self.cursor).and_then(|n| n.win.clone()) {
+            super::tmux(&["select-window", "-t", &format!("{}:{}", super::TMUX_SESSION, w.idx)]);
+            return;
+        }
         if let Some(row) = self.current().cloned() {
             self.open_entry(row);
         }
@@ -391,10 +477,10 @@ impl App {
                 }
             }
             KeyCode::Enter => {
-                if self.nodes.get(self.cursor).is_some_and(|n| n.kind != NodeKind::Leaf) {
-                    self.toggle(self.cursor);
-                } else {
-                    self.action_open();
+                let kind = self.nodes.get(self.cursor).map(|n| n.kind.clone());
+                match kind {
+                    Some(NodeKind::Section) | Some(NodeKind::Project) => self.toggle(self.cursor),
+                    _ => self.action_open(),
                 }
             }
             KeyCode::Char('n') => self.action_new(),
@@ -456,17 +542,16 @@ impl App {
                 let Some(i) = self.node_at(m.column, m.row) else { return };
                 if i == self.cursor {
                     // second click on the aimed row: commit (spec)
-                    if self.nodes[i].kind == NodeKind::Leaf {
-                        self.action_open();
-                    } else {
-                        self.toggle(i);
+                    match self.nodes[i].kind {
+                        NodeKind::Leaf | NodeKind::OpenTab => self.action_open(),
+                        _ => self.toggle(i),
                     }
                     return;
                 }
                 // first click: aim only — and expandables still toggle,
                 // because a mistoggle is free (spec)
                 self.cursor = i;
-                if self.nodes[i].kind != NodeKind::Leaf {
+                if matches!(self.nodes[i].kind, NodeKind::Section | NodeKind::Project) {
                     self.toggle(i);
                 }
                 self.dirty = true;
@@ -478,10 +563,11 @@ impl App {
     // ----- drawing -----
     fn draw(&mut self, f: &mut Frame) {
         let pal = &self.pal;
+        let narrow = f.area().width < 60;
         let chunks = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(1),
-            Constraint::Length(1),
+            Constraint::Length(if narrow { 3 } else { 1 }),
         ])
         .split(f.area());
         // hint row: the MOUSE contract — the one thing the footer's keys
@@ -492,7 +578,8 @@ impl App {
                 Style::default().fg(col(pal.accent)).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "click picks · click again opens · C-b g jumps",
+                if narrow { "C-b g jumps" } else { "click picks · click again opens · C-b g jumps" }
+                    .to_string(),
                 Style::default().fg(col(pal.sub)),
             ),
         ]);
@@ -507,32 +594,74 @@ impl App {
         }
         let mut lines: Vec<Line> = Vec::new();
         for (i, n) in self.nodes.iter().enumerate().skip(self.scroll).take(h) {
-            let mut spans: Vec<Span> = vec![Span::raw("  ".repeat(n.depth as usize))];
+            let mut spans: Vec<Span> = vec![Span::raw(" ".repeat(n.depth as usize))];
             match n.kind {
                 NodeKind::Section => {
+                    // headers are fg, their counts sub — accent2 on every
+                    // group header would smear accent across the screen
+                    let (head, count) = n.key.split_once("  · ").unwrap_or((n.key.as_str(), ""));
                     spans.push(Span::styled(
-                        if n.expanded { "▾ " } else { "▸ " },
+                        head.to_string(),
+                        Style::default().fg(col(pal.fg)).add_modifier(Modifier::BOLD),
+                    ));
+                    if !count.is_empty() {
+                        spans.push(Span::styled(
+                            format!("  · {count}"),
+                            Style::default().fg(col(pal.sub)),
+                        ));
+                    }
+                }
+                NodeKind::OpenTab => {
+                    let w = n.win.as_ref().unwrap();
+                    spans.push(Span::styled(
+                        if w.active { "▸" } else { " " }.to_string(),
                         Style::default().fg(col(pal.sub)),
                     ));
                     spans.push(Span::styled(
-                        n.key.clone(),
-                        Style::default().add_modifier(Modifier::BOLD),
+                        format!("{}  ", w.idx),
+                        Style::default().fg(col(pal.sub)),
                     ));
+                    spans.push(Span::styled(
+                        w.name.clone(),
+                        Style::default().fg(col(pal.fg)),
+                    ));
+                    if !w.beside.is_empty() {
+                        spans.push(Span::styled(
+                            format!("  +{}", w.beside),
+                            Style::default().fg(col(pal.sub)),
+                        ));
+                    }
+                    if !w.active {
+                        if w.bell {
+                            spans.push(Span::styled("  ●", Style::default().fg(col(pal.good))));
+                        } else if w.activity {
+                            spans.push(Span::styled("  ○", Style::default().fg(col(pal.sub))));
+                        }
+                    }
                 }
                 NodeKind::Project => {
                     spans.push(Span::styled(
-                        if n.expanded { "▾ " } else { "▸ " },
+                        if n.expanded { "▾" } else { "▸" }.to_string(),
                         Style::default().fg(col(pal.sub)),
                     ));
-                    spans.push(Span::styled("󰉋 ", Style::default().fg(col(pal.sub))));
-                    spans.push(Span::raw(n.key.clone()));
+                    spans.push(Span::styled("󰉋  ", Style::default().fg(col(pal.sub))));
+                    let count = self
+                        .rows
+                        .iter()
+                        .filter(|r| r.kind == "past" && r.label == n.key)
+                        .count();
+                    spans.push(Span::styled(n.key.clone(), Style::default().fg(col(pal.fg))));
+                    spans.push(Span::styled(
+                        format!("  {count}"),
+                        Style::default().fg(col(pal.sub)),
+                    ));
                 }
                 NodeKind::Leaf => {
                     let r = n.row.as_ref().unwrap();
                     match r.kind.as_str() {
                         "run" => {
-                            spans.push(Span::styled("● ", Style::default().fg(col(pal.good))));
-                            spans.push(Span::raw(r.label.clone()));
+                            spans.push(Span::styled("●  ", Style::default().fg(col(pal.good))));
+                            spans.push(Span::styled(r.label.clone(), Style::default().fg(col(pal.fg))));
                             if !r.dir.is_empty() {
                                 spans.push(Span::styled(
                                     format!("  {}", r.dir),
@@ -541,27 +670,29 @@ impl App {
                             }
                         }
                         "bg" => {
-                            spans.push(Span::styled("󰑮 ", Style::default().fg(col(pal.warn))));
-                            spans.push(Span::raw(r.label.clone()));
-                            if !r.dir.is_empty() {
-                                spans.push(Span::styled(
-                                    format!("  {}", r.dir),
-                                    Style::default().fg(col(pal.sub)),
-                                ));
-                            }
+                            spans.push(Span::styled("󰑮  ", Style::default().fg(col(pal.warn))));
+                            spans.push(Span::styled(r.label.clone(), Style::default().fg(col(pal.fg))));
                         }
                         _ => {
-                            spans.push(Span::styled("󰥔 ", Style::default().fg(col(pal.sub))));
-                            spans.push(Span::raw(r.detail.clone()));
+                            // 󰥔 age   title (two-ink: age sub, name fg)
+                            let age = r.detail.split(" — ").next().unwrap_or("").replace(" ago", "");
+                            let title = if r.title.is_empty() {
+                                r.detail.split(" — ").nth(1).unwrap_or(&r.detail).to_string()
+                            } else {
+                                r.title.clone()
+                            };
+                            spans.push(Span::styled(
+                                format!("󰥔 {age:<4} "),
+                                Style::default().fg(col(pal.sub)),
+                            ));
+                            spans.push(Span::styled(title, Style::default().fg(col(pal.fg))));
                         }
                     }
                 }
             }
             let mut line = Line::from(spans);
             if i == self.cursor {
-                // "you are here" wears accent, loud enough to read across
-                // the room (spec: 55% + bold; a cell has no alpha, so the
-                // fill is solid and the label flips to bg ink)
+                // this pane holds focus: the cursor wears accent
                 line = line.style(
                     Style::default()
                         .bg(col(pal.accent))
@@ -569,13 +700,49 @@ impl App {
                         .add_modifier(Modifier::BOLD),
                 );
             } else if Some(i) == self.hover {
-                line = line.style(Style::default().bg(col(pal.muted)));
+                // hover is a wash, never the cursor block (design)
+                line = line.style(Style::default().bg(wash(pal.bg, pal.sub, 0.12)));
             }
             lines.push(line);
         }
         f.render_widget(Paragraph::new(lines), chunks[1]);
 
-        // footer: the keys, in sub ink — the Textual Footer's job
+        // footer: the keys, in sub ink. In the 34-cell pane the handoff
+        // gives it a rule and two rows.
+        if narrow {
+            let key = |k: &str, v: &str| {
+                vec![
+                    Span::styled(
+                        format!(" {k} "),
+                        Style::default().fg(col(pal.accent2)).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(v.to_string(), Style::default().fg(col(pal.sub))),
+                ]
+            };
+            let mut lines = vec![Line::from(Span::styled(
+                "─".repeat(f.area().width as usize),
+                Style::default().fg(col(pal.muted)),
+            ))];
+            if let Some((msg, _, warn)) = &self.notify {
+                lines.push(Line::from(Span::styled(
+                    format!(" {msg}"),
+                    Style::default().fg(if *warn { col(pal.warn) } else { col(pal.good) }),
+                )));
+                lines.push(Line::from(""));
+            } else {
+                lines.push(Line::from(
+                    [key("↵", "open"), key("s", "beside"), key("n", "new")].concat(),
+                ));
+                lines.push(Line::from(
+                    [key("t", "term"), key("x", "stop"), key("q", "quit")].concat(),
+                ));
+            }
+            f.render_widget(Paragraph::new(lines), chunks[2]);
+            if self.confirm.is_some() {
+                self.draw_confirm(f);
+            }
+            return;
+        }
         let footer = if let Some((msg, _, warn)) = &self.notify {
             Line::from(Span::styled(
                 format!(" {msg}"),
@@ -584,14 +751,14 @@ impl App {
         } else {
             Line::from(
                 [
-                    ("Enter", "Open"),
-                    ("n", "New"),
-                    ("s", "Beside"),
-                    ("t", "Term"),
-                    ("m", "MCP"),
-                    ("x", "Stop bg"),
-                    ("r", "Refresh"),
-                    ("q", "Close"),
+                    ("↵", "open"),
+                    ("s", "beside"),
+                    ("n", "new"),
+                    ("t", "term"),
+                    ("m", "mcp"),
+                    ("x", "stop"),
+                    ("r", "refresh"),
+                    ("q", "quit"),
                 ]
                 .iter()
                 .flat_map(|(k, v)| {

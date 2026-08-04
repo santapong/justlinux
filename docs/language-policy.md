@@ -75,6 +75,20 @@ silent fork:
    surface must adopt the configure-granted size before its first draw —
    a Wayland surface IS its buffer** (the 1 px strip).
 
+## Backlog — full Python removal (parked 4 Aug 2026, not scheduled)
+
+Decided and deliberately deferred. If ever picked up, the order is:
+
+1. Delete the superseded `bin/` twins of migrated tools — cheap, but it
+   removes the no-cargo fallback, so the repo becomes Rust-required.
+2. Port the on-demand TUIs one at a time, easiest first, riskiest last:
+   `hypr-widgetpicker` → `hypr-launcher` → `hypr-kanban` →
+   `hypr-arrange` → `hypr-settings` (~5,700 lines total; the Settings
+   Wi-Fi dialogs are the regression risk that keeps it last).
+
+Until then: every **new** feature is born in Rust (hypr-docker was);
+the Python apps receive maintenance fixes only.
+
 ## Diagrams
 
 The C4 set and the 4+1 views in [`architecture.md`](architecture.md)

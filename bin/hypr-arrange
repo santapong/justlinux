@@ -78,7 +78,8 @@ def widget_of_pid(pid):
 # so a restart would needlessly drop viz's audio capture and the office's
 # worker scan. -xf (exact, full cmdline) is mandatory — a loose pattern has
 # twice matched and killed the invoking shell in this fleet.
-WIDGET_PROC = {"office": "hypr-claude-office", "viz": "hypr-viz"}
+WIDGET_PROC = {"office": "hypr-claude-office", "viz": "hypr-viz",
+               "office2d": "hypr-office2d"}
 
 
 def signal_widget(name):
@@ -87,9 +88,13 @@ def signal_widget(name):
     if not proc:
         return
     try:
-        subprocess.run(["pkill", "-USR1", "-xf",
-                        f"python3 {Path.home()}/.local/bin/{proc}"],
-                       capture_output=True, timeout=3)
+        # python script or rust binary — exact cmdline, both forms
+        for cmdline in (f"python3 {Path.home()}/.local/bin/{proc}",
+                        f"{Path.home()}/.local/bin/{proc}"):
+            r = subprocess.run(["pkill", "-USR1", "-xf", cmdline],
+                               capture_output=True, timeout=3)
+            if r.returncode == 0:
+                return
     except Exception:
         pass
 
@@ -104,15 +109,21 @@ def restart_widget(name):
         return
     home = Path.home()
     try:
-        subprocess.run(["pkill", "-xf", f"python3 {home}/.local/bin/{proc}"],
-                       capture_output=True, timeout=3)
+        for cmdline in (f"python3 {home}/.local/bin/{proc}",
+                        f"{home}/.local/bin/{proc}"):
+            subprocess.run(["pkill", "-xf", cmdline],
+                           capture_output=True, timeout=3)
         for _ in range(20):                  # let the surface really go
-            if subprocess.run(
-                    ["pgrep", "-xf", f"python3 {home}/.local/bin/{proc}"],
-                    capture_output=True).returncode != 0:
+            if all(subprocess.run(["pgrep", "-xf", c],
+                                  capture_output=True).returncode != 0
+                   for c in (f"python3 {home}/.local/bin/{proc}",
+                             f"{home}/.local/bin/{proc}")):
                 break
             time.sleep(0.1)
-        subprocess.Popen(["python3", f"{home}/.local/bin/{proc}"],
+        path = f"{home}/.local/bin/{proc}"
+        with open(path, "rb") as fh:
+            is_py = fh.read(2) == b"#!"
+        subprocess.Popen(["python3", path] if is_py else [path],
                          start_new_session=True,
                          stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL)
@@ -179,6 +190,8 @@ def surfaces_all(geo):
                     name, kind = widget_of_pid(layer.get("pid", 0)), "conky"
                 elif ns == "hypr-office":
                     name, kind = "office", "widget"
+                elif ns == "hypr-office2d":
+                    name, kind = "office2d", "widget"
                 elif ns == "hypr-viz":
                     name, kind = "viz", "widget"
                 else:
