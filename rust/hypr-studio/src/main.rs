@@ -235,7 +235,9 @@ pub fn style_tmux() {
         "set-hook",
         "-g",
         "window-layout-changed",
-        "if -F '#{==:#{window_panes},1}' 'setw pane-border-status off ; set -uw @beside' 'setw pane-border-status top'",
+        &format!(
+            "if -F '#{{==:#{{window_panes}},1}}' 'setw pane-border-status off ; set -uw @beside' 'setw pane-border-status top' ; run-shell -b '{me_} --window-solo'"
+        ),
     ]);
     tmux(&["bind-key", "|", "split-window", "-h", "-c", "#{pane_current_path}"]);
     tmux(&["bind-key", "-", "split-window", "-v", "-c", "#{pane_current_path}"]);
@@ -700,6 +702,7 @@ fn tree_attach() {
             &format!("{} --sidebar --attached", me()),
         ]);
     }
+    window_solo();
     // the launch-time pure-sessions window is a spare once real tabs
     // exist — retire it (its own tree lives full-window there)
     let wins = tmux_out(&["list-windows", "-F", "#{window_index}|#{window_name}|#{window_panes}"]);
@@ -749,8 +752,48 @@ fn close_tab(idx: &str) {
     }
 }
 
+/// A window whose panes have dwindled to just the tree: retire it if
+/// it is a background window and others exist, otherwise it IS the
+/// sessions view now. Called from the window-layout-changed hook, so a
+/// conversation exiting can never leave a zombie tab — nor kill the
+/// studio (the tree pane keeps the last window alive).
+/// SWEEP, not point-check: #{window_index} inside a hook's run-shell
+/// expands against the ACTIVE window, not the window whose layout
+/// changed (found live — the zombie survived), so trust nothing and
+/// examine every window.
+fn window_solo() {
+    // window -> (pane count, has sidebar pane)
+    let mut wins: Vec<(String, usize, bool)> = Vec::new();
+    for line in tmux_out(&["list-panes", "-s", "-F", "#{window_index}|#{pane_start_command}"]).lines() {
+        let (idx, cmd) = line.split_once('|').unwrap_or(("", ""));
+        match wins.iter_mut().find(|(i, ..)| i == idx) {
+            Some(w) => {
+                w.1 += 1;
+                w.2 |= cmd.contains("--sidebar");
+            }
+            None => wins.push((idx.to_string(), 1, cmd.contains("--sidebar"))),
+        }
+    }
+    let cur = tmux_out(&["display-message", "-p", "#{window_index}"]).trim().to_string();
+    let total = wins.len();
+    for (idx, panes, has_tree) in wins {
+        if panes != 1 || !has_tree {
+            continue; // real content present
+        }
+        if total > 1 && idx != cur {
+            tmux(&["kill-window", "-t", &format!("{TMUX_SESSION}:{idx}")]);
+        } else {
+            tmux(&["rename-window", "-t", &format!("{TMUX_SESSION}:{idx}"), "sessions"]);
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--window-solo") {
+        window_solo();
+        return;
+    }
     if let Some(i) = args.iter().position(|a| a == "--close-tab") {
         if let Some(idx) = args.get(i + 1) {
             close_tab(idx);

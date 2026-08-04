@@ -105,6 +105,7 @@ pub struct App {
     confirm: Option<Confirm>,
     notify: Option<(String, Instant, bool)>, // (msg, expires, warning)
     tree_area: Rect,
+    header_area: Rect,
     dirty: bool,
     exit: bool,
 }
@@ -124,6 +125,7 @@ impl App {
             confirm: None,
             notify: None,
             tree_area: Rect::default(),
+            header_area: Rect::default(),
             dirty: true,
             exit: false,
         }
@@ -489,19 +491,7 @@ impl App {
             KeyCode::Char('m') => super::open_settings_tab("integrations"),
             KeyCode::Char('x') => self.action_kill_bg(),
             KeyCode::Char('r') => self.reload(true),
-            KeyCode::Char('w') => {
-                // expand/shrink the pane (design ask: "make it can expand")
-                let pane = std::env::var("TMUX_PANE").unwrap_or_default();
-                if !pane.is_empty() {
-                    let cur = super::tmux_out(&["display-message", "-p", "-t", &pane, "#{pane_width}"])
-                        .trim()
-                        .parse::<u32>()
-                        .unwrap_or(34);
-                    let next = if cur <= 40 { "56" } else { "34" };
-                    super::tmux(&["resize-pane", "-t", &pane, "-x", next]);
-                    self.dirty = true;
-                }
-            }
+            KeyCode::Char('w') => self.toggle_width(),
             KeyCode::Char('q') => self.action_quit(),
             _ => {}
         }
@@ -520,7 +510,28 @@ impl App {
         }
     }
 
+    fn toggle_width(&mut self) {
+        let pane = std::env::var("TMUX_PANE").unwrap_or_default();
+        if !pane.is_empty() {
+            let cur = super::tmux_out(&["display-message", "-p", "-t", &pane, "#{pane_width}"])
+                .trim()
+                .parse::<u32>()
+                .unwrap_or(34);
+            let next = if cur <= 40 { "56" } else { "34" };
+            super::tmux(&["resize-pane", "-t", &pane, "-x", next]);
+            self.dirty = true;
+        }
+    }
+
     fn on_mouse(&mut self, m: MouseEvent) {
+        // the ⟷ button lives in the header row's last cells
+        if let MouseEventKind::Down(MouseButton::Left) = m.kind {
+            let h = self.header_area;
+            if m.row == h.y && m.column >= h.x + h.width.saturating_sub(4) {
+                self.toggle_width();
+                return;
+            }
+        }
         if let Some(c) = &self.confirm {
             if let MouseEventKind::Down(MouseButton::Left) = m.kind {
                 let hit = |r: Rect| {
@@ -585,15 +596,23 @@ impl App {
         .split(f.area());
         // hint row: the MOUSE contract — the one thing the footer's keys
         // cannot teach (spec)
+        self.header_area = chunks[0];
+        let left = "󰚩 Sessions  ";
+        let mid = if narrow { "C-b g jumps" } else { "click picks · click again opens · C-b g jumps" };
+        let used = left.chars().count() + mid.chars().count();
+        let pad = (chunks[0].width as usize).saturating_sub(used + 4).max(1);
         let hint = Line::from(vec![
             Span::styled(
-                "󰚩 Sessions  ",
+                left.to_string(),
                 Style::default().fg(col(pal.accent)).add_modifier(Modifier::BOLD),
             ),
+            Span::styled(mid.to_string(), Style::default().fg(col(pal.sub))),
+            Span::raw(" ".repeat(pad)),
+            // the expand button: click toggles 34 ↔ 56 (w does the same;
+            // the pane border also drags — tmux mouse is on)
             Span::styled(
-                if narrow { "C-b g jumps" } else { "click picks · click again opens · C-b g jumps" }
-                    .to_string(),
-                Style::default().fg(col(pal.sub)),
+                " ⟷ ",
+                Style::default().fg(col(pal.fg)).bg(col(pal.muted)),
             ),
         ]);
         f.render_widget(Paragraph::new(hint), chunks[0]);
