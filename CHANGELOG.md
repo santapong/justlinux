@@ -4,6 +4,22 @@ All notable changes to this desktop. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.2] — 2026-08-05
+
+### Fixed
+
+- **Recoloring the desktop no longer freezes it for seconds.**
+  `wallpaper.sh` ended with `hyprctl reload` just to repaint window
+  borders, and a reload re-applies the explicit `monitor =` rules —
+  which Hyprland services by disabling each output, re-probing the DRM
+  connector and re-modesetting. Three monitors, one full display
+  rebuild, per wallpaper change; the log's proof was `Disabling output`
+  on all three followed by libinput reporting timers 766ms overdue.
+  The palette now goes in through one batched `hyprctl keyword` per
+  affected colour, so monitor rules are never re-evaluated. `reload`
+  survives only as the fallback for an unreadable `colors.conf`, since
+  a half-parsed palette would blank the borders.
+
 ## [1.6.1] — 2026-08-04
 
 ### Fixed

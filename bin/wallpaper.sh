@@ -90,7 +90,39 @@ wallust run "$RECOLOR"
 "$HOME/.local/bin/gen-readable-colors.sh" --quiet || true
 # and verify it: a slot used as text that still fails is a bug, not a taste
 "$HOME/.local/bin/check-contrast.sh" --quiet --notify || true
-hyprctl reload >/dev/null                       # window borders
+# Push the new palette into the LIVE config by keyword, never `hyprctl
+# reload`. A reload re-applies the explicit `monitor =` rules in
+# hyprland.conf, and re-applying an explicit mode makes Hyprland disable
+# and re-enable every output — a three-monitor DRM re-probe + modeset that
+# freezes the whole desktop for seconds on every recolor. `keyword` touches
+# only the setting named, so nothing is re-modeset.
+apply_colors() {
+    local conf="$HOME/.config/hypr/colors.conf" k v
+    declare -A C=()
+    while IFS= read -r line; do
+        case "$line" in
+            \$*=*) k="${line%%=*}"; v="${line#*=}"
+                   C["$(echo "${k#\$}" | xargs)"]="$(echo "$v" | xargs)" ;;
+        esac
+    done < "$conf"
+    # a slot missing from the template must not blank a border
+    for k in wallbg wallfg wallaccent wallaccent2 wallmuted; do
+        [ -n "${C[$k]:-}" ] || return 1
+    done
+    local grad="${C[wallaccent]} ${C[wallaccent2]} 45deg"
+    hyprctl --batch "\
+        keyword general:col.active_border $grad ;\
+        keyword general:col.inactive_border ${C[wallmuted]} ;\
+        keyword group:col.border_active $grad ;\
+        keyword group:col.border_inactive ${C[wallmuted]} ;\
+        keyword group:groupbar:col.active ${C[wallaccent]} ;\
+        keyword group:groupbar:col.inactive ${C[wallbg]} ;\
+        keyword group:groupbar:text_color ${C[wallfg]} ;\
+        keyword plugin:hyprbars:bar_color ${C[wallbg]} ;\
+        keyword plugin:hyprbars:col.text ${C[wallfg]}" >/dev/null
+}
+# only a genuinely unreadable colors.conf falls back to the slow path
+apply_colors || hyprctl reload >/dev/null       # window borders
 pkill -SIGUSR2 waybar 2>/dev/null || true       # waybar restyles in place
 swaync-client -rs 2>/dev/null || true           # swaync reloads css
 # widget cards + docks retheme LIVE (no restart). Only a component that
