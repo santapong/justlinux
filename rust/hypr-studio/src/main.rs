@@ -85,9 +85,22 @@ fn launch() {
             }
         }
     }
+    // Studio-only kitty overlay: adds grabbed-aware mouse maps so links and
+    // selection still work while tmux owns the mouse. Falls back to the
+    // normal config if the overlay was never installed, so a partial install
+    // degrades to "as before" rather than a kitty that refuses to start.
+    let studio_conf = format!(
+        "{}/.config/kitty/claude-studio.conf",
+        std::env::var("HOME").unwrap_or_default()
+    );
+    let mut kitty_args: Vec<String> = vec!["kitty".into()];
+    if Path::new(&studio_conf).is_file() {
+        kitty_args.push("--config".into());
+        kitty_args.push(studio_conf);
+    }
     let _ = Command::new("setsid")
+        .args(&kitty_args)
         .args([
-            "kitty",
             "--class",
             KITTY_CLASS,
             "--title",
@@ -191,6 +204,29 @@ pub fn style_tmux() {
         vec!["set", "-g", "status-interval", "5"],
         vec!["set", "-g", "monitor-activity", "on"],
         vec!["set", "-g", "status", "2"],
+        // ---- terminal parity with a plain kitty window ----
+        // the server starts with `-f /dev/null`, so tmux's own defaults
+        // apply and NOTHING here comes from the user's ~/.tmux.conf.
+        // without these, panes get TERM=screen-256color: no truecolor,
+        // no OSC 8 hyperlinks, no styled underlines.
+        vec!["set", "-g", "default-terminal", "tmux-256color"],
+        vec!["set", "-ga", "terminal-features", ",xterm-kitty:RGB:hyperlinks:usstyle:strikethrough"],
+        vec!["set", "-ga", "terminal-overrides", ",xterm-kitty:Tc"],
+        // panes otherwise inherit the environment of whichever launch()
+        // first started the server — which may be hours stale
+        vec![
+            "set", "-g", "update-environment",
+            "WAYLAND_DISPLAY DISPLAY HYPRLAND_INSTANCE_SIGNATURE XDG_RUNTIME_DIR SSH_AUTH_SOCK SSH_AGENT_PID",
+        ],
+        // ---- clipboard ----
+        // `mouse on` above means tmux, not kitty, owns the drag — so
+        // kitty's copy_on_select never fires and a selection would go
+        // nowhere without these. set-clipboard drives OSC 52 to kitty;
+        // the copy-pipe bindings below are the belt to that braces.
+        vec!["set", "-g", "set-clipboard", "on"],
+        vec!["set", "-g", "allow-passthrough", "on"],
+        // scrollback deep enough to actually search a long conversation
+        vec!["set", "-g", "history-limit", "50000"],
     ];
     for s in sets {
         tmux(&s);
@@ -241,6 +277,26 @@ pub fn style_tmux() {
     ]);
     tmux(&["bind-key", "|", "split-window", "-h", "-c", "#{pane_current_path}"]);
     tmux(&["bind-key", "-", "split-window", "-v", "-c", "#{pane_current_path}"]);
+    // ---- copy / paste ----
+    // drag-release yanks straight to the Wayland clipboard. `-and-cancel`
+    // leaves copy-mode on release, which is what makes a drag feel like a
+    // drag in any other terminal instead of stranding you in a mode.
+    // both tables: mode-keys is emacs by default here, but a future
+    // vi-mode flip would silently lose the binding otherwise.
+    for table in ["copy-mode", "copy-mode-vi"] {
+        tmux(&[
+            "bind-key", "-T", table, "MouseDragEnd1Pane",
+            "send-keys", "-X", "copy-pipe-and-cancel", "wl-copy",
+        ]);
+        // double/triple-click select word/line AND copy, matching kitty
+        tmux(&[
+            "bind-key", "-T", table, "DoubleClick1Pane",
+            "send-keys", "-X", "copy-pipe-no-clear", "wl-copy",
+        ]);
+    }
+    // middle-click and prefix-p paste from the same clipboard
+    tmux(&["bind-key", "-n", "MouseDown2Pane", "run-shell", "wl-paste --no-newline | tmux load-buffer - && tmux paste-buffer"]);
+    tmux(&["bind-key", "p", "run-shell", "wl-paste --no-newline | tmux load-buffer - && tmux paste-buffer"]);
     tmux(&["bind-key", "Left", "select-pane", "-L"]);
     tmux(&["bind-key", "Right", "select-pane", "-R"]);
     tmux(&["bind-key", "Up", "select-pane", "-U"]);
@@ -397,6 +453,33 @@ pub fn rename_open_tabs() {
     }
 }
 
+/// Wrap a conversation command so it runs with the user's real PATH.
+///
+/// tmux execs a window command through `/bin/sh -c`, so a bare `claude ...`
+/// gets NO rc file — while a *terminal* tab does, because tmux's empty
+/// default-command starts $SHELL as a login shell. That asymmetry is why a
+/// tool reachable in a terminal tab (pulumi, via the `~/.pulumi/bin` export
+/// in .zshrc) is missing in a conversation tab.
+///
+/// Why an explicit `source` and NEITHER `-i` nor `-l` — both were tried:
+///   `-i` reads .zshrc but also emits a burst of OSC colour-palette escapes
+///        at startup, straight into the pane before claude draws.
+///   `-l` runs the login files, which on Kali print the MOTD banner into
+///        the pane. Fine for a terminal tab, ruinous under a TUI.
+/// Sourcing .zshrc by hand with its output discarded gets the PATH and
+/// nothing else. zshenv still supplies the base PATH either way.
+///
+/// `exec` keeps the old lifetime — the pane still dies when claude exits —
+/// and the session id stays inside the string, which open_session_tab()
+/// relies on to match an existing tab via pane_start_command.
+fn with_user_path(cmd: &str) -> String {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    // cmd is built from uuids and fixed flags — no single quotes to escape,
+    // but guard anyway so a future caller can't break out of the quoting
+    let inner = cmd.replace('\'', r"'\''");
+    format!("{shell} -c 'source ~/.zshrc >/dev/null 2>&1; exec {inner}'")
+}
+
 /// Open (or focus) a tab running this transcript's conversation.
 pub fn open_session_tab(sid: &str, cwd: &str) {
     for line in tmux_out(&["list-panes", "-s", "-F", "#{window_index}|#{pane_start_command}"])
@@ -417,7 +500,7 @@ pub fn open_session_tab(sid: &str, cwd: &str) {
         &name,
         "-c",
         cwd,
-        &format!("claude --resume {sid}"),
+        &with_user_path(&format!("claude --resume {sid}")),
     ]);
 }
 
@@ -473,7 +556,7 @@ pub fn new_session_tab(cwd: &str) {
     } else {
         "claude".to_string() // older CLI: degraded, not broken
     };
-    tmux(&["new-window", "-t", &format!("{TMUX_SESSION}:"), "-n", &name, "-c", cwd, &cmd]);
+    tmux(&["new-window", "-t", &format!("{TMUX_SESSION}:"), "-n", &name, "-c", cwd, &with_user_path(&cmd)]);
 }
 
 /// The tab a split should land in — never window 0 (python _work_window).
@@ -511,7 +594,7 @@ pub fn open_session_beside(sid: &str, cwd: &str) -> &'static str {
         return "tab";
     };
     let t = format!("{TMUX_SESSION}:{target}");
-    tmux(&["split-window", "-h", "-t", &t, "-c", cwd, &format!("claude --resume {sid}")]);
+    tmux(&["split-window", "-h", "-t", &t, "-c", cwd, &with_user_path(&format!("claude --resume {sid}"))]);
     let beside = tab_name(sid, cwd, 10);
     tmux(&["set-option", "-w", "-t", &t, "@beside", &beside]);
     tmux(&["select-window", "-t", &target]);
