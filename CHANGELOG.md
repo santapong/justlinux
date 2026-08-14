@@ -4,6 +4,35 @@ All notable changes to this desktop. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.3] — 2026-08-14
+
+### Fixed
+
+- **The notification daemon now has one owner.** Hyprland asks the enabled
+  `swaync.service` to start instead of launching a competing unmanaged
+  `swaync`; login no longer produces five failed restarts and a
+  `start-limit-hit` service. Its notifications widget now also has the
+  required configuration block, so swaync no longer falls back noisily at
+  every start.
+- **Wallpaper recolouring can no longer re-modeset the displays.** An
+  incomplete generated palette now keeps the previous border colours and
+  notifies instead of falling back to `hyprctl reload`, closing the last path
+  that could freeze all three monitors for seconds.
+- **The desktop no longer defaults to an over-budget blur workload.** Blur is
+  opt-in on the Intel UHD 630 setup: fourteen always-on card surfaces plus the
+  office surface were forcing Hyprland to composite too much during browser
+  rendering bursts. The Appearance page still applies it live for users who
+  prefer the glass effect.
+- Released the post-1.6.2 input fixes: stale Wayland pointer proxies are
+  released across the dock, cards, pet and office, preventing doubled clicks
+  and duplicate application launches after a seat capability flap.
+
+### Added
+
+- `stall-watch.sh` records slow Hyprland main-thread IPC round trips and a
+  process snapshot, so intermittent compositor stalls can be diagnosed from
+  evidence after they occur.
+
 ## [1.6.2] — 2026-08-05
 
 ### Fixed

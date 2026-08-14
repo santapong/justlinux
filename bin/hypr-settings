@@ -53,7 +53,7 @@ INTS = {
 }
 # key -> (hyprctl option, config path, label)
 BOOLS = {
-    "blur":       ("decoration:blur:enabled",   ("decoration", "blur", "enabled"),   "Background blur (glass effect)"),
+    "blur":       ("decoration:blur:enabled",   ("decoration", "blur", "enabled"),   "Background blur (glass effect; costly on an iGPU)"),
     "shadow":     ("decoration:shadow:enabled", ("decoration", "shadow", "enabled"), "Window shadows"),
     "animations": ("animations:enabled",        ("animations", "enabled"),           "Animations"),
 }

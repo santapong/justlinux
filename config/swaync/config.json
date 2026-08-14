@@ -14,6 +14,9 @@
   "hide-on-action": true,
   "widgets": ["title", "dnd", "notifications"],
   "widget-config": {
+    "notifications": {
+      "vexpand": true
+    },
     "title": {
       "text": "Notifications",
       "clear-all-button": true,

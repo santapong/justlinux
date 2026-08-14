@@ -121,8 +121,13 @@ apply_colors() {
         keyword plugin:hyprbars:bar_color ${C[wallbg]} ;\
         keyword plugin:hyprbars:col.text ${C[wallfg]}" >/dev/null
 }
-# only a genuinely unreadable colors.conf falls back to the slow path
-apply_colors || hyprctl reload >/dev/null       # window borders
+# Never fall back to `hyprctl reload`: even a rare malformed palette must not
+# re-apply the explicit monitor modes and freeze all three outputs. Keep the
+# previous border colours and report the recoverable theming failure instead.
+if ! apply_colors; then
+    notify-send -u normal "Wallpaper applied" \
+        "Palette was incomplete; window-border colours were kept." 2>/dev/null || true
+fi
 pkill -SIGUSR2 waybar 2>/dev/null || true       # waybar restyles in place
 swaync-client -rs 2>/dev/null || true           # swaync reloads css
 # widget cards + docks retheme LIVE (no restart). Only a component that
