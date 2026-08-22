@@ -304,7 +304,7 @@ impl App {
     // ----- actions (python parity) -----
     fn open_entry(&mut self, row: Row) {
         match row.kind.as_str() {
-            "past" => super::open_session_tab(&row.sid, &row.cwd),
+            "past" => super::open_session_tab(&row.sid, &row.cwd, &row.agent),
             "run" => {
                 if !row.addr.is_empty() {
                     let _ = std::process::Command::new("hyprctl")
@@ -357,7 +357,18 @@ impl App {
             .or_else(|| self.nodes.get(self.cursor).map(|n| n.project_cwd.clone()))
             .filter(|c| !c.is_empty())
             .unwrap_or_else(|| hyprdesk::home().display().to_string());
-        super::new_session_tab(&cwd);
+        super::new_session_tab(&cwd, "claude");
+    }
+
+    /// N: a fresh Codex conversation in the highlighted project.
+    fn action_new_codex(&mut self) {
+        let cwd = self
+            .current()
+            .map(|r| r.cwd.clone())
+            .or_else(|| self.nodes.get(self.cursor).map(|n| n.project_cwd.clone()))
+            .filter(|c| !c.is_empty())
+            .unwrap_or_else(|| hyprdesk::home().display().to_string());
+        super::new_session_tab(&cwd, "codex");
     }
 
     fn action_beside(&mut self) {
@@ -369,7 +380,7 @@ impl App {
             self.say("Highlight a conversation to open it beside the one you are reading", false);
             return;
         }
-        if super::open_session_beside(&row.sid, &row.cwd) == "focused" {
+        if super::open_session_beside(&row.sid, &row.cwd, &row.agent) == "focused" {
             self.say("Already open — focused its tab instead", false);
         }
     }
@@ -486,6 +497,7 @@ impl App {
                 }
             }
             KeyCode::Char('n') => self.action_new(),
+            KeyCode::Char('N') => self.action_new_codex(),
             KeyCode::Char('s') => self.action_beside(),
             KeyCode::Char('t') => self.action_term(),
             KeyCode::Char('m') => super::open_settings_tab("integrations"),
@@ -693,6 +705,12 @@ impl App {
                     match r.kind.as_str() {
                         "run" => {
                             spans.push(Span::styled("●  ", Style::default().fg(col(pal.good))));
+                            if r.agent == "codex" {
+                                spans.push(Span::styled(
+                                    format!("{} ", super::CODEX_GLYPH),
+                                    Style::default().fg(col(pal.sub)),
+                                ));
+                            }
                             spans.push(Span::styled(r.label.clone(), Style::default().fg(col(pal.fg))));
                             if !r.dir.is_empty() {
                                 spans.push(Span::styled(
@@ -717,6 +735,12 @@ impl App {
                                 format!("󰥔 {age:<4} "),
                                 Style::default().fg(col(pal.sub)),
                             ));
+                            if r.agent == "codex" {
+                                spans.push(Span::styled(
+                                    format!("{} ", super::CODEX_GLYPH),
+                                    Style::default().fg(col(pal.sub)),
+                                ));
+                            }
                             spans.push(Span::styled(title, Style::default().fg(col(pal.fg))));
                         }
                     }
@@ -763,7 +787,7 @@ impl App {
                 lines.push(Line::from(""));
             } else {
                 lines.push(Line::from(
-                    [key("↵", "open"), key("s", "beside"), key("n", "new")].concat(),
+                    [key("↵", "open"), key("s", "beside"), key("n", "new"), key("N", "codex")].concat(),
                 ));
                 lines.push(Line::from(
                     [key("t", "term"), key("w", "wide"), key("q", "quit")].concat(),
@@ -786,6 +810,7 @@ impl App {
                     ("↵", "open"),
                     ("s", "beside"),
                     ("n", "new"),
+                    ("N", "codex"),
                     ("t", "term"),
                     ("m", "mcp"),
                     ("x", "stop"),

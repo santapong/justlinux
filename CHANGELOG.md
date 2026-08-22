@@ -4,6 +4,27 @@ All notable changes to this desktop. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Codex CLI is a second agent in Claude Studio.** The session tree lists
+  Codex conversations (`~/.codex/sessions/**/rollout-*.jsonl`) under their
+  projects next to Claude's, marked 󰚩; `Enter`/`s` open them with
+  `codex resume <id>`, and `N` starts a fresh Codex conversation in the
+  highlighted project (`n` stays Claude). A running Codex is recognised by
+  the rollout file it holds open, so a tab started with `N` gets its name and
+  identity on the next rename pass. The jump palette (`C-b g`) lists Codex
+  transcripts too.
+
+### Fixed
+
+- **Shift+Enter inserts a newline inside the Studio.** The studio's tmux
+  server started from `-f /dev/null` with `extended-keys off`, so the kitty
+  keyboard protocol never reached `claude`/`codex` and Shift+Enter submitted
+  the prompt instead. The server now sets `extended-keys on`,
+  `extended-keys-format csi-u` and the kitty `extkeys` terminal feature.
+
 ## [1.6.3] — 2026-08-14
 
 ### Fixed

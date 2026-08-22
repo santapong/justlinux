@@ -404,6 +404,8 @@ pub struct Row {
     pub addr: String,
     pub title: String,
     pub detail: String,
+    /// "claude" (default) | "codex" — which CLI owns this conversation
+    pub agent: String,
 }
 
 fn boot_time() -> Option<f64> {
@@ -627,6 +629,183 @@ fn bg_detail(sid: &str, where_: &str, fallback: &str) -> String {
 
 /// Flat entry list for pickers: running, bg jobs, then resumable
 /// transcripts (python session_rows). Same ordering, same fields.
+
+// ---------------- Codex CLI (second agent) ----------------
+//
+// Codex keeps one rollout per conversation at
+//   ~/.codex/sessions/YYYY/MM/DD/rollout-<ISO-ts>-<uuid>.jsonl
+// line 0 is {"type":"session_meta","payload":{"session_id","cwd",..}} and
+// the first real user turn is a response_item message with role "user".
+// A RUNNING codex holds its rollout open — /proc/<pid>/fd names it, which
+// beats every cwd/time heuristic transcript_for() needs for claude.
+
+fn codex_sessions_dir() -> PathBuf {
+    crate::home().join(".codex/sessions")
+}
+
+// one-shot subcommands that are not conversations
+const CODEX_SUBCOMMANDS: [&str; 12] = [
+    "exec", "e", "review", "login", "logout", "mcp", "mcp-server", "app-server",
+    "doctor", "update", "completion", "sandbox",
+];
+
+/// [(mtime, path)] newest first, bounded walk of the dated tree.
+pub fn recent_codex_transcripts(limit: usize) -> Vec<(f64, PathBuf)> {
+    let mut files: Vec<(f64, PathBuf)> = Vec::new();
+    fn walk(dir: &Path, depth: usize, out: &mut Vec<(f64, PathBuf)>) {
+        let Ok(rd) = fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                if depth < 3 {
+                    walk(&p, depth + 1, out);
+                }
+            } else if p.extension().is_some_and(|x| x == "jsonl")
+                && p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("rollout-"))
+            {
+                if let Ok(md) = e.metadata() {
+                    let mt = md
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs_f64())
+                        .unwrap_or(0.0);
+                    out.push((mt, p));
+                }
+            }
+        }
+    }
+    walk(&codex_sessions_dir(), 0, &mut files);
+    files.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    files.truncate(limit);
+    files
+}
+
+/// Session id from a rollout path: the uuid is the filename's tail.
+pub fn codex_sid(path: &Path) -> String {
+    let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    if stem.len() >= 36 {
+        let tail = &stem[stem.len() - 36..];
+        if tail.bytes().filter(|b| *b == b'-').count() == 4 {
+            return tail.to_string();
+        }
+    }
+    String::new()
+}
+
+/// (cwd, preview) from a rollout's head — codex session_meta parity.
+pub fn codex_meta(path: &Path) -> (String, String) {
+    let (mut cwd, mut preview) = (String::new(), String::new());
+    use std::io::Read;
+    let Ok(f) = fs::File::open(path) else {
+        return (cwd, preview);
+    };
+    let mut raw = Vec::new();
+    let _ = f.take(262144).read_to_end(&mut raw);
+    let text = String::from_utf8_lossy(&raw).to_string();
+    for (i, line) in text.lines().enumerate() {
+        if i > 60 || (!cwd.is_empty() && !preview.is_empty()) {
+            break;
+        }
+        let Ok(d) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let ty = d.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let pl = d.get("payload");
+        if ty == "session_meta" {
+            if let Some(c) = pl.and_then(|p| p.get("cwd")).and_then(|v| v.as_str()) {
+                cwd = c.to_string();
+            }
+            continue;
+        }
+        if preview.is_empty()
+            && ty == "response_item"
+            && pl.and_then(|p| p.get("role")).and_then(|v| v.as_str()) == Some("user")
+        {
+            let t = pl
+                .and_then(|p| p.get("content"))
+                .and_then(|c| c.as_array())
+                .map(|parts| {
+                    parts
+                        .iter()
+                        .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .unwrap_or_default();
+            let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
+            if !t.is_empty() && !t.starts_with('<') {
+                preview = t.chars().take(48).collect();
+            }
+        }
+    }
+    (cwd, preview)
+}
+
+/// Live interactive codex processes; argv_sid is the rollout it holds
+/// open (a fact from /proc/<pid>/fd), else `resume <sid>` from argv.
+pub fn codex_procs() -> Vec<ClaudeProc> {
+    let mut out = Vec::new();
+    for p in pids_named("codex") {
+        let a = argv(&p);
+        if let Some(sc) = subcommand(&a) {
+            if CODEX_SUBCOMMANDS.contains(&sc) {
+                continue;
+            }
+        }
+        let (Ok(cwd), Ok(tty)) = (
+            fs::read_link(format!("/proc/{p}/cwd")),
+            fs::read_link(format!("/proc/{p}/fd/0")),
+        ) else {
+            continue;
+        };
+        let tty = tty.display().to_string();
+        if !tty.starts_with("/dev/pts") {
+            continue; // helpers / non-interactive
+        }
+        let mut sid = String::new();
+        if let Ok(fds) = fs::read_dir(format!("/proc/{p}/fd")) {
+            for fd in fds.flatten() {
+                if let Ok(t) = fs::read_link(fd.path()) {
+                    if t.file_name().is_some_and(|n| n.to_string_lossy().starts_with("rollout-")) {
+                        sid = codex_sid(&t);
+                        if !sid.is_empty() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if sid.is_empty() {
+            sid = a
+                .windows(2)
+                .find(|w| w[0] == "resume" || w[0] == "fork")
+                .map(|w| w[1].clone())
+                .filter(|s| s.len() == 36)
+                .unwrap_or_default();
+        }
+        out.push(ClaudeProc {
+            pid: p.parse().unwrap_or(0),
+            cwd: cwd.display().to_string(),
+            interactive: true,
+            tty,
+            argv_sid: sid,
+        });
+    }
+    out
+}
+
+/// Rollout path for a codex session id (rename pass / tab titles).
+pub fn codex_tx_for_sid(sid: &str) -> Option<PathBuf> {
+    if sid.is_empty() {
+        return None;
+    }
+    recent_codex_transcripts(200)
+        .into_iter()
+        .map(|(_, p)| p)
+        .find(|p| codex_sid(p) == sid)
+}
+
 pub fn session_rows() -> Vec<Row> {
     let home = crate::home().display().to_string();
     let nice = |p: &str| -> String {
@@ -719,6 +898,59 @@ pub fn session_rows() -> Vec<Row> {
             detail: format!("{} — {preview}", ago(*mt)),
             ..Default::default()
         });
+    }
+    // ----- Codex: live, then past -----
+    let ctxs = recent_codex_transcripts(25);
+    let mut live_codex: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for p in codex_procs() {
+        let where_ = nice(&p.cwd);
+        let (title, sid) = if p.argv_sid.is_empty() {
+            (String::new(), String::new())
+        } else {
+            live_codex.insert(p.argv_sid.clone());
+            let t = codex_tx_for_sid(&p.argv_sid).map(|x| codex_meta(&x).1).unwrap_or_default();
+            (t, p.argv_sid.clone())
+        };
+        rows.push(Row {
+            kind: "run".into(),
+            agent: "codex".into(),
+            label: if title.is_empty() { where_.clone() } else { title },
+            addr: window_of_pid(p.pid).unwrap_or_default(),
+            cwd: p.cwd.clone(),
+            pid: p.pid,
+            tty: p.tty.clone(),
+            sid,
+            dir: where_.clone(),
+            detail: format!("🟢 codex running in {where_} — Enter focuses its terminal"),
+            ..Default::default()
+        });
+    }
+    for (mt, f) in &ctxs {
+        let sid = codex_sid(f);
+        if sid.is_empty() || live_codex.contains(&sid) {
+            continue;
+        }
+        let (cwd, preview) = codex_meta(f);
+        if preview.is_empty() {
+            continue; // empty/aborted session: skip
+        }
+        let label = nice(&cwd);
+        rows.push(Row {
+            kind: "past".into(),
+            agent: "codex".into(),
+            label: label.clone(),
+            sid,
+            cwd: if cwd.is_empty() { home.clone() } else { cwd },
+            dir: label,
+            title: preview.clone(),
+            detail: format!("{} — {preview}", ago(*mt)),
+            ..Default::default()
+        });
+    }
+    for r in &mut rows {
+        if r.agent.is_empty() {
+            r.agent = "claude".into();
+        }
     }
     rows
 }
