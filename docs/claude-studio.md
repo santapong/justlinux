@@ -95,9 +95,15 @@ Both CLIs take Shift+Enter as *newline* when the terminal speaks the kitty
 keyboard protocol; kitty does. Inside the studio that protocol has to cross
 tmux, and a server started with `-f /dev/null` has `extended-keys off`, so
 Shift+Enter collapsed to a bare CR and **submitted**. The studio now sets
-`extended-keys on`, `extended-keys-format csi-u` and
+`extended-keys always`, `extended-keys-format csi-u` and
 `terminal-features xterm-kitty:extkeys` (server options — they apply to a
-running studio too). Fallbacks that never depend on the terminal:
+running studio too). `on` was tried first and was not enough: tmux then
+forwards extended keys only to a pane whose application asked for them,
+tracked per pane, so a tab started before the setting landed kept
+submitting. `always` forwards to every pane; the one side effect is that a
+plain terminal tab shows `^[[13;2u` when you press Shift+Enter — harmless,
+and `bindkey -s '^[[13;2u' '^M'` in `.zshrc` maps it back to Enter if it
+bothers you. Fallbacks that never depend on the terminal:
 `\` then `Enter` in Claude, `Ctrl+J` in Codex.
 
 ## Tabs

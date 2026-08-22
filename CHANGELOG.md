@@ -22,8 +22,10 @@ versioning is [SemVer](https://semver.org/spec/v2.0.0.html).
 - **Shift+Enter inserts a newline inside the Studio.** The studio's tmux
   server started from `-f /dev/null` with `extended-keys off`, so the kitty
   keyboard protocol never reached `claude`/`codex` and Shift+Enter submitted
-  the prompt instead. The server now sets `extended-keys on`,
-  `extended-keys-format csi-u` and the kitty `extkeys` terminal feature.
+  the prompt instead. The server now sets `extended-keys always`,
+  `extended-keys-format csi-u` and the kitty `extkeys` terminal feature
+  (`on` was not enough — it only forwards to panes that asked, per pane).
+  Side effect: a plain terminal tab shows `^[[13;2u` on Shift+Enter.
 
 ## [1.6.3] — 2026-08-14
 

@@ -212,8 +212,13 @@ pub fn style_tmux() {
         vec!["set", "-g", "default-terminal", "tmux-256color"],
         // Shift+Enter = newline in claude/codex needs the kitty keyboard
         // protocol to cross tmux; off (the -f /dev/null default) it
-        // collapses to a plain CR and SUBMITS instead
-        vec!["set", "-s", "extended-keys", "on"],
+        // collapses to a plain CR and SUBMITS instead. `on` was tried
+        // first and was not enough: it forwards extended keys only to a
+        // pane whose app asked for them, tracked per pane — a tab that
+        // started before the setting landed kept getting plain CR.
+        // `always` forwards them to every pane; terminal (zsh) tabs see
+        // a raw ^[[13;2u on Shift+Enter, which is harmless.
+        vec!["set", "-s", "extended-keys", "always"],
         vec!["set", "-s", "extended-keys-format", "csi-u"],
         vec!["set", "-ga", "terminal-features", ",xterm-kitty:extkeys"],
         vec!["set", "-ga", "terminal-features", ",xterm-kitty:RGB:hyperlinks:usstyle:strikethrough"],
