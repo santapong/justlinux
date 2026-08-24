@@ -6,8 +6,25 @@ versioning is [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.7.0] — 2026-08-24
+
 ### Added
 
+- **The Studio's project list groups itself.** The flat alphabetical
+  Projects section had grown to 33 entries — 22 of them `/tmp` scratch
+  dirs minted by test harnesses — and needed long scrolling to reach
+  anything real. Projects now fold into folder groups (󰐃 Pinned, 󱂵 Home,
+  󰉋 Company, 󰉖 Other, 󰪺 Scratch /tmp), with Scratch and Other collapsed
+  by default and most-recent-activity order inside each group, so active
+  projects float and the whole panel fits on one screen.
+- **`/` filters the session tree.** Type a few letters and the tree
+  narrows live into a MATCHES section — matching project paths and
+  session titles/previews alike. Enter lands the cursor on the first
+  match; Esc clears back to the grouped view.
+- **`p` pins a project.** Pinned projects sit in their own top section
+  wearing 󰐃, and survive restarts
+  (`~/.local/state/hyprdesk/studio-pins.json`, temp+rename writes,
+  corrupt file reads as no pins without being overwritten).
 - **Codex CLI is a second agent in Claude Studio.** The session tree lists
   Codex conversations (`~/.codex/sessions/**/rollout-*.jsonl`) under their
   projects next to Claude's, marked 󰚩; `Enter`/`s` open them with
