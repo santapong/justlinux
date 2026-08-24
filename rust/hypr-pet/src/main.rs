@@ -514,7 +514,12 @@ impl SeatHandler for App {
         seat: wl_seat::WlSeat,
         capability: Capability,
     ) {
-        if capability == Capability::Pointer && self.pointer.is_none() {
+        if capability == Capability::Pointer {
+            // release any stale proxy first — a leaked wl_pointer keeps
+            // delivering events, doubling every click (same bug as appdock)
+            if let Some(old) = self.pointer.take() {
+                old.release();
+            }
             self.pointer = self.seat_state.get_pointer(qh, &seat).ok();
         }
     }
@@ -526,7 +531,9 @@ impl SeatHandler for App {
         capability: Capability,
     ) {
         if capability == Capability::Pointer {
-            self.pointer = None;
+            if let Some(old) = self.pointer.take() {
+                old.release();
+            }
         }
     }
     fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
@@ -537,9 +544,14 @@ impl PointerHandler for App {
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
-        _: &wl_pointer::WlPointer,
+        pointer: &wl_pointer::WlPointer,
         events: &[PointerEvent],
     ) {
+        // only honour the pointer we currently own — a stale proxy
+        // must stay silent (double-launch bug, same as appdock)
+        if self.pointer.as_ref() != Some(pointer) {
+            return;
+        }
         for ev in events {
             match ev.kind {
                 PointerEventKind::Enter { .. } => {

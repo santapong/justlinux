@@ -40,6 +40,7 @@ closing it would take the sidebar with it.
 | `Enter` | Open the highlighted conversation as its own tab |
 | `s` | Open it **beside** the one you are reading — two conversations, one screen |
 | `n` | New Claude session in the highlighted project's directory |
+| `N` | New **Codex** session there (see *Two agents* below) |
 | `t` | Plain terminal tab there — for the git/build/log half of the work |
 | `m` | The settings panel (MCP servers) as a tab |
 | `x` | Stop a 󰑮 background session (its transcript stays resumable) |
@@ -70,6 +71,40 @@ second `claude --resume` against the same conversation.
 A running session started *inside* the studio has no Hyprland window of
 its own — the parent chain dead-ends at the tmux server — so selecting it
 matches its tty against the studio's panes and focuses that tab instead.
+
+## Two agents — Claude and Codex
+
+The tree is agent-agnostic. Claude conversations come from
+`~/.claude/projects/**/*.jsonl`; Codex conversations from
+`~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl`, whose first line
+(`session_meta`) carries the cwd and whose first `role: user` message is
+the preview (Codex has no `aiTitle`, so that preview is also the tab
+name). Codex rows and tabs wear 󰚩 (nf-md-robot — it passes the
+JetBrainsMono NF glyph gate; ✦ does not). Both kinds group under the same
+project folder.
+
+| Action | Claude | Codex |
+|---|---|---|
+| open / beside | `claude --resume <sid>` | `codex resume <sid>` |
+| new (`n` / `N`) | `claude --session-id <uuid>` — identity from birth | `codex` — no such flag; identity arrives once the process holds its rollout open (`/proc/<pid>/fd`), picked up by the 30 s rename pass |
+| running detection | `/proc` + argv/cwd/time heuristics | `/proc/<pid>/fd` → rollout → sid, a fact |
+
+## Multi-line input — Shift+Enter
+
+Both CLIs take Shift+Enter as *newline* when the terminal speaks the kitty
+keyboard protocol; kitty does. Inside the studio that protocol has to cross
+tmux, and a server started with `-f /dev/null` has `extended-keys off`, so
+Shift+Enter collapsed to a bare CR and **submitted**. The studio now sets
+`extended-keys always`, `extended-keys-format csi-u` and
+`terminal-features xterm-kitty:extkeys` (server options — they apply to a
+running studio too). `on` was tried first and was not enough: tmux then
+forwards extended keys only to a pane whose application asked for them,
+tracked per pane, so a tab started before the setting landed kept
+submitting. `always` forwards to every pane; the one side effect is that a
+plain terminal tab shows `^[[13;2u` when you press Shift+Enter — harmless,
+and `bindkey -s '^[[13;2u' '^M'` in `.zshrc` maps it back to Enter if it
+bothers you. Fallbacks that never depend on the terminal:
+`\` then `Enter` in Claude, `Ctrl+J` in Codex.
 
 ## Tabs
 

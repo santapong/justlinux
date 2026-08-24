@@ -85,9 +85,22 @@ fn launch() {
             }
         }
     }
+    // Studio-only kitty overlay: adds grabbed-aware mouse maps so links and
+    // selection still work while tmux owns the mouse. Falls back to the
+    // normal config if the overlay was never installed, so a partial install
+    // degrades to "as before" rather than a kitty that refuses to start.
+    let studio_conf = format!(
+        "{}/.config/kitty/claude-studio.conf",
+        std::env::var("HOME").unwrap_or_default()
+    );
+    let mut kitty_args: Vec<String> = vec!["kitty".into()];
+    if Path::new(&studio_conf).is_file() {
+        kitty_args.push("--config".into());
+        kitty_args.push(studio_conf);
+    }
     let _ = Command::new("setsid")
+        .args(&kitty_args)
         .args([
-            "kitty",
             "--class",
             KITTY_CLASS,
             "--title",
@@ -191,6 +204,40 @@ pub fn style_tmux() {
         vec!["set", "-g", "status-interval", "5"],
         vec!["set", "-g", "monitor-activity", "on"],
         vec!["set", "-g", "status", "2"],
+        // ---- terminal parity with a plain kitty window ----
+        // the server starts with `-f /dev/null`, so tmux's own defaults
+        // apply and NOTHING here comes from the user's ~/.tmux.conf.
+        // without these, panes get TERM=screen-256color: no truecolor,
+        // no OSC 8 hyperlinks, no styled underlines.
+        vec!["set", "-g", "default-terminal", "tmux-256color"],
+        // Shift+Enter = newline in claude/codex needs the kitty keyboard
+        // protocol to cross tmux; off (the -f /dev/null default) it
+        // collapses to a plain CR and SUBMITS instead. `on` was tried
+        // first and was not enough: it forwards extended keys only to a
+        // pane whose app asked for them, tracked per pane — a tab that
+        // started before the setting landed kept getting plain CR.
+        // `always` forwards them to every pane; terminal (zsh) tabs see
+        // a raw ^[[13;2u on Shift+Enter, which is harmless.
+        vec!["set", "-s", "extended-keys", "always"],
+        vec!["set", "-s", "extended-keys-format", "csi-u"],
+        vec!["set", "-ga", "terminal-features", ",xterm-kitty:extkeys"],
+        vec!["set", "-ga", "terminal-features", ",xterm-kitty:RGB:hyperlinks:usstyle:strikethrough"],
+        vec!["set", "-ga", "terminal-overrides", ",xterm-kitty:Tc"],
+        // panes otherwise inherit the environment of whichever launch()
+        // first started the server — which may be hours stale
+        vec![
+            "set", "-g", "update-environment",
+            "WAYLAND_DISPLAY DISPLAY HYPRLAND_INSTANCE_SIGNATURE XDG_RUNTIME_DIR SSH_AUTH_SOCK SSH_AGENT_PID",
+        ],
+        // ---- clipboard ----
+        // `mouse on` above means tmux, not kitty, owns the drag — so
+        // kitty's copy_on_select never fires and a selection would go
+        // nowhere without these. set-clipboard drives OSC 52 to kitty;
+        // the copy-pipe bindings below are the belt to that braces.
+        vec!["set", "-g", "set-clipboard", "on"],
+        vec!["set", "-g", "allow-passthrough", "on"],
+        // scrollback deep enough to actually search a long conversation
+        vec!["set", "-g", "history-limit", "50000"],
     ];
     for s in sets {
         tmux(&s);
@@ -241,6 +288,26 @@ pub fn style_tmux() {
     ]);
     tmux(&["bind-key", "|", "split-window", "-h", "-c", "#{pane_current_path}"]);
     tmux(&["bind-key", "-", "split-window", "-v", "-c", "#{pane_current_path}"]);
+    // ---- copy / paste ----
+    // drag-release yanks straight to the Wayland clipboard. `-and-cancel`
+    // leaves copy-mode on release, which is what makes a drag feel like a
+    // drag in any other terminal instead of stranding you in a mode.
+    // both tables: mode-keys is emacs by default here, but a future
+    // vi-mode flip would silently lose the binding otherwise.
+    for table in ["copy-mode", "copy-mode-vi"] {
+        tmux(&[
+            "bind-key", "-T", table, "MouseDragEnd1Pane",
+            "send-keys", "-X", "copy-pipe-and-cancel", "wl-copy",
+        ]);
+        // double/triple-click select word/line AND copy, matching kitty
+        tmux(&[
+            "bind-key", "-T", table, "DoubleClick1Pane",
+            "send-keys", "-X", "copy-pipe-no-clear", "wl-copy",
+        ]);
+    }
+    // middle-click and prefix-p paste from the same clipboard
+    tmux(&["bind-key", "-n", "MouseDown2Pane", "run-shell", "wl-paste --no-newline | tmux load-buffer - && tmux paste-buffer"]);
+    tmux(&["bind-key", "p", "run-shell", "wl-paste --no-newline | tmux load-buffer - && tmux paste-buffer"]);
     tmux(&["bind-key", "Left", "select-pane", "-L"]);
     tmux(&["bind-key", "Right", "select-pane", "-R"]);
     tmux(&["bind-key", "Up", "select-pane", "-U"]);
@@ -313,9 +380,14 @@ fn find_uuid(text: &str) -> Option<String> {
 }
 
 /// A tab you can tell apart: prefer Claude's own conversation title.
-pub fn tab_name(sid: &str, cwd: &str, width: usize) -> String {
+pub fn tab_name(sid: &str, cwd: &str, width: usize, agent: &str) -> String {
     let mut title = String::new();
-    if !sid.is_empty() {
+    if agent == "codex" {
+        // codex has no aiTitle: the first user line is the best name
+        if let Some(p) = hyprdesk::codex_tx_for_sid(sid) {
+            title = hyprdesk::codex_meta(&p).1;
+        }
+    } else if !sid.is_empty() {
         if let Ok(dir) = std::fs::read_dir(hyprdesk::home().join(".claude/projects")) {
             for proj in dir.flatten() {
                 let p = proj.path().join(format!("{sid}.jsonl"));
@@ -338,7 +410,8 @@ pub fn tab_name(sid: &str, cwd: &str, width: usize) -> String {
     // tmux renames on '#' and whitespace oddities; keep it plain
     let name: String = name.split_whitespace().collect::<Vec<_>>().join(" ").replace('#', "");
     let out: String = name.chars().take(width).collect();
-    if out.is_empty() { "~".into() } else { out }
+    let out = if out.is_empty() { "~".to_string() } else { out };
+    if agent == "codex" { format!("{CODEX_GLYPH} {out}") } else { out }
 }
 
 /// Re-derive what every tab claims to be, from what it actually holds.
@@ -377,13 +450,13 @@ pub fn rename_open_tabs() {
         panes.sort_by_key(|p| p.0);
         let ident = &panes[0];
         if let Some(sid) = find_uuid(&ident.2) {
-            let name = tab_name(&sid, &ident.1, 18);
+            let name = tab_name(&sid, &ident.1, 18, agent_of_cmd(&ident.2));
             tmux(&["rename-window", "-t", &idx, &name]);
         }
         let mut beside = String::new();
         for (_p, cwd, cmd) in &panes[1..] {
             if let Some(sid2) = find_uuid(cmd) {
-                beside = tab_name(&sid2, cwd, 10);
+                beside = tab_name(&sid2, cwd, 10, agent_of_cmd(cmd));
                 break;
             }
         }
@@ -397,8 +470,53 @@ pub fn rename_open_tabs() {
     }
 }
 
+/// Wrap a conversation command so it runs with the user's real PATH.
+///
+/// tmux execs a window command through `/bin/sh -c`, so a bare `claude ...`
+/// gets NO rc file — while a *terminal* tab does, because tmux's empty
+/// default-command starts $SHELL as a login shell. That asymmetry is why a
+/// tool reachable in a terminal tab (pulumi, via the `~/.pulumi/bin` export
+/// in .zshrc) is missing in a conversation tab.
+///
+/// Why an explicit `source` and NEITHER `-i` nor `-l` — both were tried:
+///   `-i` reads .zshrc but also emits a burst of OSC colour-palette escapes
+///        at startup, straight into the pane before claude draws.
+///   `-l` runs the login files, which on Kali print the MOTD banner into
+///        the pane. Fine for a terminal tab, ruinous under a TUI.
+/// Sourcing .zshrc by hand with its output discarded gets the PATH and
+/// nothing else. zshenv still supplies the base PATH either way.
+///
+/// `exec` keeps the old lifetime — the pane still dies when claude exits —
+/// and the session id stays inside the string, which open_session_tab()
+/// relies on to match an existing tab via pane_start_command.
+fn with_user_path(cmd: &str) -> String {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    // cmd is built from uuids and fixed flags — no single quotes to escape,
+    // but guard anyway so a future caller can't break out of the quoting
+    let inner = cmd.replace('\'', r"'\''");
+    format!("{shell} -c 'source ~/.zshrc >/dev/null 2>&1; exec {inner}'")
+}
+
+/// Glyph that marks a Codex conversation in tabs and the tree.
+/// (passes the fc-list gate against JetBrainsMono NF: nf-md-robot)
+pub const CODEX_GLYPH: &str = "󰚩";
+
+/// The CLI line that resumes `sid` under `agent` ("claude" | "codex").
+pub fn resume_cmd(agent: &str, sid: &str) -> String {
+    if agent == "codex" {
+        format!("codex resume {sid}")
+    } else {
+        format!("claude --resume {sid}")
+    }
+}
+
+/// Which agent a pane's start command runs.
+pub fn agent_of_cmd(cmd: &str) -> &'static str {
+    if cmd.contains("codex") { "codex" } else { "claude" }
+}
+
 /// Open (or focus) a tab running this transcript's conversation.
-pub fn open_session_tab(sid: &str, cwd: &str) {
+pub fn open_session_tab(sid: &str, cwd: &str, agent: &str) {
     for line in tmux_out(&["list-panes", "-s", "-F", "#{window_index}|#{pane_start_command}"])
         .lines()
     {
@@ -408,7 +526,7 @@ pub fn open_session_tab(sid: &str, cwd: &str) {
             return;
         }
     }
-    let name = tab_name(sid, cwd, 18);
+    let name = tab_name(sid, cwd, 18, agent);
     tmux(&[
         "new-window",
         "-t",
@@ -417,7 +535,7 @@ pub fn open_session_tab(sid: &str, cwd: &str) {
         &name,
         "-c",
         cwd,
-        &format!("claude --resume {sid}"),
+        &with_user_path(&resume_cmd(agent, sid)),
     ]);
 }
 
@@ -463,17 +581,25 @@ fn uuid4() -> String {
 }
 
 /// A new conversation with its identity fixed UP FRONT (python).
-pub fn new_session_tab(cwd: &str) {
-    let name = Path::new(cwd.trim_end_matches('/'))
+pub fn new_session_tab(cwd: &str, agent: &str) {
+    let base = Path::new(cwd.trim_end_matches('/'))
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "~".into());
+    if agent == "codex" {
+        // codex has no --session-id: identity comes later, from the
+        // rollout the process holds open (hyprdesk::codex_procs)
+        let name = format!("{CODEX_GLYPH} {base}");
+        tmux(&["new-window", "-t", &format!("{TMUX_SESSION}:"), "-n", &name, "-c", cwd, &with_user_path("codex")]);
+        return;
+    }
+    let name = base;
     let cmd = if claude_takes_session_id() {
         format!("claude --session-id {}", uuid4())
     } else {
         "claude".to_string() // older CLI: degraded, not broken
     };
-    tmux(&["new-window", "-t", &format!("{TMUX_SESSION}:"), "-n", &name, "-c", cwd, &cmd]);
+    tmux(&["new-window", "-t", &format!("{TMUX_SESSION}:"), "-n", &name, "-c", cwd, &with_user_path(&cmd)]);
 }
 
 /// The tab a split should land in — never window 0 (python _work_window).
@@ -496,7 +622,7 @@ fn work_window() -> Option<String> {
 }
 
 /// Two conversations on screen at once. Returns what it did.
-pub fn open_session_beside(sid: &str, cwd: &str) -> &'static str {
+pub fn open_session_beside(sid: &str, cwd: &str, agent: &str) -> &'static str {
     for line in tmux_out(&["list-panes", "-s", "-F", "#{window_index}|#{pane_start_command}"])
         .lines()
     {
@@ -507,12 +633,12 @@ pub fn open_session_beside(sid: &str, cwd: &str) -> &'static str {
         }
     }
     let Some(target) = work_window() else {
-        open_session_tab(sid, cwd); // nothing to sit beside yet
+        open_session_tab(sid, cwd, agent); // nothing to sit beside yet
         return "tab";
     };
     let t = format!("{TMUX_SESSION}:{target}");
-    tmux(&["split-window", "-h", "-t", &t, "-c", cwd, &format!("claude --resume {sid}")]);
-    let beside = tab_name(sid, cwd, 10);
+    tmux(&["split-window", "-h", "-t", &t, "-c", cwd, &with_user_path(&resume_cmd(agent, sid))]);
+    let beside = tab_name(sid, cwd, 10, agent);
     tmux(&["set-option", "-w", "-t", &t, "@beside", &beside]);
     tmux(&["select-window", "-t", &target]);
     "split"
@@ -621,14 +747,14 @@ fn palette() {
             open_sids.insert(sid);
         }
     }
-    // (action, display): ("tab", idx, "") | ("sid", sid, cwd)
-    let mut items: Vec<((&str, String, String), String)> = Vec::new();
+    // (action, display): ("tab", idx, "", "") | ("sid", sid, cwd, agent)
+    let mut items: Vec<((&str, String, String, String), String)> = Vec::new();
     for line in tmux_out(&["list-windows", "-F", "#{window_index}|#{window_name}"]).lines() {
         let (idx, name) = line.split_once('|').unwrap_or(("", ""));
         if idx == "0" {
             continue; // the tree is where you already are
         }
-        items.push((("tab", idx.to_string(), String::new()), format!("tab   {idx:>2}  {name}")));
+        items.push((("tab", idx.to_string(), String::new(), String::new()), format!("tab   {idx:>2}  {name}")));
     }
     for row in hyprdesk::session_rows() {
         // PAST only: resuming a live session opens a second client (spec)
@@ -636,9 +762,10 @@ fn palette() {
             continue;
         }
         let label = if row.detail.is_empty() { row.label.clone() } else { row.detail.clone() };
+        let mark = if row.agent == "codex" { format!("{CODEX_GLYPH} ") } else { String::new() };
         items.push((
-            ("sid", row.sid.clone(), row.cwd.clone()),
-            format!("past      {label}  {}", row.dir).trim_end().to_string(),
+            ("sid", row.sid.clone(), row.cwd.clone(), row.agent.clone()),
+            format!("past      {mark}{label}  {}", row.dir).trim_end().to_string(),
         ));
     }
     if items.is_empty() {
@@ -672,12 +799,12 @@ fn palette() {
     let Some(i) = picked.split('\t').next().and_then(|s| s.parse::<usize>().ok()) else {
         return;
     };
-    let Some(((kind, first, second), _)) = items.get(i) else { return };
+    let Some(((kind, first, second, agent), _)) = items.get(i) else { return };
     if *kind == "tab" {
         // session-qualified: inside a popup "current" is not the user's
         tmux(&["select-window", "-t", &format!("{TMUX_SESSION}:{first}")]);
     } else {
-        open_session_tab(first, second);
+        open_session_tab(first, second, agent);
     }
 }
 

@@ -548,6 +548,40 @@ def studio_stake():
     return len(names), convos, names
 
 
+PINS_FILE = Path.home() / ".local/state/hyprdesk/studio-pins.json"
+
+
+def load_pins():
+    """Pinned project cwds, oldest pin first. Corrupt or missing file reads
+    as no pins — and must never be overwritten by that fallback."""
+    try:
+        pins = json.loads(PINS_FILE.read_text())
+        return [p for p in pins if isinstance(p, str)]
+    except (OSError, ValueError):
+        return []
+
+
+def save_pins(pins):
+    PINS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = PINS_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(list(pins)))
+    os.replace(tmp, PINS_FILE)
+
+
+def project_group(cwd):
+    """Which folder-group a project cwd belongs to. /tmp is its own group
+    because test harnesses (pytest, accretion live samples) mint dozens of
+    throwaway projects there and they were drowning the real ones."""
+    p = (cwd or "") + "/"
+    if p.startswith("/tmp/"):
+        return "scratch"
+    if ("/company/" in p) or p.rstrip("/").endswith("/company"):
+        return "company"
+    if p.startswith(str(Path.home())):
+        return "home"
+    return "other"
+
+
 def palette():
     """Jump anywhere: every open tab and every resumable transcript in one
     fuzzy list, floating over whatever you were reading.
@@ -652,7 +686,7 @@ def sidebar():
     from textual.binding import Binding
     from textual.containers import Horizontal, Vertical
     from textual.screen import ModalScreen
-    from textual.widgets import Button, Footer, Static, Tree
+    from textual.widgets import Button, Footer, Input, Static, Tree
     # every tree label is Rich markup, and the text going into it is a
     # conversation title or a job's own detail string — neither of which is
     # ours. One '[' in either raises MarkupError and takes the row with it,
@@ -696,7 +730,7 @@ def sidebar():
             self.move_cursor(node)
             data = getattr(node, "data", None)
             if data is None or (isinstance(data, dict)
-                                and data.get("kind") == "project"):
+                                and data.get("kind") in ("project", "group")):
                 node.toggle()
 
     class ConfirmQuit(ModalScreen):
@@ -766,13 +800,25 @@ def sidebar():
             Binding("s", "beside", "Open beside", show=True),
             Binding("t", "term", "Terminal here", show=True),
             Binding("m", "mcp", "MCP / settings", show=True),
+            Binding("p", "pin", "Pin project", show=True),
+            Binding("slash", "filter", "Filter", show=True),
             Binding("x", "kill_bg", "Stop bg job", show=True),
             Binding("r", "refresh", "Refresh", show=True),
             Binding("q", "quit_studio", "Close studio", show=True),
+            Binding("escape", "clear_filter", "Clear filter", show=False),
         ]
         CSS = f"""
         Screen {{ background: ansi_default; color: {pal['fg']}; }}
         #hint {{ color: {pal['sub']}; padding: 0 2; height: 1; }}
+        /* the filter box borrows the confirm dialog's surface treatment
+           (bg + muted border — muted is a surface tone, allowed here) and
+           stays hidden until / summons it, so the tree keeps every row. */
+        #filter {{
+            display: none; height: 3; margin: 0 1;
+            background: {pal['bg']}; border: round {pal['muted']};
+            color: {pal['fg']};
+        }}
+        #filter:focus {{ border: round {pal['accent']}; }}
         Tree {{ background: transparent; padding: 0 1; }}
         /* the cursor is "you are here" and wears accent like the tab
            strip's current tab. 30% was a faint wash you had to hunt for;
@@ -823,11 +869,18 @@ def sidebar():
                 f"[{pal['sub']}]click picks · click again opens"
                 " · C-b g jumps[/]",
                 id="hint")
+            yield Input(placeholder="filter projects…  (Esc clears)",
+                        id="filter")
             yield AimTree("sessions", id="tree")
             yield Footer()
 
         def on_mount(self):
             self._sig = None
+            self._pins = load_pins()
+            self._filter = ""
+            # which group/project nodes stand open; seeded once, then
+            # harvested from the live tree so rebuilds keep the user's shape
+            self._open_keys = {"pinned", "home", "company"}
             self.reload_tree()
             self.query_one(Tree).focus()
             # the tree goes stale the moment a tab is closed or a session
@@ -842,15 +895,30 @@ def sidebar():
             # rebuilding collapsed whatever the user had opened and threw
             # the cursor back to the top — every 6 seconds. Almost every
             # poll finds nothing new, so almost every poll must do nothing.
-            sig = [(r.get("kind"), r.get("label"), r.get("sid"),
-                    r.get("pid"), r.get("detail")) for r in rows]
+            filt = (self._filter or "").strip().lower()
+            sig = ([(r.get("kind"), r.get("label"), r.get("sid"),
+                     r.get("pid"), r.get("detail")) for r in rows]
+                   + [filt, tuple(self._pins)])
             if not force and sig == self._sig:
                 return
             self._sig = sig
             tree = self.query_one(Tree)
-            # when it HAS changed, keep the shape the user arranged
-            was_open = {n.label.plain for n in tree.root.children
-                        for n in n.children if n.is_expanded}
+
+            def walk(n):
+                for c in n.children:
+                    yield c
+                    yield from walk(c)
+
+            # when it HAS changed, keep the shape the user arranged. The
+            # filtered view force-expands everything, so harvesting there
+            # would bake that into the user's shape — skip it and the
+            # pre-filter arrangement comes back when the filter clears.
+            if tree.root.children and not getattr(self, "_built_filtered",
+                                                  False):
+                self._open_keys = {
+                    (c.data or {}).get("key", c.label.plain)
+                    for c in walk(tree.root)
+                    if c.allow_expand and c.is_expanded}
             cur = tree.cursor_node
             cur_key = (cur.label.plain if cur is not None else None)
             tree.clear()
@@ -884,17 +952,21 @@ def sidebar():
                     sec.add_leaf(f"{icon} {escape(str(r['label']))}"
                                  + (f"  [dim]{where}[/]" if where else ""),
                                  data=r)
+            # transcripts arrive newest-first, so a dict keyed by project
+            # keeps projects in most-recent-activity order and items[0] is
+            # each project's latest session — recency sort for free.
             projects = {}
             for r in past:
                 projects.setdefault(r["label"], []).append(r)
-            sec = tree.root.add(
-                f"[bold]Projects ({len(projects)})[/]", expand=True)
-            for label, items in sorted(projects.items()):
-                node = sec.add(f"[{pal['sub']}]󰉋[/] {escape(str(label))}"
-                               f"  [dim]{len(items)}[/]",
-                               data={"kind": "project",
-                                     "cwd": items[0]["cwd"]})
-                if node.label.plain in was_open:
+
+            def add_project(parent, label, items, expand, pin=False):
+                icon = "󰐃" if pin else "󰉋"
+                node = parent.add(
+                    f"[{pal['sub']}]{icon}[/] {escape(str(label))}"
+                    f"  [dim]{len(items)}[/]",
+                    data={"kind": "project", "cwd": items[0]["cwd"],
+                          "key": items[0]["cwd"]})
+                if expand:
                     node.expand()
                 for it in items:
                     # 󰥔 replaces the 🕒 emoji: same meaning, but it can
@@ -902,12 +974,58 @@ def sidebar():
                     node.add_leaf(
                         f"[{pal['sub']}]󰥔[/] {escape(str(it['detail']))}",
                         data=it)
+
+            if filt:
+                # match on the project path AND on what happened inside it,
+                # so "aegis" and "deploy" are both live queries
+                matched = {}
+                for label, items in projects.items():
+                    if filt in label.lower():
+                        matched[label] = items
+                        continue
+                    hit = [it for it in items
+                           if filt in (it.get("title") or "").lower()
+                           or filt in (it.get("detail") or "").lower()]
+                    if hit:
+                        matched[label] = hit
+                sec = tree.root.add(
+                    f"[bold]Matches ({len(matched)})[/]", expand=True,
+                    data={"kind": "group", "key": "matches"})
+                for label, items in matched.items():
+                    add_project(sec, label, items, expand=True)
+            else:
+                # folder groups: /tmp scratch (pytest, sample harnesses)
+                # was 2/3 of the flat list — it folds to one collapsed row
+                by_group = {"pinned": [], "home": [], "company": [],
+                            "other": [], "scratch": []}
+                for label, items in projects.items():
+                    cwd = items[0]["cwd"]
+                    g = ("pinned" if cwd in self._pins
+                         else project_group(cwd))
+                    by_group[g].append((label, items))
+                titles = {"pinned": "󰐃 Pinned", "home": "󱂵 Home",
+                          "company": "󰉋 Company", "other": "󰉖 Other",
+                          "scratch": "󰪺 Scratch /tmp"}
+                for key in ("pinned", "home", "company", "other",
+                            "scratch"):
+                    entries = by_group[key]
+                    if not entries:
+                        continue
+                    sec = tree.root.add(
+                        f"[bold]{titles[key]} ({len(entries)})[/]",
+                        expand=(key in self._open_keys),
+                        data={"kind": "group", "key": key})
+                    for label, items in entries:
+                        add_project(sec, label, items,
+                                    expand=(items[0]["cwd"]
+                                            in self._open_keys),
+                                    pin=(key == "pinned"))
+            self._built_filtered = bool(filt)
             if cur_key is not None:
-                for n in tree.root.children:
-                    for m in [n, *n.children]:
-                        if m.label.plain == cur_key:
-                            tree.move_cursor(m)
-                            break
+                for m in walk(tree.root):
+                    if m.label.plain == cur_key:
+                        tree.move_cursor(m)
+                        break
 
         def _current(self):
             node = self.query_one(Tree).cursor_node
@@ -915,14 +1033,62 @@ def sidebar():
 
         def on_tree_node_selected(self, event):
             data = event.node.data
-            if not data or data.get("kind") == "project":
+            if not data or data.get("kind") in ("project", "group"):
                 return
             self.open_entry(data)
 
         def action_open(self):
             data = self._current()
-            if data and data.get("kind") != "project":
+            if data and data.get("kind") not in ("project", "group"):
                 self.open_entry(data)
+
+        def action_pin(self):
+            """Toggle a pin on the aimed project (or the project owning the
+            aimed session). Pins live in their own top section and persist
+            across studio restarts."""
+            data = self._current() or {}
+            cwd = (data.get("cwd")
+                   if data.get("kind") in ("project", "past") else None)
+            if not cwd:
+                self.notify("Aim at a project (or one of its sessions)"
+                            " to pin it", severity="warning")
+                return
+            if cwd in self._pins:
+                self._pins.remove(cwd)
+                self.notify(f"Unpinned {os.path.basename(cwd) or cwd}")
+            else:
+                self._pins.append(cwd)
+                self.notify(f"Pinned {os.path.basename(cwd) or cwd}")
+            save_pins(self._pins)
+            self.reload_tree(force=True)
+
+        def action_filter(self):
+            box = self.query_one("#filter", Input)
+            box.styles.display = "block"
+            box.focus()
+
+        def action_clear_filter(self):
+            box = self.query_one("#filter", Input)
+            if not self._filter and str(box.styles.display) == "none":
+                return
+            box.value = ""            # fires on_input_changed → rebuild
+            box.styles.display = "none"
+            self._filter = ""
+            self.query_one(Tree).focus()
+            self.reload_tree(force=True)
+
+        def on_input_changed(self, event):
+            self._filter = event.value
+            self.reload_tree(force=True)
+
+        def on_input_submitted(self, event):
+            # Enter hands focus to the tree, cursor on the first match
+            tree = self.query_one(Tree)
+            tree.focus()
+            for n in tree.root.children:
+                if n.children:
+                    tree.move_cursor(n.children[0])
+                    break
 
         def open_entry(self, data):
             kind = data.get("kind")

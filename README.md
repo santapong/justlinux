@@ -81,6 +81,12 @@ cargo install wallust --locked
 pip install --user --break-system-packages textual textual-image
 ```
 
+> **Trap:** `pip --user` packages live under `~/.local/lib/python3.X/`. When Kali
+> bumps the system Python (e.g. 3.13 → 3.14) the new interpreter ignores that
+> tree and Hypr Settings / Launcher / Kanban die silently with
+> `ModuleNotFoundError: No module named 'textual'` (the kitty window closes
+> instantly). Fix: re-run the `pip install` line above for the new Python.
+
 Fonts: JetBrainsMono Nerd Font. Icon theme: Flat-Remix-Blue-Dark.
 
 ## Install

@@ -4,6 +4,75 @@ All notable changes to this desktop. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [1.7.0] — 2026-08-24
+
+### Added
+
+- **The Studio's project list groups itself.** The flat alphabetical
+  Projects section had grown to 33 entries — 22 of them `/tmp` scratch
+  dirs minted by test harnesses — and needed long scrolling to reach
+  anything real. Projects now fold into folder groups (󰐃 Pinned, 󱂵 Home,
+  󰉋 Company, 󰉖 Other, 󰪺 Scratch /tmp), with Scratch and Other collapsed
+  by default and most-recent-activity order inside each group, so active
+  projects float and the whole panel fits on one screen.
+- **`/` filters the session tree.** Type a few letters and the tree
+  narrows live into a MATCHES section — matching project paths and
+  session titles/previews alike. Enter lands the cursor on the first
+  match; Esc clears back to the grouped view.
+- **`p` pins a project.** Pinned projects sit in their own top section
+  wearing 󰐃, and survive restarts
+  (`~/.local/state/hyprdesk/studio-pins.json`, temp+rename writes,
+  corrupt file reads as no pins without being overwritten).
+- **Codex CLI is a second agent in Claude Studio.** The session tree lists
+  Codex conversations (`~/.codex/sessions/**/rollout-*.jsonl`) under their
+  projects next to Claude's, marked 󰚩; `Enter`/`s` open them with
+  `codex resume <id>`, and `N` starts a fresh Codex conversation in the
+  highlighted project (`n` stays Claude). A running Codex is recognised by
+  the rollout file it holds open, so a tab started with `N` gets its name and
+  identity on the next rename pass. The jump palette (`C-b g`) lists Codex
+  transcripts too.
+
+### Fixed
+
+- **Shift+Enter inserts a newline inside the Studio.** The studio's tmux
+  server started from `-f /dev/null` with `extended-keys off`, so the kitty
+  keyboard protocol never reached `claude`/`codex` and Shift+Enter submitted
+  the prompt instead. The server now sets `extended-keys always`,
+  `extended-keys-format csi-u` and the kitty `extkeys` terminal feature
+  (`on` was not enough — it only forwards to panes that asked, per pane).
+  Side effect: a plain terminal tab shows `^[[13;2u` on Shift+Enter.
+
+## [1.6.3] — 2026-08-14
+
+### Fixed
+
+- **The notification daemon now has one owner.** Hyprland asks the enabled
+  `swaync.service` to start instead of launching a competing unmanaged
+  `swaync`; login no longer produces five failed restarts and a
+  `start-limit-hit` service. Its notifications widget now also has the
+  required configuration block, so swaync no longer falls back noisily at
+  every start.
+- **Wallpaper recolouring can no longer re-modeset the displays.** An
+  incomplete generated palette now keeps the previous border colours and
+  notifies instead of falling back to `hyprctl reload`, closing the last path
+  that could freeze all three monitors for seconds.
+- **The desktop no longer defaults to an over-budget blur workload.** Blur is
+  opt-in on the Intel UHD 630 setup: fourteen always-on card surfaces plus the
+  office surface were forcing Hyprland to composite too much during browser
+  rendering bursts. The Appearance page still applies it live for users who
+  prefer the glass effect.
+- Released the post-1.6.2 input fixes: stale Wayland pointer proxies are
+  released across the dock, cards, pet and office, preventing doubled clicks
+  and duplicate application launches after a seat capability flap.
+
+### Added
+
+- `stall-watch.sh` records slow Hyprland main-thread IPC round trips and a
+  process snapshot, so intermittent compositor stalls can be diagnosed from
+  evidence after they occur.
+
 ## [1.6.2] — 2026-08-05
 
 ### Fixed

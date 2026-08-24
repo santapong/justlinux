@@ -1269,7 +1269,13 @@ impl SeatHandler for App {
         seat: wl_seat::WlSeat,
         capability: Capability,
     ) {
-        if capability == Capability::Pointer && self.pointer.is_none() {
+        if capability == Capability::Pointer {
+            // release any stale proxy first — a leaked wl_pointer keeps
+            // delivering events, doubling every click (found live: one
+            // dock click launched two of each app after a seat cap flap)
+            if let Some(old) = self.pointer.take() {
+                old.release();
+            }
             self.pointer = self.seat_state.get_pointer(qh, &seat).ok();
             if std::env::var("HYPRDOCK_DEBUG").is_ok() {
                 eprintln!("pointer registered: {}", self.pointer.is_some());
@@ -1284,7 +1290,9 @@ impl SeatHandler for App {
         capability: Capability,
     ) {
         if capability == Capability::Pointer {
-            self.pointer = None;
+            if let Some(old) = self.pointer.take() {
+                old.release();
+            }
         }
     }
     fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
@@ -1295,9 +1303,14 @@ impl PointerHandler for App {
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
-        _: &wl_pointer::WlPointer,
+        pointer: &wl_pointer::WlPointer,
         events: &[PointerEvent],
     ) {
+        // belt-and-braces vs the double-launch bug: only honour the
+        // pointer we currently own — a stale proxy must stay silent
+        if self.pointer.as_ref() != Some(pointer) {
+            return;
+        }
         for ev in events {
             let idx = self.surf_of(&ev.surface);
             match &ev.kind {
@@ -1376,6 +1389,12 @@ impl PointerHandler for App {
                         continue;
                     }
                     let hv = self.hit(i, self.pointer_pos.0);
+                    if std::env::var("HYPRDOCK_DEBUG").is_ok() {
+                        eprintln!(
+                            "press: btn {button:#x} mon {} kind {} hit {hv:?}",
+                            self.surfs[i].mon, self.surfs[i].kind as u8
+                        );
+                    }
                     match (hv, button) {
                         (Some(usize::MAX), 0x110) => {
                             // ＋: picker for THIS monitor (python spawn path)
