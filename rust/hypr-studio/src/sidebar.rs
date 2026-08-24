@@ -30,6 +30,59 @@ fn wash(base: hyprdesk::Rgb, ink: hyprdesk::Rgb, t: f32) -> Color {
     Color::Rgb(m(base.0, ink.0), m(base.1, ink.1), m(base.2, ink.2))
 }
 
+// ----- pinned projects (shared format with the python spec) -----
+
+fn pins_file() -> std::path::PathBuf {
+    hyprdesk::home().join(".local/state/hyprdesk/studio-pins.json")
+}
+
+/// Corrupt or missing file reads as no pins — and must never be
+/// overwritten by that fallback (GUI conventions: shared state files).
+fn load_pins() -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(pins_file()) else {
+        return Vec::new();
+    };
+    serde_json::from_str::<Vec<String>>(&text).unwrap_or_default()
+}
+
+fn save_pins(pins: &[String]) {
+    let f = pins_file();
+    if let Some(dir) = f.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let tmp = f.with_extension("json.tmp");
+    let body = serde_json::to_string(pins).unwrap_or_else(|_| "[]".into());
+    if std::fs::write(&tmp, body).is_ok() {
+        let _ = std::fs::rename(&tmp, &f); // temp + rename: never half-written
+    }
+}
+
+/// Which folder-group a project cwd belongs to. /tmp is its own group
+/// because test harnesses (pytest, live-sample runs) mint dozens of
+/// throwaway projects there and they were drowning the real ones.
+fn project_group(cwd: &str) -> usize {
+    let p = format!("{}/", cwd);
+    if p.starts_with("/tmp/") {
+        return G_SCRATCH;
+    }
+    if p.contains("/company/") {
+        return G_COMPANY;
+    }
+    if p.starts_with(&hyprdesk::home().display().to_string()) {
+        return G_HOME;
+    }
+    G_OTHER
+}
+
+const G_PINNED: usize = 0;
+const G_HOME: usize = 1;
+const G_COMPANY: usize = 2;
+const G_OTHER: usize = 3;
+const G_SCRATCH: usize = 4;
+// glyphs verified in JetBrainsMono NF via fc-list :charset=
+const GROUP_TITLES: [&str; 5] =
+    ["󰐃 Pinned", "󱂵 Home", "󰉋 Company", "󰉖 Other", "󰪺 Scratch /tmp"];
+
 #[derive(Clone, PartialEq)]
 enum NodeKind {
     Section,
@@ -102,6 +155,9 @@ pub struct App {
     hover: Option<usize>,
     collapsed_sections: HashSet<String>,
     expanded_projects: HashSet<String>,
+    pins: Vec<String>,
+    filter: String,
+    filter_mode: bool, // '/' captures the keyboard until Enter/Esc
     confirm: Option<Confirm>,
     notify: Option<(String, Instant, bool)>, // (msg, expires, warning)
     tree_area: Rect,
@@ -120,8 +176,16 @@ impl App {
             cursor: 0,
             scroll: 0,
             hover: None,
-            collapsed_sections: HashSet::new(),
+            // scratch/other start folded — that is the whole point of
+            // grouping; a click or → reopens them and the choice sticks
+            collapsed_sections: [GROUP_TITLES[G_OTHER], GROUP_TITLES[G_SCRATCH]]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             expanded_projects: HashSet::new(),
+            pins: load_pins(),
+            filter: String::new(),
+            filter_mode: false,
             confirm: None,
             notify: None,
             tree_area: Rect::default(),
@@ -223,23 +287,14 @@ impl App {
                 None => projects.push((r.label.clone(), vec![r])),
             }
         }
-        projects.sort_by(|a, b| a.0.cmp(&b.0));
-        let pkey = format!("PROJECTS  · {}", projects.len());
-        let popen = !self.collapsed_sections.contains("PROJECTS");
-        nodes.push(Node {
-            key: pkey,
-            depth: 0,
-            kind: NodeKind::Section,
-            expanded: popen,
-            row: None,
-            project_cwd: String::new(),
-            win: None,
-        });
-        if popen {
-            for (label, items) in &projects {
-                let open = self.expanded_projects.contains(label);
+        let filt = self.filter.trim().to_lowercase();
+        // transcripts arrive newest-first, so first-appearance order IS
+        // most-recent-activity order — the alphabetical sort is gone on
+        // purpose: active projects float, stale ones sink
+        let push_project =
+            |nodes: &mut Vec<Node>, label: &str, items: &[&Row], open: bool| {
                 nodes.push(Node {
-                    key: label.clone(),
+                    key: label.to_string(),
                     depth: 1,
                     kind: NodeKind::Project,
                     expanded: open,
@@ -260,6 +315,74 @@ impl App {
                         });
                     }
                 }
+            };
+        if !filt.is_empty() {
+            // filtered: one flat MATCHES section, everything force-open.
+            // Match the project path AND what happened inside it, so
+            // "aegis" and "deploy" are both live queries.
+            let mut matched: Vec<(String, Vec<&Row>)> = Vec::new();
+            for (label, items) in &projects {
+                if label.to_lowercase().contains(&filt) {
+                    matched.push((label.clone(), items.clone()));
+                    continue;
+                }
+                let hit: Vec<&Row> = items
+                    .iter()
+                    .copied()
+                    .filter(|it| {
+                        it.title.to_lowercase().contains(&filt)
+                            || it.detail.to_lowercase().contains(&filt)
+                    })
+                    .collect();
+                if !hit.is_empty() {
+                    matched.push((label.clone(), hit));
+                }
+            }
+            nodes.push(Node {
+                key: format!("MATCHES  · {}", matched.len()),
+                depth: 0,
+                kind: NodeKind::Section,
+                expanded: true,
+                row: None,
+                project_cwd: String::new(),
+                win: None,
+            });
+            for (label, items) in &matched {
+                push_project(&mut nodes, label, items, true);
+            }
+        } else {
+            // folder groups: /tmp scratch was 2/3 of the flat list — it
+            // folds to one collapsed row; pins get their own top section
+            let mut groups: [Vec<(String, Vec<&Row>)>; 5] = Default::default();
+            for (label, items) in projects {
+                let g = if self.pins.contains(&items[0].cwd) {
+                    G_PINNED
+                } else {
+                    project_group(&items[0].cwd)
+                };
+                groups[g].push((label, items));
+            }
+            for (g, entries) in groups.iter().enumerate() {
+                if entries.is_empty() {
+                    continue;
+                }
+                let title = GROUP_TITLES[g];
+                let open = !self.collapsed_sections.contains(title);
+                nodes.push(Node {
+                    key: format!("{title}  · {}", entries.len()),
+                    depth: 0,
+                    kind: NodeKind::Section,
+                    expanded: open,
+                    row: None,
+                    project_cwd: String::new(),
+                    win: None,
+                });
+                if open {
+                    for (label, items) in entries {
+                        let popen = self.expanded_projects.contains(label);
+                        push_project(&mut nodes, label, items, popen);
+                    }
+                }
             }
         }
         self.nodes = nodes;
@@ -276,15 +399,11 @@ impl App {
         let (kind, key) = (self.nodes[i].kind.clone(), self.nodes[i].key.clone());
         match kind {
             NodeKind::Section => {
-                let name = if key.starts_with("RUNNING") {
-                    "RUNNING"
-                } else if key.starts_with("OPEN") {
-                    "OPEN"
-                } else {
-                    "PROJECTS"
-                };
-                if !self.collapsed_sections.remove(name) {
-                    self.collapsed_sections.insert(name.to_string());
+                // the id is the title without its live count, so the
+                // choice survives the count changing under it
+                let name = key.split("  · ").next().unwrap_or(&key).to_string();
+                if !self.collapsed_sections.remove(&name) {
+                    self.collapsed_sections.insert(name);
                 }
             }
             NodeKind::Project => {
@@ -413,6 +532,38 @@ impl App {
         // python's 1 s set_timer
     }
 
+    /// p: toggle a pin on the aimed project (or the project owning the
+    /// aimed session). Pins live in their own top section and persist.
+    fn action_pin(&mut self) {
+        let cwd = self
+            .nodes
+            .get(self.cursor)
+            .and_then(|n| {
+                if n.kind == NodeKind::Project {
+                    Some(n.project_cwd.clone())
+                } else {
+                    n.row
+                        .as_ref()
+                        .filter(|r| r.kind == "past")
+                        .map(|r| r.cwd.clone())
+                }
+            })
+            .filter(|c| !c.is_empty());
+        let Some(cwd) = cwd else {
+            self.say("Aim at a project (or one of its sessions) to pin it", true);
+            return;
+        };
+        if let Some(i) = self.pins.iter().position(|p| *p == cwd) {
+            self.pins.remove(i);
+            self.say("Unpinned", false);
+        } else {
+            self.pins.push(cwd);
+            self.say("Pinned — it now sits at the top", false);
+        }
+        save_pins(&self.pins);
+        self.rebuild(true);
+    }
+
     fn action_quit(&mut self) {
         let (tabs, convos, names) = super::studio_stake();
         if tabs == 0 {
@@ -464,7 +615,49 @@ impl App {
             }
             return;
         }
+        if self.filter_mode {
+            // '/' owns the keyboard until Enter (keep matches, back to
+            // the tree) or Esc (clear and restore the grouped view)
+            match k.code {
+                KeyCode::Esc => {
+                    self.filter_mode = false;
+                    self.filter.clear();
+                    self.rebuild(true);
+                }
+                KeyCode::Enter => {
+                    self.filter_mode = false;
+                    // land the cursor on the first match, not a header
+                    if let Some(i) =
+                        self.nodes.iter().position(|n| n.kind == NodeKind::Project)
+                    {
+                        self.cursor = i;
+                    }
+                    self.dirty = true;
+                }
+                KeyCode::Backspace => {
+                    self.filter.pop();
+                    self.rebuild(true);
+                }
+                KeyCode::Char(c) => {
+                    self.filter.push(c);
+                    self.rebuild(true);
+                }
+                _ => {}
+            }
+            return;
+        }
         match k.code {
+            KeyCode::Esc => {
+                if !self.filter.is_empty() {
+                    self.filter.clear();
+                    self.rebuild(true);
+                }
+            }
+            KeyCode::Char('/') => {
+                self.filter_mode = true;
+                self.dirty = true;
+            }
+            KeyCode::Char('p') => self.action_pin(),
             KeyCode::Up | KeyCode::Char('k') => {
                 self.cursor = self.cursor.saturating_sub(1);
                 self.dirty = true;
@@ -600,12 +793,15 @@ impl App {
     fn draw(&mut self, f: &mut Frame) {
         let pal = &self.pal;
         let narrow = f.area().width < 60;
-        let chunks = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(if narrow { 3 } else { 1 }),
-        ])
-        .split(f.area());
+        let show_filter = self.filter_mode || !self.filter.is_empty();
+        let mut constraints = vec![Constraint::Length(1)];
+        if show_filter {
+            constraints.push(Constraint::Length(1));
+        }
+        constraints.push(Constraint::Min(1));
+        constraints.push(Constraint::Length(if narrow { 4 } else { 1 }));
+        let chunks = Layout::vertical(constraints).split(f.area());
+        let ti = if show_filter { 2 } else { 1 }; // tree chunk index
         // hint row: the MOUSE contract — the one thing the footer's keys
         // cannot teach (spec)
         self.header_area = chunks[0];
@@ -629,8 +825,31 @@ impl App {
         ]);
         f.render_widget(Paragraph::new(hint), chunks[0]);
 
-        self.tree_area = chunks[1];
-        let h = chunks[1].height as usize;
+        if show_filter {
+            // live filter readout; the block cursor says typing goes here
+            let caret = if self.filter_mode { "▌" } else { "" };
+            let tail = if self.filter_mode { "  ↵ tree · Esc clears" } else { "  Esc clears" };
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(
+                        " / ",
+                        Style::default()
+                            .fg(col(pal.bg))
+                            .bg(col(pal.accent))
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!(" {}{caret}", self.filter),
+                        Style::default().fg(col(pal.fg)),
+                    ),
+                    Span::styled(tail.to_string(), Style::default().fg(col(pal.sub))),
+                ])),
+                chunks[1],
+            );
+        }
+
+        self.tree_area = chunks[ti];
+        let h = chunks[ti].height as usize;
         if self.cursor < self.scroll {
             self.scroll = self.cursor;
         } else if self.cursor >= self.scroll + h {
@@ -688,7 +907,12 @@ impl App {
                         if n.expanded { "▾" } else { "▸" }.to_string(),
                         Style::default().fg(col(pal.sub)),
                     ));
-                    spans.push(Span::styled("󰉋  ", Style::default().fg(col(pal.sub))));
+                    let glyph = if self.pins.contains(&n.project_cwd) {
+                        "󰐃  " // pinned wears its own mark wherever it shows
+                    } else {
+                        "󰉋  "
+                    };
+                    spans.push(Span::styled(glyph.to_string(), Style::default().fg(col(pal.sub))));
                     let count = self
                         .rows
                         .iter()
@@ -761,7 +985,7 @@ impl App {
             }
             lines.push(line);
         }
-        f.render_widget(Paragraph::new(lines), chunks[1]);
+        f.render_widget(Paragraph::new(lines), chunks[ti]);
 
         // footer: the keys, in sub ink. In the 34-cell pane the handoff
         // gives it a rule and two rows.
@@ -792,8 +1016,11 @@ impl App {
                 lines.push(Line::from(
                     [key("t", "term"), key("w", "wide"), key("q", "quit")].concat(),
                 ));
+                lines.push(Line::from(
+                    [key("p", "pin"), key("/", "filter")].concat(),
+                ));
             }
-            f.render_widget(Paragraph::new(lines), chunks[2]);
+            f.render_widget(Paragraph::new(lines), chunks[ti + 1]);
             if self.confirm.is_some() {
                 self.draw_confirm(f);
             }
@@ -813,6 +1040,8 @@ impl App {
                     ("N", "codex"),
                     ("t", "term"),
                     ("m", "mcp"),
+                    ("p", "pin"),
+                    ("/", "filter"),
                     ("x", "stop"),
                     ("r", "refresh"),
                     ("q", "quit"),
@@ -830,7 +1059,7 @@ impl App {
                 .collect::<Vec<_>>(),
             )
         };
-        f.render_widget(Paragraph::new(footer), chunks[2]);
+        f.render_widget(Paragraph::new(footer), chunks[ti + 1]);
 
         if self.confirm.is_some() {
             self.draw_confirm(f);
