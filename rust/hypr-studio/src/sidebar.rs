@@ -4,7 +4,8 @@
 //! signature-checked reload, cursor/expansion preservation — is contract
 //! here, not decoration (docs/claude-studio.md).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::io::Write as _;
 use std::time::{Duration, Instant};
 
@@ -145,6 +146,43 @@ struct Confirm {
     quit_rect: Rect,
 }
 
+/// Does the file mention `needle`? Searched from the END in 1 MB chunks
+/// (with overlap) and capped at 64 MB, so a plan written a moment ago is
+/// found in the first chunk of even a 48 MB transcript, and an old plan
+/// costs at most one bounded read — this runs only when a plan file
+/// appears, never on the 6 s reload.
+fn mentions(path: &std::path::Path, needle: &str) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    const CHUNK: u64 = 1 << 20;
+    const CAP: u64 = 64 << 20;
+    let Ok(mut f) = std::fs::File::open(path) else { return false };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let nb = needle.len() as u64;
+    let floor = len.saturating_sub(CAP);
+    let mut end = len;
+    let mut buf = Vec::new();
+    while end > floor {
+        let start = end.saturating_sub(CHUNK).max(floor);
+        let want = (end - start) as usize;
+        if f.seek(SeekFrom::Start(start)).is_err() {
+            return false;
+        }
+        buf.clear();
+        buf.resize(want, 0);
+        if f.read_exact(&mut buf).is_err() {
+            return false;
+        }
+        if buf.windows(needle.len()).any(|w| w == needle.as_bytes()) {
+            return true;
+        }
+        if start == floor {
+            break;
+        }
+        end = start + nb; // overlap so a needle straddling chunks is seen
+    }
+    false
+}
+
 pub struct App {
     pal: hyprdesk::Palette,
     rows: Vec<Row>,
@@ -162,6 +200,9 @@ pub struct App {
     notify: Option<(String, Instant, bool)>, // (msg, expires, warning)
     tree_area: Rect,
     header_area: Rect,
+    plans: HashMap<String, PathBuf>, // window index -> its plan-mode plan
+    plans_dir_seen: Option<std::time::SystemTime>,
+    plans_auto_done: HashSet<(String, PathBuf)>,
     dirty: bool,
     exit: bool,
 }
@@ -188,6 +229,9 @@ impl App {
             filter_mode: false,
             confirm: None,
             notify: None,
+            plans: HashMap::new(),
+            plans_dir_seen: None,
+            plans_auto_done: HashSet::new(),
             tree_area: Rect::default(),
             header_area: Rect::default(),
             dirty: true,
@@ -204,9 +248,16 @@ impl App {
     /// every poll must do nothing — the signature check carries that.
     fn reload(&mut self, force: bool) {
         let rows = hyprdesk::session_rows();
+        self.scan_plans();
         let winsig: String = open_windows()
             .iter()
-            .map(|w| format!("{}|{}|{}{}{}|{};", w.idx, w.name, w.active as u8, w.bell as u8, w.activity as u8, w.beside))
+            .map(|w| {
+                format!(
+                    "{}|{}|{}{}{}|{}|{};",
+                    w.idx, w.name, w.active as u8, w.bell as u8, w.activity as u8, w.beside,
+                    self.plans.get(&w.idx).map(|p| p.display().to_string()).unwrap_or_default()
+                )
+            })
             .collect();
         let mut sig: Vec<(String, String, String, i32, String)> = rows
             .iter()
@@ -219,6 +270,65 @@ impl App {
         self.sig = sig;
         self.rows = rows;
         self.rebuild(true);
+    }
+
+
+    /// Which tab is a plan-mode plan for? `~/.claude/plans/` changes its
+    /// mtime when Claude creates a plan file; only then (not every reload)
+    /// do we ask tmux for the tabs' session ids and grep each transcript's
+    /// tail for the plan's file name — Claude's plan-mode text and the
+    /// Write call both carry the path. The viewer itself follows edits.
+    fn scan_plans(&mut self) {
+        let dir = hyprdesk::home().join(".claude/plans");
+        let now = std::fs::metadata(&dir).and_then(|m| m.modified()).ok();
+        if now.is_none() || now == self.plans_dir_seen {
+            return;
+        }
+        self.plans_dir_seen = now;
+        let cutoff = std::time::SystemTime::now() - Duration::from_secs(2 * 86400);
+        let mut files: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(&dir)
+            .map(|rd| {
+                rd.flatten()
+                    .filter(|e| e.path().extension().is_some_and(|x| x == "md"))
+                    .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+                    .filter(|(m, _)| *m >= cutoff)
+                    .collect()
+            })
+            .unwrap_or_default();
+        files.sort(); // oldest first: the newest mention wins
+        if files.is_empty() {
+            return;
+        }
+        let txs = hyprdesk::recent_transcripts(40);
+        let auto = hyprdesk::conf_get("studio_plan_auto", "0") == "1";
+        for (idx, sid) in super::window_sids() {
+            let tx = hyprdesk::tx_for_sid(&sid, &txs);
+            if tx.is_empty() {
+                continue;
+            }
+            for (_, f) in &files {
+                let Some(name) = f.file_name().map(|n| n.to_string_lossy().to_string()) else { continue };
+                if mentions(std::path::Path::new(&tx), &name) {
+                    let fresh = self.plans.get(&idx) != Some(f);
+                    self.plans.insert(idx.clone(), f.clone());
+                    if auto && fresh && !self.plans_auto_done.contains(&(idx.clone(), f.clone())) {
+                        self.plans_auto_done.insert((idx.clone(), f.clone()));
+                        super::open_plan_pane(&idx, f);
+                    }
+                }
+            }
+        }
+    }
+
+    fn action_plan(&mut self) {
+        let Some(w) = self.nodes.get(self.cursor).and_then(|n| n.win.clone()) else {
+            self.say("P works on an open tab — plans belong to tabs", true);
+            return;
+        };
+        match self.plans.get(&w.idx).cloned() {
+            Some(f) => super::open_plan_pane(&w.idx, &f),
+            None => self.say("no plan-mode plan seen for this tab yet", true),
+        }
     }
 
     /// Flatten rows → visible nodes, keeping the shape the user arranged.
@@ -691,9 +801,10 @@ impl App {
             }
             KeyCode::Char('n') => self.action_new(),
             KeyCode::Char('N') => self.action_new_codex(),
+            KeyCode::Char('P') => self.action_plan(),
             KeyCode::Char('s') => self.action_beside(),
             KeyCode::Char('t') => self.action_term(),
-            KeyCode::Char('m') => super::open_settings_tab("integrations"),
+            KeyCode::Char('m') => super::open_settings_tab("claude"),
             KeyCode::Char('x') => self.action_kill_bg(),
             KeyCode::Char('r') => self.reload(true),
             KeyCode::Char('w') => self.toggle_width(),
@@ -893,6 +1004,9 @@ impl App {
                             format!("  +{}", w.beside),
                             Style::default().fg(col(pal.sub)),
                         ));
+                    }
+                    if self.plans.contains_key(&w.idx) {
+                        spans.push(Span::styled("  󰈙", Style::default().fg(col(pal.accent2))));
                     }
                     if !w.active {
                         if w.bell {

@@ -4,6 +4,28 @@ All notable changes to this desktop. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## v1.9.0 — the plan you can read (2026-08-29)
+
+- **Plan viewer**: `hypr-claude-studio --plan <file>` renders a plan-mode plan
+  (`~/.claude/plans/*.md`) as a styled, pre-wrapped ratatui page (headings,
+  rules, lists, task boxes, tables, code blocks on the muted surface, links
+  underlined) and re-reads it whenever its mtime changes — it fills in as
+  Claude writes it. Keys: j/k/d/u/g/G, wheel, `e` nvim, `y` copy path,
+  `o` zoom, `r` reload, `q` close. `--plan-dump <file> <width>` is the
+  headless check (all 30 plans on disk render, 0 panics).
+- Sidebar: a tab whose transcript mentions a plan file wears `󰈙`; `P` on that
+  tab opens the viewer detached beside the conversation (`-d` — Claude may be
+  waiting for an answer). Association runs only when `~/.claude/plans/`
+  changes, searching transcripts backwards in 1 MB chunks (64 MB cap).
+  Opt-in auto-open: `studio_plan_auto=1` (switch on the Settings Claude page).
+- Studio idle cost ÷3: `session_rows` 42→5 ms (one `hyprctl clients` per
+  reload, cached 30 s; one shared `/proc` walk; transcript meta/title cached
+  by mtime+len), `rename_open_tabs` 37→4 ms (one batched tmux call, no-ops
+  skipped), window-active check is a `stat()` of a hook-written runtime file
+  instead of a tmux fork per instance every 2 s. Four sidebars: 1.50 → 0.53 %.
+  `--bench`, `bin/studio-idle.py`, `docs/perf/studio-baseline.md`.
+- `m` in the studio (and the python spec) opens the Settings **Claude** page.
+
 ## v1.8.0 — the Claude page (2026-08-29)
 
 - **Hypr Settings → Claude page** (new sidebar entry 󰚩): Skills card lists every

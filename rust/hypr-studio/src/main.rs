@@ -9,6 +9,7 @@
 //! branch in main(): an unknown flag falls through to launch(), which
 //! spawns a SECOND studio rather than failing quietly.
 
+mod plan;
 mod sidebar;
 
 use std::path::Path;
@@ -485,6 +486,48 @@ pub fn rename_open_tabs() {
     batch.pop(); // trailing ';'
     let args: Vec<&str> = batch.iter().map(|s| s.as_str()).collect();
     tmux(&args);
+}
+
+
+/// (window index, session id) for every tab whose identity pane carries a
+/// session uuid — the LOWEST pane index, as rename_open_tabs decides it.
+pub fn window_sids() -> Vec<(String, String)> {
+    let mut best: std::collections::HashMap<String, (i32, String)> = std::collections::HashMap::new();
+    for line in tmux_out(&["list-panes", "-s", "-F", "#{window_index}|#{pane_index}|#{pane_start_command}"]).lines() {
+        let mut it = line.splitn(3, '|');
+        let (idx, pane, cmd) = (it.next().unwrap_or(""), it.next().unwrap_or(""), it.next().unwrap_or(""));
+        if cmd.contains("--sidebar") || cmd.contains("--plan") {
+            continue;
+        }
+        let Some(sid) = find_uuid(cmd) else { continue };
+        let p: i32 = pane.parse().unwrap_or(0);
+        match best.get(idx) {
+            Some((bp, _)) if *bp <= p => {}
+            _ => {
+                best.insert(idx.to_string(), (p, sid));
+            }
+        }
+    }
+    best.into_iter().map(|(idx, (_, sid))| (idx, sid)).collect()
+}
+
+/// Open (or re-focus) the plan viewer beside tab `idx`. `-d`: the
+/// conversation keeps the keyboard — Claude may be waiting on an answer.
+pub fn open_plan_pane(idx: &str, file: &Path) {
+    let target = format!("{TMUX_SESSION}:{idx}");
+    let want = format!("--plan {}", file.display());
+    for line in tmux_out(&["list-panes", "-t", &target, "-F", "#{pane_id}|#{pane_start_command}"]).lines() {
+        let (id, cmd) = line.split_once('|').unwrap_or(("", ""));
+        if cmd.contains(&want) {
+            tmux(&["select-window", "-t", &target]);
+            tmux(&["select-pane", "-t", id]);
+            return;
+        }
+    }
+    tmux(&[
+        "split-window", "-d", "-h", "-l", "45%", "-t", &target,
+        &format!("{} --plan '{}'", me(), file.display()),
+    ]);
 }
 
 fn with_user_path(cmd: &str) -> String {
@@ -989,6 +1032,18 @@ fn bench(n: usize) {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--plan-dump") {
+        let file = args.get(i + 1).map(|s| s.as_str()).unwrap_or("");
+        let width = args.get(i + 2).and_then(|s| s.parse().ok()).unwrap_or(80);
+        plan::dump(Path::new(file), width);
+        return;
+    }
+    if let Some(i) = args.iter().position(|a| a == "--plan") {
+        if let Some(file) = args.get(i + 1) {
+            plan::run(Path::new(file));
+        }
+        return;
+    }
     if let Some(i) = args.iter().position(|a| a == "--bench") {
         bench(args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(20));
         return;

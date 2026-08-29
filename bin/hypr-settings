@@ -1105,6 +1105,11 @@ class HyprSettings(App):
         with Card("Sessions · ~/.claude/projects"):
             yield Static("", id="cs_status", classes="status")
             with Horizontal(classes="row"):
+                yield Label("Auto-open plan viewer in Studio when a plan-mode "
+                            "plan appears")
+                yield Switch(value=self.widgets.get("studio_plan_auto") == "1",
+                             id="sw_plan_auto")
+            with Horizontal(classes="row"):
                 yield Button("󰚩 Open Claude Studio", id="cs_studio",
                              variant="primary")
                 yield Button("󰑓 Recount", id="cs_refresh")
@@ -1583,6 +1588,12 @@ class HyprSettings(App):
         if self._refreshing:
             return
         sid = event.switch.id or ""
+        if sid == "sw_plan_auto":
+            widgets_conf_set("studio_plan_auto", "1" if event.value else "0")
+            self.widgets = widgets_conf()
+            self.notify("Studio will " + ("open the plan pane by itself (P still works)"
+                                          if event.value else "wait for P"))
+            return
         if sid == "sw_autohide":
             if event.value and not autohide_on():
                 launch(str(HOME / ".local/bin/waybar-autohide.sh"))
