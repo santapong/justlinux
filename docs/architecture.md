@@ -107,7 +107,7 @@ Four containers are complex enough to be worth their own component
 diagram. One is below; the other three live with the docs for the thing
 they describe:
 
-- **[Claude Studio](claude-studio.md)** — tabs, splits, and why the
+- **[DravenIQ Meta Harness](claude-studio.md)** (ex Claude Studio) — tabs, splits, and why the
   sidebar cannot be cut in half.
 - **[The 2D office](claude-office.md)** — how a desk is bound to a
   conversation.

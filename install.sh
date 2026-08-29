@@ -56,6 +56,7 @@ if command -v cargo >/dev/null 2>&1 && [ -d rust ]; then
         install -m755 rust/target/release/hypr-appdock "$HOME/.local/bin/hypr-appdock"
         install -m755 rust/target/release/hypr-viz "$HOME/.local/bin/hypr-viz"
         install -m755 rust/target/release/hypr-claude-studio "$HOME/.local/bin/hypr-claude-studio"
+        ln -sf hypr-claude-studio "$HOME/.local/bin/draveniq"   # DravenIQ Meta Harness launcher alias
         install -m755 rust/target/release/hypr-docker "$HOME/.local/bin/hypr-docker"
         install -m755 rust/target/release/serial-watch "$HOME/.local/bin/serial-watch"
         echo "installed: ~/.local/bin/{hypr-office2d,hypr-pet,hypr-cardhost,hypr-appdock,hypr-viz,hypr-claude-studio,hypr-docker} (built from rust/)"

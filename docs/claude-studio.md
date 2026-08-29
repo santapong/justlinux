@@ -1,4 +1,4 @@
-# Claude Studio
+# DravenIQ Meta Harness (formerly Claude Studio)
 
 `ALT+CTRL+U` — one window that holds every Claude Code conversation, the
 way an editor holds every open file.
@@ -15,7 +15,7 @@ declaration there, not the SVG.*
 
 ```
 ┌─ row 0 ──────────────────────────────────────────────────────────┐
-│ 󰚩 Claude Studio      dots · 4 tabs · [zoom]      / │ ─  studio   │
+│ 󰚩 DravenIQ            dots · 4 tabs · [zoom]      / │ ─  studio   │
 ├─ row 1 — the tabs ───────────────────────────────────────────────┤
 │  0 sessions   1 fix-the-parser +api ✕   2 talos ○ ✕   3 aegis ● ✕│
 ├──────────────────────────────────────────────────────────────────┤

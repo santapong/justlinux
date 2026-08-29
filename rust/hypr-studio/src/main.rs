@@ -105,7 +105,7 @@ fn launch() {
             "--class",
             KITTY_CLASS,
             "--title",
-            "Claude Studio",
+            "DravenIQ Meta Harness",
             "-e",
             "tmux",
             "-f",
@@ -248,7 +248,7 @@ pub fn style_tmux() {
         "set",
         "-g",
         "status-left",
-        &format!("#[fg={acc2},bold] 󰚩 Claude Studio #[default] "),
+        &format!("#[fg={acc2},bold] 󰚩 DravenIQ #[default] "),
     ]);
     tmux(&["set", "-g", "status-left-length", "40"]);
     tmux(&["set", "-g", "status-right", &status_right]);

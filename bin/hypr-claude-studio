@@ -136,7 +136,7 @@ def launch():
             return
     subprocess.Popen(
         ["kitty", "--class", KITTY_CLASS, "-o", "background_opacity=0.93",
-         "--title", "Claude Studio", "-e", "tmux", "-f", "/dev/null",
+         "--title", "DravenIQ Meta Harness", "-e", "tmux", "-f", "/dev/null",
          "-L", TMUX_SESSION, "new-session", "-A",
          "-s", TMUX_SESSION, "-n", "sessions",
          f"python3 {ME} --sidebar"],
@@ -202,7 +202,7 @@ def style_tmux():
         ("set", "-g", "status", "2"),
         ("set", "-g", "status-style", f"bg={bg},fg={sub}"),
         ("set", "-g", "status-left",
-         f"#[fg={acc2},bold] 󰚩 Claude Studio #[default] "),
+         f"#[fg={acc2},bold] 󰚩 DravenIQ #[default] "),
         # the row is no longer shared with the tabs, so these can breathe
         ("set", "-g", "status-left-length", "40"),
         ("set", "-g", "status-right",

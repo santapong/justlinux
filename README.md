@@ -25,7 +25,7 @@ see <a href="docs/architecture.md"><code>docs/architecture.md</code></a>.</sub>
 | smart top bar | `ALT+B` pins | waybar auto-hide, owned by `hypr-appdock` (`bar_smart=on`): hover the top screen edge to fade the bar in (250ms), leave to fade out; `ALT+B` pins it open / releases it; toggle from the Tools hub. (`waybar-autohide.sh` is the retired standalone predecessor) |
 | `screenshot.sh` | `ALT+SHIFT+S` | Region/screen/all screenshots → file + clipboard + notification |
 | `drop-claude` | `ALT+SHIFT+U` | Dropdown **Claude Code** terminal (guake-style, keeps its session) — the AI sibling of `ALT+U` drop-term |
-| `hypr-claude-studio` | `ALT+CTRL+U` | **Claude Studio** — a VS-Code-style workspace: expandable session tree (🟢 running · 󰑮 background · projects → conversations) in tab 0, every opened session is its own **tab** named from Claude's own title for the conversation, with a **✕ to close it**. Closing a tab ends the terminal, not the conversation — it stays resumable from the tree. Any tab **splits into panes** (`C-b |` side by side, `C-b -` stacked, or the `[|]` `[-]` buttons in the tab bar) so a session can sit next to its build log. `n` = new session, `s` = open a conversation **beside** the one you are
+| `hypr-claude-studio` | `ALT+CTRL+U` | **DravenIQ Meta Harness** (ex Claude Studio, launcher alias `draveniq`) — a VS-Code-style workspace: expandable session tree (🟢 running · 󰑮 background · projects → conversations) in tab 0, every opened session is its own **tab** named from Claude's own title for the conversation, with a **✕ to close it**. Closing a tab ends the terminal, not the conversation — it stays resumable from the tree. Any tab **splits into panes** (`C-b |` side by side, `C-b -` stacked, or the `[|]` `[-]` buttons in the tab bar) so a session can sit next to its build log. `n` = new session, `s` = open a conversation **beside** the one you are
 reading, `t` = plain terminal there, `m` = the settings panel (MCP
 servers) as a tab, `x` = stop a background one. Full detail in [`docs/claude-studio.md`](docs/claude-studio.md) |
 | `hypr-launcher claude` | Tools hub | Quick session picker — the flat filterable list version of the same data |
@@ -165,7 +165,7 @@ clicking it toggles nothing.
 | double-click a titlebar | maximize toggle (hyprbars; keeps waybar + gaps) |
 | `ALT+T` / `ALT+K` | reminder / keybind cheatsheet |
 | `ALT+SHIFT+U` / `ALT+SHIFT+N` / `ALT+SHIFT+I` | Claude: dropdown / selection actions / region vision |
-| `ALT+CTRL+U` / `ALT+CTRL+O` | Claude Studio (tabbed workspace) / 2D Claude office |
+| `ALT+CTRL+U` (or `ALT+CTRL+D`) / `ALT+CTRL+O` | DravenIQ Meta Harness (tabbed workspace) / 2D Claude office |
 | `ALT+SHIFT+F` / `ALT+SHIFT+Y` | focus session / audio visualizer |
 | `ALT+SHIFT+S` / `PRINT` | region screenshot |
 | `ALT+1-0`, `ALT+SHIFT+1-0` | workspace switch / move |

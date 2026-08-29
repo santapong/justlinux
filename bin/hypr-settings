@@ -67,7 +67,7 @@ NAV = [
     ("network",    "󰤨", "Network"),
     ("security",   "󰕥", "Security"),
     ("integrations", "󰌘", "Integrations"),
-    ("claude",     "󰚩", "Claude"),
+    ("claude",     "󰚩", "DravenIQ"),
     ("power",      "⏻", "Power"),
 ]
 
@@ -1110,7 +1110,7 @@ class HyprSettings(App):
                 yield Switch(value=self.widgets.get("studio_plan_auto") == "1",
                              id="sw_plan_auto")
             with Horizontal(classes="row"):
-                yield Button("󰚩 Open Claude Studio", id="cs_studio",
+                yield Button("󰚩 Open DravenIQ", id="cs_studio",
                              variant="primary")
                 yield Button("󰑓 Recount", id="cs_refresh")
 

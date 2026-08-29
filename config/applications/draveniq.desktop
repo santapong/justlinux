@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=DravenIQ Meta Harness
+Comment=Tabbed workspace for Claude, Codex and Hermes sessions
+Exec=draveniq
+Icon=utilities-terminal
+Terminal=false
+Categories=Development;
+Keywords=claude;codex;hermes;studio;draven;
