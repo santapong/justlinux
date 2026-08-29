@@ -4,6 +4,28 @@ All notable changes to this desktop. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## v2.0.0 — DravenIQ Meta Harness (2026-08-29)
+
+- **Rename**: Claude Studio is the **DravenIQ Meta Harness** — tab-bar brand `󰚩 DravenIQ`,
+  window title, `draveniq` launcher alias (+ `ALT+CTRL+D`), `draveniq.desktop`, Settings page
+  label. Binary/socket/class names unchanged, so nothing that bound to them breaks.
+- **Hermes Agent** (Nous, MIT) is the third agent: `H` = new Hermes tab, `󰘧` glyph, live rows
+  (`hermes_procs`: comm `hermes` + argv), Skills card lists `~/.hermes/skills`. Provider/key are
+  configured inside Hermes (`hermes model`), never here.
+- **Voice** (`hypr-voice`, `docs/voice.md`): offline wake word (openWakeWord, "hey jarvis" until a
+  custom "Hey Draven" model is dropped in) → spoken command → faster-whisper in a child process →
+  anchored grammar: focus, open N tabs (claude/codex/hermes), show the plan, close/next/prev tab,
+  settings, hide, pause/listen, dictate (no Enter) + "send". `--say` tests without a mic; systemd
+  user service; Settings Voice card. Measured 4.8 % of one core / 228 MB idle
+  (`docs/perf/voice-baseline.md`).
+- **Lesson miner** (`hyprdesk-mine`): incremental transcript mining (289 MB in 0.6 s) into daily
+  lessons JSONL — corrections, tool-error fixes, whole-word trap sentences — with a secret-redaction
+  gate; `--digest`, `--json`, `--format hermes`, `--routines`. Weekly `hypr-lesson-proposer.timer`
+  (Sunday 09:00, `claude -p` sonnet) writes **proposals only**; the Settings Skills card shows them
+  as ◆ rows with accept / reject. The digest is pushed to LINE through the Pi's n8n.
+- Studio CLI: `--new-tab [--agent] [--cwd]`, `--open-plan` (via the `@plan` window option the
+  sidebar writes), `@voice` slot in the tab bar; `m` opens the DravenIQ settings page.
+
 ## v1.9.0 — the plan you can read (2026-08-29)
 
 - **Plan viewer**: `hypr-claude-studio --plan <file>` renders a plan-mode plan
