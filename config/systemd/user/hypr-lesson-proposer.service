@@ -1,0 +1,8 @@
+[Unit]
+Description=DravenIQ weekly lesson proposer (hyprdesk-mine → claude -p, proposals only)
+
+[Service]
+Type=oneshot
+Nice=15
+ExecStartPre=%h/.local/bin/hyprdesk-mine
+ExecStart=/bin/sh -c 'cd %h && %h/.local/bin/claude -p --model sonnet --permission-mode acceptEdits --allowedTools "Read,Write,Edit,Glob,Grep,Bash(hyprdesk-mine*)" "Use the lesson-proposer skill: mine and propose. Write at most 10 proposals." > %h/.local/state/hyprdesk/lessons/last-run.log 2>&1'

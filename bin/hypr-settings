@@ -292,6 +292,50 @@ SECRET_KEY_RE = re.compile(r"KEY|TOKEN|SECRET|PASS|CREDENTIAL", re.I)
 DISABLED = ".disabled"
 
 
+def skill_proposals():
+    """[(name, source, proposed_path, target_dir)] — files the lesson-proposer wrote."""
+    out = []
+    for src, base in SKILL_SOURCES:
+        if not base.is_dir():
+            continue
+        for d in base.iterdir():
+            p = d / "proposed/SKILL.md"
+            if d.is_dir() and p.is_file():
+                out.append((d.name, src, p, d))
+        newdir = base / "_proposed"
+        if newdir.is_dir():
+            for d in newdir.iterdir():
+                p = d / "SKILL.md"
+                if d.is_dir() and p.is_file():
+                    out.append((d.name, src, p, base / d.name))
+    return out
+
+
+def skill_accept(prop, target):
+    """Replace/create the live SKILL.md; the old one stays as SKILL.md.bak."""
+    target.mkdir(parents=True, exist_ok=True)
+    live = target / "SKILL.md"
+    if live.exists():
+        shutil.copy2(live, target / "SKILL.md.bak")
+    shutil.move(str(prop), str(live))
+    _prune_proposal_dir(prop.parent)
+
+
+def skill_reject(prop):
+    prop.unlink(missing_ok=True)
+    _prune_proposal_dir(prop.parent)
+
+
+def _prune_proposal_dir(d):
+    try:
+        if d.is_dir() and not any(d.iterdir()):
+            d.rmdir()
+            if d.name != "proposed" and d.parent.name == "_proposed" and not any(d.parent.iterdir()):
+                d.parent.rmdir()
+    except OSError:
+        pass
+
+
 def skill_list():
     """[(name, source, description, enabled, path)] — one row per skill dir.
 
@@ -1780,6 +1824,17 @@ class HyprSettings(App):
         except Exception:
             return
         rows = skill_list()
+        props = skill_proposals()
+        self._sk_props = {}
+        for j, (name, src, prop, target) in enumerate(props):
+            self._sk_props[j] = (prop, target)
+            line = (f"[{C['yellow']}]◆[/] [{C['text']}]{_esc(_col(name, 20))}[/] "
+                    f"[{C['subtext']}]{_col('proposed', 9)}{_esc(_col(f'{src} · from lesson-proposer', 42))}[/]")
+            box.mount(Horizontal(
+                Static(line, classes="skrow"),
+                Button("󰄬", id=f"sk_acc_{j}", classes="small", variant="primary"),
+                Button("✕", id=f"sk_rej_{j}", classes="small"),
+                classes="row"))
         q = self._sk_filter.lower()
         shown = [r for r in rows if not q or q in r[0].lower() or q in r[2].lower()]
         self._sk_paths = {}
@@ -1797,6 +1852,8 @@ class HyprSettings(App):
                 classes="row"))
         on = sum(1 for r in rows if r[3])
         msg = f"{len(rows)} skills — {on} enabled, {len(rows) - on} disabled"
+        if props:
+            msg += f" · {len(props)} proposed (◆ accept 󰄬 or reject ✕)"
         if q:
             msg += f" · {len(shown)} match"
         self.query_one("#sk_status", Static).update(f"[{C['subtext']}]{msg}[/]")
@@ -2064,6 +2121,17 @@ class HyprSettings(App):
             self.widgets = widgets_conf()
             event.button.label = nxt
             self.schedule_widget_restart()
+            return
+        if bid.startswith("sk_acc_") or bid.startswith("sk_rej_"):
+            prop, target = getattr(self, "_sk_props", {}).get(int(bid[7:]), (None, None))
+            if prop:
+                try:
+                    if not DRY:
+                        (skill_accept(prop, target) if bid.startswith("sk_acc_") else skill_reject(prop))
+                except OSError as e:
+                    self.notify(f"proposal: {e}", severity="error")
+                self.notify("accepted — live in the next session" if bid.startswith("sk_acc_") else "rejected")
+                self._sk_refresh()
             return
         if bid.startswith("sk_edit_"):
             path = getattr(self, "_sk_paths", {}).get(int(bid[8:]))

@@ -1,0 +1,12 @@
+[package]
+name = "hyprdesk-mine"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "hyprdesk-mine"
+path = "src/main.rs"
+
+[dependencies]
+hyprdesk = { path = "../hyprdesk" }
+serde_json = "1"
