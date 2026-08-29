@@ -600,6 +600,16 @@ impl App {
         super::new_session_tab(&cwd, "codex");
     }
 
+    fn action_new_hermes(&mut self) {
+        let cwd = self
+            .current()
+            .map(|r| r.cwd.clone())
+            .or_else(|| self.nodes.get(self.cursor).map(|n| n.project_cwd.clone()))
+            .filter(|c| !c.is_empty())
+            .unwrap_or_else(|| hyprdesk::home().display().to_string());
+        super::new_session_tab(&cwd, "hermes");
+    }
+
     fn action_beside(&mut self) {
         let Some(row) = self.current().cloned() else {
             self.say("Highlight a conversation to open it beside the one you are reading", false);
@@ -801,6 +811,7 @@ impl App {
             }
             KeyCode::Char('n') => self.action_new(),
             KeyCode::Char('N') => self.action_new_codex(),
+            KeyCode::Char('H') => self.action_new_hermes(),
             KeyCode::Char('P') => self.action_plan(),
             KeyCode::Char('s') => self.action_beside(),
             KeyCode::Char('t') => self.action_term(),
@@ -1043,9 +1054,9 @@ impl App {
                     match r.kind.as_str() {
                         "run" => {
                             spans.push(Span::styled("●  ", Style::default().fg(col(pal.good))));
-                            if r.agent == "codex" {
+                            if r.agent == "codex" || r.agent == "hermes" {
                                 spans.push(Span::styled(
-                                    format!("{} ", super::CODEX_GLYPH),
+                                    format!("{} ", if r.agent == "codex" { super::CODEX_GLYPH } else { super::HERMES_GLYPH }),
                                     Style::default().fg(col(pal.sub)),
                                 ));
                             }
@@ -1073,9 +1084,9 @@ impl App {
                                 format!("󰥔 {age:<4} "),
                                 Style::default().fg(col(pal.sub)),
                             ));
-                            if r.agent == "codex" {
+                            if r.agent == "codex" || r.agent == "hermes" {
                                 spans.push(Span::styled(
-                                    format!("{} ", super::CODEX_GLYPH),
+                                    format!("{} ", if r.agent == "codex" { super::CODEX_GLYPH } else { super::HERMES_GLYPH }),
                                     Style::default().fg(col(pal.sub)),
                                 ));
                             }
@@ -1125,7 +1136,7 @@ impl App {
                 lines.push(Line::from(""));
             } else {
                 lines.push(Line::from(
-                    [key("↵", "open"), key("s", "beside"), key("n", "new"), key("N", "codex")].concat(),
+                    [key("↵", "open"), key("s", "beside"), key("n", "new"), key("N", "codex"), key("H", "hermes")].concat(),
                 ));
                 lines.push(Line::from(
                     [key("t", "term"), key("w", "wide"), key("q", "quit")].concat(),
@@ -1152,6 +1163,7 @@ impl App {
                     ("s", "beside"),
                     ("n", "new"),
                     ("N", "codex"),
+                    ("H", "hermes"),
                     ("t", "term"),
                     ("m", "mcp"),
                     ("p", "pin"),

@@ -286,7 +286,8 @@ CLAUDE_HOME = HOME / ".claude"
 CLAUDE_SETTINGS = CLAUDE_HOME / "settings.json"
 # (label, dir) — personal skills, then the ones this repo ships
 SKILL_SOURCES = [("personal", CLAUDE_HOME / "skills"),
-                 ("repo", HOME / "hyprland-dots/claude/skills")]
+                 ("repo", HOME / "hyprland-dots/claude/skills"),
+                 ("hermes", HOME / ".hermes/skills")]   # agentskills.io format
 SECRET_KEY_RE = re.compile(r"KEY|TOKEN|SECRET|PASS|CREDENTIAL", re.I)
 DISABLED = ".disabled"
 
@@ -1046,7 +1047,7 @@ class HyprSettings(App):
         """Claude Code's home in Settings: skills, env, MCP, sessions.
         Every list here is rebuilt by its own refresh on page entry —
         nothing spawns a process except the MCP health check."""
-        with Card("Skills · ~/.claude/skills + this repo"):
+        with Card("Skills · ~/.claude/skills + this repo + ~/.hermes/skills"):
             yield Static("", id="sk_status", classes="status")
             with Horizontal(classes="row"):
                 yield Label("Filter")

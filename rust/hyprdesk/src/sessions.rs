@@ -135,6 +135,35 @@ pub fn claude_procs() -> Vec<ClaudeProc> {
     out
 }
 
+/// Live Hermes Agent REPLs: `~/.hermes/hermes-agent/venv/bin/python
+/// ~/.hermes/hermes-agent/hermes` — comm is "python", so match argv[1].
+pub fn hermes_procs() -> Vec<ClaudeProc> {
+    let mut out = Vec::new();
+    for (p, comm) in proc_snapshot().iter() {
+        // python sets the process title, so comm reads "hermes"; older
+        // builds may still show "python" — accept both, trust argv
+        if comm != "hermes" && !comm.starts_with("python") {
+            continue;
+        }
+        let a = argv(p);
+        if !a.get(1).is_some_and(|x| x.ends_with("/hermes-agent/hermes")) {
+            continue;
+        }
+        let (Ok(cwd), Ok(tty)) = (
+            fs::read_link(format!("/proc/{p}/cwd")),
+            fs::read_link(format!("/proc/{p}/fd/0")),
+        ) else {
+            continue;
+        };
+        let tty = tty.display().to_string();
+        if !tty.starts_with("/dev/pts") {
+            continue; // gateway/cron helpers
+        }
+        out.push(ClaudeProc { pid: p.parse().unwrap_or(0), cwd: cwd.display().to_string(), interactive: true, tty, argv_sid: String::new() });
+    }
+    out
+}
+
 /// [(mtime, path)] newest first; subagent/workflow transcripts are not
 /// resumable conversations and are skipped.
 pub fn recent_transcripts(limit: usize) -> Vec<(f64, PathBuf)> {
@@ -1024,6 +1053,22 @@ pub fn session_rows() -> Vec<Row> {
             dir: label,
             title: preview.clone(),
             detail: format!("{} — {preview}", ago(*mt)),
+            ..Default::default()
+        });
+    }
+    // ----- Hermes: live only (session format not parsed yet) -----
+    for p in hermes_procs() {
+        let where_ = nice(&p.cwd);
+        rows.push(Row {
+            kind: "run".into(),
+            agent: "hermes".into(),
+            label: where_.clone(),
+            addr: addr_of(p.pid),
+            cwd: p.cwd.clone(),
+            pid: p.pid,
+            tty: p.tty.clone(),
+            dir: where_.clone(),
+            detail: format!("🟢 hermes running in {where_} — Enter focuses its terminal"),
             ..Default::default()
         });
     }

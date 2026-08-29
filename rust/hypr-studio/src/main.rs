@@ -412,7 +412,11 @@ pub fn tab_name(sid: &str, cwd: &str, width: usize, agent: &str) -> String {
     let name: String = name.split_whitespace().collect::<Vec<_>>().join(" ").replace('#', "");
     let out: String = name.chars().take(width).collect();
     let out = if out.is_empty() { "~".to_string() } else { out };
-    if agent == "codex" { format!("{CODEX_GLYPH} {out}") } else { out }
+    match agent {
+        "codex" => format!("{CODEX_GLYPH} {out}"),
+        "hermes" => format!("{HERMES_GLYPH} {out}"),
+        _ => out,
+    }
 }
 
 /// Re-derive what every tab claims to be, from what it actually holds.
@@ -541,10 +545,15 @@ fn with_user_path(cmd: &str) -> String {
 /// Glyph that marks a Codex conversation in tabs and the tree.
 /// (passes the fc-list gate against JetBrainsMono NF: nf-md-robot)
 pub const CODEX_GLYPH: &str = "󰚩";
+/// U+F0627 (nf-md-alpha_h_box…): passes `fc-list :charset=f0627` on JetBrainsMono NF.
+pub const HERMES_GLYPH: &str = "󰘧";
 
 /// The CLI line that resumes `sid` under `agent` ("claude" | "codex").
 pub fn resume_cmd(agent: &str, sid: &str) -> String {
-    if agent == "codex" {
+    if agent == "hermes" {
+        // hermes sessions live in ~/.hermes/sessions; v1 opens a fresh REPL
+        "hermes".to_string()
+    } else if agent == "codex" {
         format!("codex resume {sid}")
     } else {
         format!("claude --resume {sid}")
@@ -553,7 +562,13 @@ pub fn resume_cmd(agent: &str, sid: &str) -> String {
 
 /// Which agent a pane's start command runs.
 pub fn agent_of_cmd(cmd: &str) -> &'static str {
-    if cmd.contains("codex") { "codex" } else { "claude" }
+    if cmd.contains("hermes") {
+        "hermes"
+    } else if cmd.contains("codex") {
+        "codex"
+    } else {
+        "claude"
+    }
 }
 
 /// Open (or focus) a tab running this transcript's conversation.
@@ -627,6 +642,11 @@ pub fn new_session_tab(cwd: &str, agent: &str) {
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "~".into());
+    if agent == "hermes" {
+        let name = format!("{HERMES_GLYPH} {base}");
+        tmux(&["new-window", "-t", &format!("{TMUX_SESSION}:"), "-n", &name, "-c", cwd, &with_user_path("hermes")]);
+        return;
+    }
     if agent == "codex" {
         // codex has no --session-id: identity comes later, from the
         // rollout the process holds open (hyprdesk::codex_procs)
@@ -1032,6 +1052,13 @@ fn bench(n: usize) {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--new-tab") {
+        let agent = args.iter().position(|a| a == "--agent").and_then(|i| args.get(i + 1)).map(|s| s.as_str()).unwrap_or("claude");
+        let cwd = args.iter().position(|a| a == "--cwd").and_then(|i| args.get(i + 1)).cloned()
+            .unwrap_or_else(|| std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default());
+        new_session_tab(&cwd, agent);
+        return;
+    }
     if let Some(i) = args.iter().position(|a| a == "--plan-dump") {
         let file = args.get(i + 1).map(|s| s.as_str()).unwrap_or("");
         let width = args.get(i + 2).and_then(|s| s.parse().ok()).unwrap_or(80);
