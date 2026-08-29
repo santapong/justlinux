@@ -274,7 +274,7 @@ aim-then-open click contract, and replaces the headless-pilot test
 harness with state-level tests (drive the app struct, assert the frame
 buffer). Everything the current sidebar learned — escape() every title,
 the q-confirm semantics, first-click-aims — is spec, listed in
-docs/claude-studio.md. Do this LAST: it is the only rung where Rust
+docs/draveniq.md. Do this LAST: it is the only rung where Rust
 makes the code harder rather than smaller.
 
 ## Pilot acceptance criteria — hypr-viz

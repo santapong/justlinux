@@ -31,7 +31,7 @@ fills, so the same file is legible on GitHub's light *and* dark themes.
 | [`c4-context.svg`](diagrams/c4-context.svg) | 1 · Context | [README](../README.md) |
 | [`c4-container.svg`](diagrams/c4-container.svg) | 2 · Containers | here |
 | [`c4-component-appdock.svg`](diagrams/c4-component-appdock.svg) | 3 · Components | here |
-| [`c4-component-studio.svg`](diagrams/c4-component-studio.svg) | 3 · Components | [claude-studio.md](claude-studio.md) |
+| [`c4-component-studio.svg`](diagrams/c4-component-studio.svg) | 3 · Components | [draveniq.md](draveniq.md) |
 | [`c4-component-office.svg`](diagrams/c4-component-office.svg) | 3 · Components | [claude-office.md](claude-office.md) |
 | [`c4-component-habitica.svg`](diagrams/c4-component-habitica.svg) | 3 · Components | [habitica-board.md](habitica-board.md) |
 | [`c4-dynamic-smartbar.svg`](diagrams/c4-dynamic-smartbar.svg) | Dynamic | here |
@@ -81,7 +81,7 @@ One person, one software system, four things it leans on:
 | `hypr-widgetpicker` | Python/GTK3 | Card gallery: add / remove / parameterize instances |
 | `hypr-settings` · `hypr-launcher` | Textual TUI | Control panels in a glass kitty float; Settings also holds Habitica keys and the MCP server list |
 | `hypr-kanban` | Textual TUI | The Habitica board — today, to-dos, sprint, week, dailies, habits |
-| `hypr-claude-studio` | kitty + tmux + Textual | Tabbed Claude session workspace, with splits |
+| `draveniq` | kitty + tmux + Textual | Tabbed Claude session workspace, with splits |
 | `hypr-claude-office` | Python/GTK3 | A pixel desk per live Claude session |
 | `hypr-tools.sh` | bash | Dispatcher glue: every panel action, smart-bar toggle, reminders |
 | `desktop-widgets.sh` | bash | `exec-once` supervisor: spawns and restarts the fleet at login |
@@ -107,7 +107,7 @@ Four containers are complex enough to be worth their own component
 diagram. One is below; the other three live with the docs for the thing
 they describe:
 
-- **[Claude Studio](claude-studio.md)** — tabs, splits, and why the
+- **[DravenIQ Meta Harness](draveniq.md)** (ex Claude Studio) — tabs, splits, and why the
   sidebar cannot be cut in half.
 - **[The 2D office](claude-office.md)** — how a desk is bound to a
   conversation.

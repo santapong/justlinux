@@ -38,23 +38,39 @@ fn argv(pid: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn pids_named(name: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let Ok(dir) = fs::read_dir("/proc") else {
-        return out;
-    };
-    for e in dir.flatten() {
-        let n = e.file_name().to_string_lossy().to_string();
-        if !n.chars().all(|c| c.is_ascii_digit()) {
-            continue;
+/// (pid, comm) for every process, ONE /proc walk, reused for a second:
+/// session_rows asks for claude, daemon-hosted claude and codex pids back
+/// to back — three walks of ~2.5 ms each were a third of a reload.
+fn proc_snapshot() -> std::sync::Arc<Vec<(String, String)>> {
+    use std::sync::{Arc, Mutex, OnceLock};
+    use std::time::Instant;
+    static SNAP: OnceLock<Mutex<Option<(Instant, Arc<Vec<(String, String)>>)>>> = OnceLock::new();
+    let cell = SNAP.get_or_init(|| Mutex::new(None));
+    let mut g = cell.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, snap)) = g.as_ref() {
+        if at.elapsed().as_millis() < 1000 {
+            return snap.clone();
         }
-        if let Ok(comm) = fs::read_to_string(format!("/proc/{n}/comm")) {
-            if comm.trim_end() == name {
-                out.push(n);
+    }
+    let mut out = Vec::new();
+    if let Ok(dir) = fs::read_dir("/proc") {
+        for e in dir.flatten() {
+            let n = e.file_name().to_string_lossy().to_string();
+            if !n.chars().all(|c| c.is_ascii_digit()) {
+                continue;
+            }
+            if let Ok(comm) = fs::read_to_string(format!("/proc/{n}/comm")) {
+                out.push((n, comm.trim_end().to_string()));
             }
         }
     }
-    out
+    let snap = Arc::new(out);
+    *g = Some((Instant::now(), snap.clone()));
+    snap
+}
+
+fn pids_named(name: &str) -> Vec<String> {
+    proc_snapshot().iter().filter(|(_, c)| c == name).map(|(p, _)| p.clone()).collect()
 }
 
 fn subcommand(a: &[String]) -> Option<&str> {
@@ -119,6 +135,35 @@ pub fn claude_procs() -> Vec<ClaudeProc> {
     out
 }
 
+/// Live Hermes Agent REPLs: `~/.hermes/hermes-agent/venv/bin/python
+/// ~/.hermes/hermes-agent/hermes` — comm is "python", so match argv[1].
+pub fn hermes_procs() -> Vec<ClaudeProc> {
+    let mut out = Vec::new();
+    for (p, comm) in proc_snapshot().iter() {
+        // python sets the process title, so comm reads "hermes"; older
+        // builds may still show "python" — accept both, trust argv
+        if comm != "hermes" && !comm.starts_with("python") {
+            continue;
+        }
+        let a = argv(p);
+        if !a.get(1).is_some_and(|x| x.ends_with("/hermes-agent/hermes")) {
+            continue;
+        }
+        let (Ok(cwd), Ok(tty)) = (
+            fs::read_link(format!("/proc/{p}/cwd")),
+            fs::read_link(format!("/proc/{p}/fd/0")),
+        ) else {
+            continue;
+        };
+        let tty = tty.display().to_string();
+        if !tty.starts_with("/dev/pts") {
+            continue; // gateway/cron helpers
+        }
+        out.push(ClaudeProc { pid: p.parse().unwrap_or(0), cwd: cwd.display().to_string(), interactive: true, tty, argv_sid: String::new() });
+    }
+    out
+}
+
 /// [(mtime, path)] newest first; subagent/workflow transcripts are not
 /// resumable conversations and are skipped.
 pub fn recent_transcripts(limit: usize) -> Vec<(f64, PathBuf)> {
@@ -153,7 +198,49 @@ pub fn recent_transcripts(limit: usize) -> Vec<(f64, PathBuf)> {
 }
 
 /// (cwd, preview) from a transcript's first lines — python session_meta.
+/// (path, mtime, len) → derived strings. A transcript that has not been
+/// written since the last reload yields exactly what it did then; the
+/// 25 past sessions cost 3.7 ms of re-parsing per reload before this.
+fn tx_cache<T: Clone>(
+    cell: &'static std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, (u64, u64, T)>>>,
+    path: &Path,
+    compute: impl FnOnce(&Path) -> T,
+) -> T {
+    let (mt, len) = fs::metadata(path)
+        .map(|m| {
+            let mt = m.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
+            (mt, m.len())
+        })
+        .unwrap_or((0, 0));
+    let cache = cell.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    if let Ok(g) = cache.lock() {
+        if let Some((m, l, v)) = g.get(path) {
+            if *m == mt && *l == len {
+                return v.clone();
+            }
+        }
+    }
+    let v = compute(path);
+    if let Ok(mut g) = cache.lock() {
+        if g.len() > 256 {
+            g.clear(); // bounded; a full re-derive is one reload's work
+        }
+        g.insert(path.to_path_buf(), (mt, len, v.clone()));
+    }
+    v
+}
+
 pub fn session_meta(path: &Path) -> (String, String) {
+    static C: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, (u64, u64, (String, String))>>> = std::sync::OnceLock::new();
+    tx_cache(&C, path, session_meta_uncached)
+}
+
+pub fn session_title(path: &Path) -> String {
+    static C: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, (u64, u64, String)>>> = std::sync::OnceLock::new();
+    tx_cache(&C, path, session_title_uncached)
+}
+
+fn session_meta_uncached(path: &Path) -> (String, String) {
     let (mut cwd, mut preview) = (String::new(), String::new());
     // python stops at 40 LINES; reading the whole file would pull entire
     // multi-MB transcripts into memory on every poll. 128 KB covers 40
@@ -199,7 +286,7 @@ pub fn session_meta(path: &Path) -> (String, String) {
 
 /// Claude's own name for a conversation — the NEWEST aiTitle wins, and
 /// the tail is scanned first because that is where a fresh one lands.
-pub fn session_title(path: &Path) -> String {
+fn session_title_uncached(path: &Path) -> String {
     const TAIL: u64 = 65536;
     let Ok(md) = fs::metadata(path) else {
         return String::new();
@@ -540,23 +627,11 @@ pub fn transcript_for(
 /// [(pid, sid, cwd)] daemon-hosted sessions (bg-pty-host workers) that
 /// outlive their terminals (python daemon_hosted).
 pub fn daemon_hosted() -> Vec<(i32, String, String)> {
+    // bg-pty-host is a `claude` subcommand, so comm == "claude": no need
+    // to read every cmdline on the machine (was a full /proc walk)
     let mut out = Vec::new();
-    let Ok(dir) = fs::read_dir("/proc") else {
-        return out;
-    };
-    for e in dir.flatten() {
-        let name = e.file_name().to_string_lossy().to_string();
-        if !name.chars().all(|c| c.is_ascii_digit()) {
-            continue;
-        }
-        let Ok(raw) = fs::read(format!("/proc/{name}/cmdline")) else {
-            continue;
-        };
-        let argv: Vec<String> = raw
-            .split(|&b| b == 0)
-            .filter(|s| !s.is_empty())
-            .map(|s| String::from_utf8_lossy(s).to_string())
-            .collect();
+    for name in pids_named("claude") {
+        let argv = argv(&name);
         if !argv.iter().any(|a| a.contains("bg-pty-host")) {
             continue;
         }
@@ -567,45 +642,74 @@ pub fn daemon_hosted() -> Vec<(i32, String, String)> {
         let Ok(cwd) = fs::read_link(format!("/proc/{name}/cwd")) else {
             continue;
         };
-        out.push((
-            name.parse().unwrap_or(0),
-            sid.clone(),
-            cwd.display().to_string(),
-        ));
+        out.push((name.parse().unwrap_or(0), sid.clone(), cwd.display().to_string()));
     }
     out
 }
 
-/// Hyprland window address owning a pid, walking ppid up (python
-/// window_of_pid). Studio-internal sessions dead-end at the tmux server.
+/// pid → Hyprland window address, loaded with ONE `hyprctl clients -j`.
+/// session_rows used to call window_of_pid per running process, i.e.
+/// one hyprctl fork per session every reload — 23 of the 42 ms measured.
+pub struct WindowMap(HashMap<i64, String>);
+
+impl WindowMap {
+    pub fn load() -> WindowMap {
+        let mut by_pid: HashMap<i64, String> = HashMap::new();
+        if let Ok(out) = std::process::Command::new("hyprctl").args(["clients", "-j"]).output() {
+            if let Ok(clients) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                for c in clients.as_array().into_iter().flatten() {
+                    if let (Some(p), Some(a)) = (
+                        c.get("pid").and_then(|v| v.as_i64()),
+                        c.get("address").and_then(|v| v.as_str()),
+                    ) {
+                        by_pid.insert(p, a.to_string());
+                    }
+                }
+            }
+        }
+        WindowMap(by_pid)
+    }
+
+    /// The map, at most 30 s old. A terminal opened in the last half
+    /// minute shows without an address until then — the row still opens.
+    pub fn cached() -> std::sync::Arc<WindowMap> {
+        use std::sync::{Arc, Mutex, OnceLock};
+        use std::time::Instant;
+        static CACHE: OnceLock<Mutex<Option<(Instant, Arc<WindowMap>)>>> = OnceLock::new();
+        let cell = CACHE.get_or_init(|| Mutex::new(None));
+        let mut g = cell.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, m)) = g.as_ref() {
+            if at.elapsed().as_secs() < 30 {
+                return m.clone();
+            }
+        }
+        let m = Arc::new(WindowMap::load());
+        *g = Some((Instant::now(), m.clone()));
+        m
+    }
+
+    /// Walk ppid up to 15 levels; studio-internal sessions dead-end at
+    /// the tmux server (python window_of_pid).
+    pub fn addr_of(&self, pid: i32) -> Option<String> {
+        let mut cur = pid as i64;
+        for _ in 0..15 {
+            if let Some(addr) = self.0.get(&cur) {
+                return Some(addr.clone());
+            }
+            let stat = fs::read_to_string(format!("/proc/{cur}/stat")).ok()?;
+            let rest = &stat[stat.rfind(')')? + 2..];
+            cur = rest.split_whitespace().nth(1)?.parse().ok()?;
+            if cur <= 1 {
+                break;
+            }
+        }
+        None
+    }
+}
+
+/// One-shot form for callers outside the reload loop.
 pub fn window_of_pid(pid: i32) -> Option<String> {
-    let out = std::process::Command::new("hyprctl")
-        .args(["clients", "-j"])
-        .output()
-        .ok()?;
-    let clients: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
-    let mut by_pid: HashMap<i64, String> = HashMap::new();
-    for c in clients.as_array()? {
-        if let (Some(p), Some(a)) = (
-            c.get("pid").and_then(|v| v.as_i64()),
-            c.get("address").and_then(|v| v.as_str()),
-        ) {
-            by_pid.insert(p, a.to_string());
-        }
-    }
-    let mut cur = pid as i64;
-    for _ in 0..15 {
-        if let Some(addr) = by_pid.get(&cur) {
-            return Some(addr.clone());
-        }
-        let stat = fs::read_to_string(format!("/proc/{cur}/stat")).ok()?;
-        let rest = &stat[stat.rfind(')')? + 2..];
-        cur = rest.split_whitespace().nth(1)?.parse().ok()?;
-        if cur <= 1 {
-            break;
-        }
-    }
-    None
+    WindowMap::load().addr_of(pid)
 }
 
 const BG_DETAIL_CAP: usize = 40;
@@ -816,6 +920,11 @@ pub fn session_rows() -> Vec<Row> {
     let mut rows = Vec::new();
     let txs = recent_transcripts(25);
     let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // loaded on first need: a studio with no running session forks nothing
+    let mut wmap: Option<std::sync::Arc<WindowMap>> = None;
+    let mut addr_of = |pid: i32| -> String {
+        wmap.get_or_insert_with(WindowMap::cached).addr_of(pid).unwrap_or_default()
+    };
     for p in claude_procs() {
         let tx = transcript_for(&p, &taken, &txs);
         if !tx.is_empty() {
@@ -835,7 +944,7 @@ pub fn session_rows() -> Vec<Row> {
             rows.push(Row {
                 kind: "run".into(),
                 label: if title.is_empty() { where_.clone() } else { title },
-                addr: window_of_pid(p.pid).unwrap_or_default(),
+                addr: addr_of(p.pid),
                 cwd: p.cwd.clone(),
                 pid: p.pid,
                 tty: p.tty.clone(),
@@ -915,7 +1024,7 @@ pub fn session_rows() -> Vec<Row> {
             kind: "run".into(),
             agent: "codex".into(),
             label: if title.is_empty() { where_.clone() } else { title },
-            addr: window_of_pid(p.pid).unwrap_or_default(),
+            addr: addr_of(p.pid),
             cwd: p.cwd.clone(),
             pid: p.pid,
             tty: p.tty.clone(),
@@ -944,6 +1053,22 @@ pub fn session_rows() -> Vec<Row> {
             dir: label,
             title: preview.clone(),
             detail: format!("{} — {preview}", ago(*mt)),
+            ..Default::default()
+        });
+    }
+    // ----- Hermes: live only (session format not parsed yet) -----
+    for p in hermes_procs() {
+        let where_ = nice(&p.cwd);
+        rows.push(Row {
+            kind: "run".into(),
+            agent: "hermes".into(),
+            label: where_.clone(),
+            addr: addr_of(p.pid),
+            cwd: p.cwd.clone(),
+            pid: p.pid,
+            tty: p.tty.clone(),
+            dir: where_.clone(),
+            detail: format!("🟢 hermes running in {where_} — Enter focuses its terminal"),
             ..Default::default()
         });
     }

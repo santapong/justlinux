@@ -1,0 +1,11 @@
+[Unit]
+Description=DravenIQ weekly lesson proposer (hyprdesk-mine → claude -p, proposals only)
+
+[Service]
+Type=oneshot
+Nice=15
+ExecStartPre=%h/.local/bin/hyprdesk-mine
+ExecStart=/bin/sh -c 'cd %h && %h/.local/bin/claude -p --model sonnet --permission-mode acceptEdits --allowedTools "Read,Write,Edit,Glob,Grep,Bash(hyprdesk-mine*)" "Use the lesson-proposer skill: mine and propose. Write at most 10 proposals." > %h/.local/state/hyprdesk/lessons/last-run.log 2>&1'
+# weekly LINE digest through the Pi's n8n (workflow "DravenIQ Lessons Digest"). Tailscale Serve
+# no longer routes /webhook/* publicly, so the JSON rides ssh and the token stays on the Pi.
+ExecStartPost=/bin/sh -c '%h/.local/bin/hyprdesk-mine --json 7d | ssh -o BatchMode=yes -o ConnectTimeout=10 pi-tailscale "TOK=\$(grep ^N8N_FORWARD_TOKEN= ~/line-inbox-svc/line-inbox.env | cut -d= -f2 | tr -d \"\\\"\"); curl -s -m 20 -o /dev/null -X POST http://127.0.0.1:8080/webhook/lessons-digest -H \"x-forward-token: \$TOK\" -H \"Content-Type: application/json\" --data-binary @-" || true'

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""hypr-claude-studio — a VS-Code-style workspace for Claude Code sessions.
+"""draveniq — a VS-Code-style workspace for Claude Code sessions.
 
 One kitty window running a tmux session:
   · TOP: a two-row bar. Row 0 brands the studio, says where you are and how
@@ -38,8 +38,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path.home() / ".local/lib"))
 
 ME = os.path.realpath(__file__)
-TMUX_SESSION = "claude-studio"
-KITTY_CLASS = "hyprclaudestudio"
+TMUX_SESSION = "draveniq"
+KITTY_CLASS = "draveniq"
 # per-tab close button. Window 0 is the session tree — it has no ✕,
 # closing it would take the sidebar with it. The range tag names the
 # window so the click handler knows WHICH tab the ✕ belonged to.
@@ -136,7 +136,7 @@ def launch():
             return
     subprocess.Popen(
         ["kitty", "--class", KITTY_CLASS, "-o", "background_opacity=0.93",
-         "--title", "Claude Studio", "-e", "tmux", "-f", "/dev/null",
+         "--title", "DravenIQ Meta Harness", "-e", "tmux", "-f", "/dev/null",
          "-L", TMUX_SESSION, "new-session", "-A",
          "-s", TMUX_SESSION, "-n", "sessions",
          f"python3 {ME} --sidebar"],
@@ -202,7 +202,7 @@ def style_tmux():
         ("set", "-g", "status", "2"),
         ("set", "-g", "status-style", f"bg={bg},fg={sub}"),
         ("set", "-g", "status-left",
-         f"#[fg={acc2},bold] 󰚩 Claude Studio #[default] "),
+         f"#[fg={acc2},bold] 󰚩 DravenIQ #[default] "),
         # the row is no longer shared with the tabs, so these can breathe
         ("set", "-g", "status-left-length", "40"),
         ("set", "-g", "status-right",
@@ -799,7 +799,8 @@ def sidebar():
             Binding("n", "new", "New session here", show=True),
             Binding("s", "beside", "Open beside", show=True),
             Binding("t", "term", "Terminal here", show=True),
-            Binding("m", "mcp", "MCP / settings", show=True),
+            Binding("m", "mcp", "Claude settings", show=True),
+            Binding("P", "plan", "Plan viewer", show=True),
             Binding("p", "pin", "Pin project", show=True),
             Binding("slash", "filter", "Filter", show=True),
             Binding("x", "kill_bg", "Stop bg job", show=True),
@@ -1147,7 +1148,18 @@ def sidebar():
                 self.notify("Already open — focused its tab instead")
 
         def action_mcp(self):
-            open_settings_tab("integrations")
+            open_settings_tab("claude")
+
+        def action_plan(self):
+            """Spec fallback: the rust studio maps plans to tabs; here the
+            newest plan-mode plan opens beside the current window."""
+            plans = sorted(Path.home().glob(".claude/plans/*.md"),
+                           key=lambda f: f.stat().st_mtime)
+            if not plans:
+                self.notify("no plan-mode plans in ~/.claude/plans", severity="warning")
+                return
+            tmux("split-window", "-d", "-h", "-l", "45%",
+                 f"{Path.home()}/.local/bin/draveniq --plan '{plans[-1]}'")
 
         def action_term(self):
             data = self._current() or {}

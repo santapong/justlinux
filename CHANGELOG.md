@@ -4,6 +4,64 @@ All notable changes to this desktop. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## v2.0.0 — DravenIQ Meta Harness (2026-08-29)
+
+- **Rename**: Claude Studio is the **DravenIQ Meta Harness** — tab-bar brand `󰚩 DravenIQ`,
+  window title, `draveniq` launcher alias (+ `ALT+CTRL+D`), `draveniq.desktop`, Settings page
+  label. Binary/socket/class names unchanged, so nothing that bound to them breaks.
+- **Hermes Agent** (Nous, MIT) is the third agent: `H` = new Hermes tab, `󰘧` glyph, live rows
+  (`hermes_procs`: comm `hermes` + argv), Skills card lists `~/.hermes/skills`. Provider/key are
+  configured inside Hermes (`hermes model`), never here.
+- **Voice** (`hypr-voice`, `docs/voice.md`): offline wake word (openWakeWord, "hey jarvis" until a
+  custom "Hey Draven" model is dropped in) → spoken command → faster-whisper in a child process →
+  anchored grammar: focus, open N tabs (claude/codex/hermes), show the plan, close/next/prev tab,
+  settings, hide, pause/listen, dictate (no Enter) + "send". `--say` tests without a mic; systemd
+  user service; Settings Voice card. Measured 4.8 % of one core / 228 MB idle
+  (`docs/perf/voice-baseline.md`).
+- **Lesson miner** (`hyprdesk-mine`): incremental transcript mining (289 MB in 0.6 s) into daily
+  lessons JSONL — corrections, tool-error fixes, whole-word trap sentences — with a secret-redaction
+  gate; `--digest`, `--json`, `--format hermes`, `--routines`. Weekly `hypr-lesson-proposer.timer`
+  (Sunday 09:00, `claude -p` sonnet) writes **proposals only**; the Settings Skills card shows them
+  as ◆ rows with accept / reject. The digest is pushed to LINE through the Pi's n8n.
+- Studio CLI: `--new-tab [--agent] [--cwd]`, `--open-plan` (via the `@plan` window option the
+  sidebar writes), `@voice` slot in the tab bar; `m` opens the DravenIQ settings page.
+
+## v1.9.0 — the plan you can read (2026-08-29)
+
+- **Plan viewer**: `hypr-claude-studio --plan <file>` renders a plan-mode plan
+  (`~/.claude/plans/*.md`) as a styled, pre-wrapped ratatui page (headings,
+  rules, lists, task boxes, tables, code blocks on the muted surface, links
+  underlined) and re-reads it whenever its mtime changes — it fills in as
+  Claude writes it. Keys: j/k/d/u/g/G, wheel, `e` nvim, `y` copy path,
+  `o` zoom, `r` reload, `q` close. `--plan-dump <file> <width>` is the
+  headless check (all 30 plans on disk render, 0 panics).
+- Sidebar: a tab whose transcript mentions a plan file wears `󰈙`; `P` on that
+  tab opens the viewer detached beside the conversation (`-d` — Claude may be
+  waiting for an answer). Association runs only when `~/.claude/plans/`
+  changes, searching transcripts backwards in 1 MB chunks (64 MB cap).
+  Opt-in auto-open: `studio_plan_auto=1` (switch on the Settings Claude page).
+- Studio idle cost ÷3: `session_rows` 42→5 ms (one `hyprctl clients` per
+  reload, cached 30 s; one shared `/proc` walk; transcript meta/title cached
+  by mtime+len), `rename_open_tabs` 37→4 ms (one batched tmux call, no-ops
+  skipped), window-active check is a `stat()` of a hook-written runtime file
+  instead of a tmux fork per instance every 2 s. Four sidebars: 1.50 → 0.53 %.
+  `--bench`, `bin/studio-idle.py`, `docs/perf/studio-baseline.md`.
+- `m` in the studio (and the python spec) opens the Settings **Claude** page.
+
+## v1.8.0 — the Claude page (2026-08-29)
+
+- **Hypr Settings → Claude page** (new sidebar entry 󰚩): Skills card lists every
+  `~/.claude/skills/*` and repo `claude/skills/*` skill (1 KB head read each),
+  `/`-style filter, 󰏫 opens SKILL.md in nvim, ⏻ disables by renaming the folder
+  to `name.disabled`, ＋ scaffolds a new skill from a frontmatter template.
+- Environment card edits the `env` object of `~/.claude/settings.json`
+  (secret-looking keys masked) through the new atomic
+  `hyprdesk.confwrite.json_set` (flock + tmp + replace + one-deep `.undo`,
+  corrupt file never overwritten); shows model/effort/hooks/plugins summary.
+- MCP servers card moved from Integrations to the Claude page (unchanged).
+- Sessions card: projects / transcripts / size / oldest, Open Claude Studio.
+- `hypr-settings claude` opens straight on the page.
+
 ## [Unreleased]
 
 ## [1.7.0] — 2026-08-24

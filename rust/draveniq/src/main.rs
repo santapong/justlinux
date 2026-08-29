@@ -1,6 +1,6 @@
-//! hypr-claude-studio — a VS-Code-style workspace for Claude Code
-//! sessions. bin/hypr-claude-studio (python/Textual) is the spec;
-//! docs/claude-studio.md is the contract. Rung 4 — the LAST rung — of
+//! draveniq — a VS-Code-style workspace for Claude Code
+//! sessions. bin/draveniq (python/Textual) is the spec;
+//! docs/draveniq.md is the contract. Rung 4 — the LAST rung — of
 //! the Rust migration: the tmux orchestration ports as subprocess work,
 //! the Textual sidebar is hand-rolled in ratatui (sidebar.rs).
 //!
@@ -9,20 +9,21 @@
 //! branch in main(): an unknown flag falls through to launch(), which
 //! spawns a SECOND studio rather than failing quietly.
 
+mod plan;
 mod sidebar;
 
 use std::path::Path;
 use std::process::Command;
 
-pub const TMUX_SESSION: &str = "claude-studio";
-const KITTY_CLASS: &str = "hyprclaudestudio";
+pub const TMUX_SESSION: &str = "draveniq";
+const KITTY_CLASS: &str = "draveniq";
 
 pub fn me() -> String {
     std::env::current_exe()
         .ok()
         .and_then(|p| p.canonicalize().ok())
         .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "hypr-claude-studio".into())
+        .unwrap_or_else(|| "draveniq".into())
 }
 
 pub fn hex(c: hyprdesk::Rgb) -> String {
@@ -90,7 +91,7 @@ fn launch() {
     // normal config if the overlay was never installed, so a partial install
     // degrades to "as before" rather than a kitty that refuses to start.
     let studio_conf = format!(
-        "{}/.config/kitty/claude-studio.conf",
+        "{}/.config/kitty/draveniq.conf",
         std::env::var("HOME").unwrap_or_default()
     );
     let mut kitty_args: Vec<String> = vec!["kitty".into()];
@@ -104,7 +105,7 @@ fn launch() {
             "--class",
             KITTY_CLASS,
             "--title",
-            "Claude Studio",
+            "DravenIQ Meta Harness",
             "-e",
             "tmux",
             "-f",
@@ -126,7 +127,7 @@ fn launch() {
 
 // ---------------- tab-bar theme (python style_tmux, verbatim) ----------
 
-// See bin/hypr-claude-studio for the full commentary on every choice
+// See bin/draveniq for the full commentary on every choice
 // here — the ranges, the missing scrollport, the run-shell ✕ path. The
 // format strings are copied verbatim; only the interpolation moved.
 // every window is a real tab in the per-window-tree model — the old
@@ -247,7 +248,7 @@ pub fn style_tmux() {
         "set",
         "-g",
         "status-left",
-        &format!("#[fg={acc2},bold] 󰚩 Claude Studio #[default] "),
+        &format!("#[fg={acc2},bold] 󰚩 DravenIQ #[default] "),
     ]);
     tmux(&["set", "-g", "status-left-length", "40"]);
     tmux(&["set", "-g", "status-right", &status_right]);
@@ -257,7 +258,7 @@ pub fn style_tmux() {
         "set",
         "-g",
         "status-format[0]",
-        "#[align=left]#{E:status-left}#[align=centre]#{E:@status-centre}#[align=right]#{E:status-right}",
+        "#[align=left]#{E:status-left}#[align=centre]#{E:@status-centre}#{?@voice, 󰍬 #{@voice},}#[align=right]#{E:status-right}",
     ]);
     tmux(&[
         "set",
@@ -411,23 +412,33 @@ pub fn tab_name(sid: &str, cwd: &str, width: usize, agent: &str) -> String {
     let name: String = name.split_whitespace().collect::<Vec<_>>().join(" ").replace('#', "");
     let out: String = name.chars().take(width).collect();
     let out = if out.is_empty() { "~".to_string() } else { out };
-    if agent == "codex" { format!("{CODEX_GLYPH} {out}") } else { out }
+    match agent {
+        "codex" => format!("{CODEX_GLYPH} {out}"),
+        "hermes" => format!("{HERMES_GLYPH} {out}"),
+        _ => out,
+    }
 }
 
 /// Re-derive what every tab claims to be, from what it actually holds.
+/// ONE tmux round-trip in, ONE out: the list carries the current name and
+/// @beside so unchanged tabs cost nothing, and every change rides a single
+/// `tmux cmd ; cmd ; …` invocation (was 1 + 2·windows forks, 37 ms).
 pub fn rename_open_tabs() {
-    let mut windows: std::collections::HashMap<String, Vec<(i32, String, String)>> =
+    // window -> (current name, current beside, panes)
+    let mut windows: std::collections::HashMap<String, (String, String, Vec<(i32, String, String)>)> =
         std::collections::HashMap::new();
     for line in tmux_out(&[
         "list-panes",
         "-s",
         "-F",
-        "#{window_index}|#{pane_index}|#{pane_current_path}|#{pane_start_command}",
+        "#{window_index}|#{window_name}|#{@beside}|#{pane_index}|#{pane_current_path}|#{pane_start_command}",
     ])
     .lines()
     {
-        let mut it = line.splitn(4, '|');
-        let (idx, pane, cwd, cmd) = (
+        let mut it = line.splitn(6, '|');
+        let (idx, wname, wbeside, pane, cwd, cmd) = (
+            it.next().unwrap_or(""),
+            it.next().unwrap_or(""),
             it.next().unwrap_or(""),
             it.next().unwrap_or(""),
             it.next().unwrap_or(""),
@@ -436,13 +447,14 @@ pub fn rename_open_tabs() {
         if cmd.contains("--sidebar") {
             continue; // the tree pane is furniture, not identity
         }
-        windows.entry(idx.to_string()).or_default().push((
-            pane.parse().unwrap_or(0),
-            cwd.to_string(),
-            cmd.to_string(),
-        ));
+        windows
+            .entry(idx.to_string())
+            .or_insert_with(|| (wname.to_string(), wbeside.to_string(), Vec::new()))
+            .2
+            .push((pane.parse().unwrap_or(0), cwd.to_string(), cmd.to_string()));
     }
-    for (idx, mut panes) in windows {
+    let mut batch: Vec<String> = Vec::new();
+    for (idx, (cur_name, cur_beside, mut panes)) in windows {
         if panes.is_empty() {
             continue; // pure-sessions window keeps its name
         }
@@ -451,7 +463,9 @@ pub fn rename_open_tabs() {
         let ident = &panes[0];
         if let Some(sid) = find_uuid(&ident.2) {
             let name = tab_name(&sid, &ident.1, 18, agent_of_cmd(&ident.2));
-            tmux(&["rename-window", "-t", &idx, &name]);
+            if name != cur_name {
+                batch.extend(["rename-window".into(), "-t".into(), idx.clone(), name, ";".into()]);
+            }
         }
         let mut beside = String::new();
         for (_p, cwd, cmd) in &panes[1..] {
@@ -462,33 +476,64 @@ pub fn rename_open_tabs() {
         }
         // SESSION-QUALIFIED: set-option -t is a target-PANE (python)
         let target = format!("{TMUX_SESSION}:{idx}");
-        if !beside.is_empty() {
-            tmux(&["set-option", "-w", "-t", &target, "@beside", &beside]);
-        } else {
-            tmux(&["set-option", "-uw", "-t", &target, "@beside"]);
+        if beside != cur_beside {
+            if !beside.is_empty() {
+                batch.extend(["set-option".into(), "-w".into(), "-t".into(), target, "@beside".into(), beside, ";".into()]);
+            } else {
+                batch.extend(["set-option".into(), "-uw".into(), "-t".into(), target, "@beside".into(), ";".into()]);
+            }
         }
     }
+    if batch.is_empty() {
+        return;
+    }
+    batch.pop(); // trailing ';'
+    let args: Vec<&str> = batch.iter().map(|s| s.as_str()).collect();
+    tmux(&args);
 }
 
-/// Wrap a conversation command so it runs with the user's real PATH.
-///
-/// tmux execs a window command through `/bin/sh -c`, so a bare `claude ...`
-/// gets NO rc file — while a *terminal* tab does, because tmux's empty
-/// default-command starts $SHELL as a login shell. That asymmetry is why a
-/// tool reachable in a terminal tab (pulumi, via the `~/.pulumi/bin` export
-/// in .zshrc) is missing in a conversation tab.
-///
-/// Why an explicit `source` and NEITHER `-i` nor `-l` — both were tried:
-///   `-i` reads .zshrc but also emits a burst of OSC colour-palette escapes
-///        at startup, straight into the pane before claude draws.
-///   `-l` runs the login files, which on Kali print the MOTD banner into
-///        the pane. Fine for a terminal tab, ruinous under a TUI.
-/// Sourcing .zshrc by hand with its output discarded gets the PATH and
-/// nothing else. zshenv still supplies the base PATH either way.
-///
-/// `exec` keeps the old lifetime — the pane still dies when claude exits —
-/// and the session id stays inside the string, which open_session_tab()
-/// relies on to match an existing tab via pane_start_command.
+
+/// (window index, session id) for every tab whose identity pane carries a
+/// session uuid — the LOWEST pane index, as rename_open_tabs decides it.
+pub fn window_sids() -> Vec<(String, String)> {
+    let mut best: std::collections::HashMap<String, (i32, String)> = std::collections::HashMap::new();
+    for line in tmux_out(&["list-panes", "-s", "-F", "#{window_index}|#{pane_index}|#{pane_start_command}"]).lines() {
+        let mut it = line.splitn(3, '|');
+        let (idx, pane, cmd) = (it.next().unwrap_or(""), it.next().unwrap_or(""), it.next().unwrap_or(""));
+        if cmd.contains("--sidebar") || cmd.contains("--plan") {
+            continue;
+        }
+        let Some(sid) = find_uuid(cmd) else { continue };
+        let p: i32 = pane.parse().unwrap_or(0);
+        match best.get(idx) {
+            Some((bp, _)) if *bp <= p => {}
+            _ => {
+                best.insert(idx.to_string(), (p, sid));
+            }
+        }
+    }
+    best.into_iter().map(|(idx, (_, sid))| (idx, sid)).collect()
+}
+
+/// Open (or re-focus) the plan viewer beside tab `idx`. `-d`: the
+/// conversation keeps the keyboard — Claude may be waiting on an answer.
+pub fn open_plan_pane(idx: &str, file: &Path) {
+    let target = format!("{TMUX_SESSION}:{idx}");
+    let want = format!("--plan {}", file.display());
+    for line in tmux_out(&["list-panes", "-t", &target, "-F", "#{pane_id}|#{pane_start_command}"]).lines() {
+        let (id, cmd) = line.split_once('|').unwrap_or(("", ""));
+        if cmd.contains(&want) {
+            tmux(&["select-window", "-t", &target]);
+            tmux(&["select-pane", "-t", id]);
+            return;
+        }
+    }
+    tmux(&[
+        "split-window", "-d", "-h", "-l", "45%", "-t", &target,
+        &format!("{} --plan '{}'", me(), file.display()),
+    ]);
+}
+
 fn with_user_path(cmd: &str) -> String {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
     // cmd is built from uuids and fixed flags — no single quotes to escape,
@@ -500,10 +545,15 @@ fn with_user_path(cmd: &str) -> String {
 /// Glyph that marks a Codex conversation in tabs and the tree.
 /// (passes the fc-list gate against JetBrainsMono NF: nf-md-robot)
 pub const CODEX_GLYPH: &str = "󰚩";
+/// U+F0627 (nf-md-alpha_h_box…): passes `fc-list :charset=f0627` on JetBrainsMono NF.
+pub const HERMES_GLYPH: &str = "󰘧";
 
 /// The CLI line that resumes `sid` under `agent` ("claude" | "codex").
 pub fn resume_cmd(agent: &str, sid: &str) -> String {
-    if agent == "codex" {
+    if agent == "hermes" {
+        // hermes sessions live in ~/.hermes/sessions; v1 opens a fresh REPL
+        "hermes".to_string()
+    } else if agent == "codex" {
         format!("codex resume {sid}")
     } else {
         format!("claude --resume {sid}")
@@ -512,7 +562,13 @@ pub fn resume_cmd(agent: &str, sid: &str) -> String {
 
 /// Which agent a pane's start command runs.
 pub fn agent_of_cmd(cmd: &str) -> &'static str {
-    if cmd.contains("codex") { "codex" } else { "claude" }
+    if cmd.contains("hermes") {
+        "hermes"
+    } else if cmd.contains("codex") {
+        "codex"
+    } else {
+        "claude"
+    }
 }
 
 /// Open (or focus) a tab running this transcript's conversation.
@@ -586,6 +642,11 @@ pub fn new_session_tab(cwd: &str, agent: &str) {
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "~".into());
+    if agent == "hermes" {
+        let name = format!("{HERMES_GLYPH} {base}");
+        tmux(&["new-window", "-t", &format!("{TMUX_SESSION}:"), "-n", &name, "-c", cwd, &with_user_path("hermes")]);
+        return;
+    }
     if agent == "codex" {
         // codex has no --session-id: identity comes later, from the
         // rollout the process holds open (hyprdesk::codex_procs)
@@ -814,11 +875,28 @@ fn palette() {
 /// and a mistimed close could strand it. Instances are cheap (~4 MB)
 /// and only the visible one polls (the sidebar throttles itself when
 /// its window is not active).
+/// Where the select/new-window hooks record the active window index so
+/// N sidebar instances can learn "am I on screen?" from a stat() instead
+/// of each forking tmux every 2 s (4.7 ms × instances, measured).
+pub fn active_file() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into()))
+        .join("draveniq.active")
+}
+
+pub fn note_active(idx: &str) {
+    let f = active_file();
+    let tmp = f.with_extension("tmp");
+    if std::fs::write(&tmp, idx).is_ok() {
+        let _ = std::fs::rename(&tmp, &f);
+    }
+}
+
 fn tree_attach() {
     let cur = tmux_out(&["display-message", "-p", "#{window_index}"]).trim().to_string();
     if cur.is_empty() {
         return;
     }
+    note_active(&cur);
     let panes = tmux_out(&[
         "list-panes", "-t", &format!("{TMUX_SESSION}:{cur}"), "-F", "#{pane_start_command}",
     ]);
@@ -902,6 +980,9 @@ fn window_solo() {
         }
     }
     let cur = tmux_out(&["display-message", "-p", "#{window_index}"]).trim().to_string();
+    if !cur.is_empty() {
+        note_active(&cur); // layout changes include a window dying under the cursor
+    }
     let total = wins.len();
     for (idx, panes, has_tree) in wins {
         if panes != 1 || !has_tree {
@@ -915,8 +996,97 @@ fn window_solo() {
     }
 }
 
+
+/// Measure the studio's hot paths against the REAL machine state.
+/// `draveniq --bench [n]` — mean/p95 ms per call + RSS.
+/// Numbers, not guesses, pick the optimisation targets (docs/perf/).
+fn bench(n: usize) {
+    fn rss_kb() -> u64 {
+        std::fs::read_to_string("/proc/self/statm")
+            .ok()
+            .and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok())
+            .map(|pages| pages * 4)
+            .unwrap_or(0)
+    }
+    fn time<F: FnMut()>(label: &str, n: usize, mut f: F) {
+        let mut ms: Vec<f64> = Vec::with_capacity(n);
+        for _ in 0..n {
+            let t = std::time::Instant::now();
+            f();
+            ms.push(t.elapsed().as_secs_f64() * 1e3);
+        }
+        ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mean = ms.iter().sum::<f64>() / n as f64;
+        let p95 = ms[((n as f64 * 0.95) as usize).min(n - 1)];
+        println!("{label:<28} mean {mean:8.2} ms   p95 {p95:8.2} ms   (n={n})");
+    }
+    println!("rss at start          {} kB", rss_kb());
+    let procs = hyprdesk::claude_procs();
+    println!("claude procs: {}  windows: {}", procs.len(), sidebar::open_windows().len());
+    time("claude_procs (/proc scan)", n, || { hyprdesk::claude_procs(); });
+    time("recent_transcripts(25)", n, || { hyprdesk::recent_transcripts(25); });
+    time("session_rows (reload)", n, || { hyprdesk::session_rows(); });
+    time("daemon_hosted (/proc)", n, || { hyprdesk::daemon_hosted(); });
+    time("codex_procs (/proc)", n, || { hyprdesk::codex_procs(); });
+    time("recent_codex_transcripts", n, || { hyprdesk::recent_codex_transcripts(25); });
+    {
+        let txs = hyprdesk::recent_transcripts(25);
+        time("session_meta x25", n, || { for (_, p) in &txs { hyprdesk::session_meta(p); } });
+        time("session_title x25", n, || { for (_, p) in &txs { hyprdesk::session_title(p); } });
+    }
+    time("open_windows (tmux)", n, || { sidebar::open_windows(); });
+    time("window_active (tmux)", n, || {
+        tmux_out(&["display-message", "-p", "-t", "0", "#{window_active}"]);
+    });
+    if let Some(p) = procs.first() {
+        let pid = p.pid;
+        time("window_of_pid (hyprctl)", n, || { hyprdesk::window_of_pid(pid); });
+    }
+    time("rename_open_tabs", (n / 4).max(1), rename_open_tabs);
+    let txs = hyprdesk::recent_transcripts(25);
+    if let Some((_, p)) = txs.first() {
+        time("session_title (1 tail)", n, || { hyprdesk::session_title(p); });
+    }
+    println!("rss at end            {} kB", rss_kb());
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--new-tab") {
+        let agent = args.iter().position(|a| a == "--agent").and_then(|i| args.get(i + 1)).map(|s| s.as_str()).unwrap_or("claude");
+        let cwd = args.iter().position(|a| a == "--cwd").and_then(|i| args.get(i + 1)).cloned()
+            .unwrap_or_else(|| std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default());
+        new_session_tab(&cwd, agent);
+        return;
+    }
+    if args.iter().any(|a| a == "--open-plan") {
+        // the sidebar records each tab's plan in the @plan window option
+        let line = tmux_out(&["display-message", "-p", "-t", &format!("{TMUX_SESSION}:"), "#{window_index}|#{@plan}"]);
+        let (idx, plan) = line.trim().split_once('|').unwrap_or(("", ""));
+        if idx.is_empty() || plan.is_empty() {
+            println!("no plan seen for the active tab yet");
+        } else {
+            open_plan_pane(idx, Path::new(plan));
+            println!("plan: {}", Path::new(plan).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
+        }
+        return;
+    }
+    if let Some(i) = args.iter().position(|a| a == "--plan-dump") {
+        let file = args.get(i + 1).map(|s| s.as_str()).unwrap_or("");
+        let width = args.get(i + 2).and_then(|s| s.parse().ok()).unwrap_or(80);
+        plan::dump(Path::new(file), width);
+        return;
+    }
+    if let Some(i) = args.iter().position(|a| a == "--plan") {
+        if let Some(file) = args.get(i + 1) {
+            plan::run(Path::new(file));
+        }
+        return;
+    }
+    if let Some(i) = args.iter().position(|a| a == "--bench") {
+        bench(args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(20));
+        return;
+    }
     if args.iter().any(|a| a == "--window-solo") {
         window_solo();
         return;

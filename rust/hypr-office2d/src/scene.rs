@@ -169,7 +169,7 @@ impl Scene {
         let out = std::process::Command::new("tmux")
             .args([
                 "-L",
-                "claude-studio",
+                "draveniq",
                 "list-panes",
                 "-s",
                 "-F",

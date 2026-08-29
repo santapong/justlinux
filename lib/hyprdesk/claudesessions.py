@@ -1,5 +1,5 @@
 """Claude Code session discovery — shared by the launcher picker, the
-Claude Studio sidebar and the claude-office scene.
+DravenIQ (Claude Studio) sidebar and the claude-office scene.
 
 Sessions come from two worlds:
   · live `claude` processes (a /dev/pts stdin = interactive terminal

@@ -31,6 +31,7 @@ from textual.widgets import (Button, ContentSwitcher, Footer, Input, Label,
 
 sys.path.insert(0, str(Path.home() / ".local/lib"))
 from hyprdesk.confwrite import conf_set as _conf_set   # atomic writer
+from hyprdesk.confwrite import json_set as _json_set
 
 HOME = Path.home()
 CONF = HOME / ".config/hypr/hyprland.conf"
@@ -66,6 +67,7 @@ NAV = [
     ("network",    "󰤨", "Network"),
     ("security",   "󰕥", "Security"),
     ("integrations", "󰌘", "Integrations"),
+    ("claude",     "󰚩", "DravenIQ"),
     ("power",      "⏻", "Power"),
 ]
 
@@ -276,6 +278,209 @@ def mcp_list():
         out.append((name, m.group("target").strip(), state,
                     m.group("note").strip(), name.startswith("claude.ai")))
     return out
+
+
+
+# ---------- Claude Code: skills, env, sessions ----------
+CLAUDE_HOME = HOME / ".claude"
+CLAUDE_SETTINGS = CLAUDE_HOME / "settings.json"
+# (label, dir) — personal skills, then the ones this repo ships
+SKILL_SOURCES = [("personal", CLAUDE_HOME / "skills"),
+                 ("repo", HOME / "hyprland-dots/claude/skills"),
+                 ("hermes", HOME / ".hermes/skills")]   # agentskills.io format
+SECRET_KEY_RE = re.compile(r"KEY|TOKEN|SECRET|PASS|CREDENTIAL", re.I)
+DISABLED = ".disabled"
+
+
+def skill_proposals():
+    """[(name, source, proposed_path, target_dir)] — files the lesson-proposer wrote."""
+    out = []
+    for src, base in SKILL_SOURCES:
+        if not base.is_dir():
+            continue
+        for d in base.iterdir():
+            p = d / "proposed/SKILL.md"
+            if d.is_dir() and p.is_file():
+                out.append((d.name, src, p, d))
+        newdir = base / "_proposed"
+        if newdir.is_dir():
+            for d in newdir.iterdir():
+                p = d / "SKILL.md"
+                if d.is_dir() and p.is_file():
+                    out.append((d.name, src, p, base / d.name))
+    return out
+
+
+def skill_accept(prop, target):
+    """Replace/create the live SKILL.md; the old one stays as SKILL.md.bak."""
+    target.mkdir(parents=True, exist_ok=True)
+    live = target / "SKILL.md"
+    if live.exists():
+        shutil.copy2(live, target / "SKILL.md.bak")
+    shutil.move(str(prop), str(live))
+    _prune_proposal_dir(prop.parent)
+
+
+def skill_reject(prop):
+    prop.unlink(missing_ok=True)
+    _prune_proposal_dir(prop.parent)
+
+
+def _prune_proposal_dir(d):
+    try:
+        if d.is_dir() and not any(d.iterdir()):
+            d.rmdir()
+            if d.name != "proposed" and d.parent.name == "_proposed" and not any(d.parent.iterdir()):
+                d.parent.rmdir()
+    except OSError:
+        pass
+
+
+def skill_list():
+    """[(name, source, description, enabled, path)] — one row per skill dir.
+
+    Only the first 1 KB of each SKILL.md is read (frontmatter lives there);
+    27 personal skills must not cost 27 full file reads on every page show.
+    A dir renamed to ``<name>.disabled`` is invisible to Claude Code, which
+    only loads dirs whose SKILL.md sits at ``skills/<name>/SKILL.md``.
+    """
+    rows = []
+    for src, base in SKILL_SOURCES:
+        if not base.is_dir():
+            continue
+        for d in sorted(base.iterdir()):
+            if not d.is_dir():
+                continue
+            md = d / "SKILL.md"
+            if not md.is_file():
+                continue
+            enabled = not d.name.endswith(DISABLED)
+            name = d.name.removesuffix(DISABLED)
+            desc = ""
+            try:
+                with open(md, encoding="utf-8", errors="replace") as fh:
+                    head = fh.read(1024)
+                m = re.search(r"^description:\s*(.+)$", head, re.M)
+                if m:
+                    desc = m.group(1).strip().strip("\"'")
+            except OSError:
+                desc = "(unreadable)"
+            rows.append((name, src, desc, enabled, d))
+    return rows
+
+
+def skill_toggle(path):
+    """Enable/disable by renaming the dir; returns the new path."""
+    p = Path(path)
+    new = p.with_name(p.name.removesuffix(DISABLED)) if p.name.endswith(DISABLED) \
+        else p.with_name(p.name + DISABLED)
+    if new.exists():
+        raise FileExistsError(new.name)
+    p.rename(new)
+    return new
+
+
+SKILL_TEMPLATE = """---
+name: {name}
+description: TODO one line — what it does and WHEN to use it (this line is the trigger).
+---
+
+# {name}
+
+## When to use
+
+## Steps
+
+## Traps
+"""
+
+
+def skill_new(name):
+    d = SKILL_SOURCES[0][1] / name
+    if d.exists():
+        raise FileExistsError(name)
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text(SKILL_TEMPLATE.format(name=name))
+    return d / "SKILL.md"
+
+
+def claude_settings():
+    try:
+        return json.loads(CLAUDE_SETTINGS.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def claude_env_set(key, value=None, delete=False):
+    def mutate(obj):
+        env = obj.setdefault("env", {})
+        if delete:
+            env.pop(key, None)
+        else:
+            env[key] = value
+        if not env:
+            obj.pop("env", None)
+    _json_set(CLAUDE_SETTINGS, mutate)
+
+
+def session_stats():
+    """(projects, transcripts, total bytes, oldest mtime) of ~/.claude/projects."""
+    base = CLAUDE_HOME / "projects"
+    n_proj = n_tr = size = 0
+    oldest = None
+    if base.is_dir():
+        for proj in base.iterdir():
+            if not proj.is_dir():
+                continue
+            n_proj += 1
+            for f in proj.glob("*.jsonl"):
+                try:
+                    st = f.stat()
+                except OSError:
+                    continue
+                n_tr += 1
+                size += st.st_size
+                oldest = st.st_mtime if oldest is None else min(oldest, st.st_mtime)
+    return n_proj, n_tr, size, oldest
+
+
+VOICE_MODEL = HOME / ".local/share/hyprdesk/voice/hey_draven.onnx"
+VOICE_UNIT = "hypr-voice.service"
+
+
+def voice_sources():
+    """[(id, name)] microphones from `wpctl status` (Sources block)."""
+    try:
+        out = subprocess.run(["wpctl", "status"], capture_output=True, text=True,
+                             timeout=5).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    rows, in_src = [], False
+    for line in out.splitlines():
+        if "Sources:" in line:
+            in_src = True
+            continue
+        if in_src:
+            m = re.search(r"(\d+)\.\s+(.+?)\s+\[vol", line)
+            if m:
+                rows.append((m.group(1), m.group(2).strip()))
+            elif line.strip(" │├└─") == "" or "Filters" in line or "Streams" in line:
+                if rows:
+                    break
+    return rows
+
+
+def voice_unit_active():
+    return subprocess.run(["systemctl", "--user", "is-active", "--quiet", VOICE_UNIT],
+                          capture_output=True).returncode == 0
+
+
+def human(n):
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{n:.0f} {unit}"
+        n /= 1024
+    return f"{n:.1f} TB"
 
 
 def hyprctl_get(option, default):
@@ -612,6 +817,9 @@ class HyprSettings(App):
             color: {C['accent']}; text-style: bold; }}
     .hint {{ color: {C['subtext']}; }}
     .mcprow {{ width: 1fr; }}
+    .skrow, .envrow {{ width: 1fr; }}
+    #sk_rows, #env_rows {{ height: auto; }}
+    #sk_rows .row, #env_rows .row {{ height: auto; }}
     #mcp_rows {{ height: auto; }}
     #mcp_rows .row {{ height: auto; }}
     .status {{ padding: 0 0 1 0; }}
@@ -909,6 +1117,43 @@ class HyprSettings(App):
                 "~/.config/hyprdesk/secrets.json (0600) — never to "
                 "widgets.conf, which is in a public repo.",
                 classes="hint")
+
+    def _build_claude(self):
+        """Claude Code's home in Settings: skills, env, MCP, sessions.
+        Every list here is rebuilt by its own refresh on page entry —
+        nothing spawns a process except the MCP health check."""
+        with Card("Skills · ~/.claude/skills + this repo + ~/.hermes/skills"):
+            yield Static("", id="sk_status", classes="status")
+            with Horizontal(classes="row"):
+                yield Label("Filter")
+                yield Input(placeholder="type to filter by name or description",
+                            id="sk_filter")
+            yield Vertical(id="sk_rows")
+            with Horizontal(classes="row"):
+                yield Label("New skill")
+                yield Input(placeholder="kebab-case-name", id="sk_new_name")
+                yield Button("＋ Create", id="sk_new", variant="primary")
+            yield Static(
+                "󰏫 opens SKILL.md in nvim · ⏻ disables by renaming the "
+                "folder to name.disabled (Claude Code only loads "
+                "skills/<name>/SKILL.md) — takes effect in the NEXT "
+                "session. Plugin skills (loop-*) live in the same "
+                "folder and toggle the same way.", classes="hint")
+        with Card("Environment · settings.json → env"):
+            yield Static("", id="env_status", classes="status")
+            yield Vertical(id="env_rows")
+            with Horizontal(classes="row"):
+                yield Label("Key")
+                yield Input(placeholder="e.g. ANTHROPIC_MODEL", id="env_key")
+            with Horizontal(classes="row"):
+                yield Label("Value")
+                yield Input(placeholder="kept hidden if the key looks secret",
+                            password=True, id="env_val")
+                yield Button("󰅌", id="env_paste", classes="small")
+            with Horizontal(classes="row"):
+                yield Button("󰄬 Set", id="env_add", variant="primary")
+                yield Button("󰏫 Open settings.json", id="env_open")
+            yield Static("", id="env_info", classes="hint")
         with Card("MCP servers · Claude Code"):
             yield Static("", id="mcp_status", classes="status")
             yield Vertical(id="mcp_rows")
@@ -932,6 +1177,45 @@ class HyprSettings(App):
                 "~/.claude.json) get a ✕. An https:// target is "
                 "added as HTTP transport; anything else runs as "
                 "a stdio command.", classes="hint")
+
+        with Card("Sessions · ~/.claude/projects"):
+            yield Static("", id="cs_status", classes="status")
+            with Horizontal(classes="row"):
+                yield Label("Auto-open plan viewer in Studio when a plan-mode "
+                            "plan appears")
+                yield Switch(value=self.widgets.get("studio_plan_auto") == "1",
+                             id="sw_plan_auto")
+            with Horizontal(classes="row"):
+                yield Button("󰚩 Open DravenIQ", id="cs_studio",
+                             variant="primary")
+                yield Button("󰑓 Recount", id="cs_refresh")
+        with Card("Voice · “Hey Draven” wake word + spoken commands"):
+            yield Static("", id="vc_status", classes="status")
+            with Horizontal(classes="row"):
+                yield Label("Listen (hypr-voice service)")
+                yield Switch(value=voice_unit_active(), id="sw_voice")
+            with Horizontal(classes="row"):
+                yield Label("Microphone")
+                yield Button(self.widgets.get("voice_source") or "default",
+                             id="vc_source")
+            with Horizontal(classes="row"):
+                yield Label("Wake sensitivity (score needed)")
+                yield Button("−", id="vc_thr_down", classes="small")
+                yield Static(self.widgets.get("voice_threshold", "0.6"),
+                             id="vc_thr", classes="val")
+                yield Button("+", id="vc_thr_up", classes="small")
+            with Horizontal(classes="row"):
+                yield Label("Language")
+                yield Button(self.widgets.get("voice_lang", "en"), id="vc_lang")
+            with Horizontal(classes="row"):
+                yield Button("󰍬 Test wake word (10 s)", id="vc_test")
+                yield Button("󰈙 docs/voice.md", id="vc_docs")
+            yield Static(
+                "Offline: openWakeWord + whisper, nothing leaves the machine. "
+                "Say the wake word, then e.g. “open three tabs”, “show the "
+                "plan”, “tell Claude …” then “send”. Until a custom model "
+                "is trained it listens for “hey jarvis” — see docs/voice.md.",
+                classes="hint")
 
     def _build_network(self):
         """Body of the network pane, built on first show. Every nmcli call
@@ -1088,6 +1372,11 @@ class HyprSettings(App):
             self.refresh_network()                   # cached scan, threaded
         elif pane == "pane-integrations":
             self._hb_refresh()                       # local file, instant
+        elif pane == "pane-claude":
+            self._sk_refresh()                       # 1 KB per skill
+            self._env_refresh()                      # one json read
+            self._cs_refresh()                       # stat() walk, threaded
+            self._vc_refresh()                       # one systemctl + stat
             # health is only worth re-checking if it could have changed
             if time.time() - self._mcp_at > MCP_MAX_AGE:
                 self.run_worker(self._mcp_refresh(), group="mcp",
@@ -1403,6 +1692,22 @@ class HyprSettings(App):
         if self._refreshing:
             return
         sid = event.switch.id or ""
+        if sid == "sw_voice":
+            verb = "enable" if event.value else "disable"
+            if not DRY:
+                subprocess.run(["systemctl", "--user", verb, "--now", VOICE_UNIT],
+                               capture_output=True)
+                widgets_conf_set("voice_enabled", "1" if event.value else "0")
+                self.widgets = widgets_conf()
+            self.notify("Voice " + ("ON — say the wake word" if event.value else "OFF"))
+            self.set_timer(1.5, self._vc_refresh)
+            return
+        if sid == "sw_plan_auto":
+            widgets_conf_set("studio_plan_auto", "1" if event.value else "0")
+            self.widgets = widgets_conf()
+            self.notify("Studio will " + ("open the plan pane by itself (P still works)"
+                                          if event.value else "wait for P"))
+            return
         if sid == "sw_autohide":
             if event.value and not autohide_on():
                 launch(str(HOME / ".local/bin/waybar-autohide.sh"))
@@ -1509,6 +1814,133 @@ class HyprSettings(App):
         self.query_one("#hb_token", Input).placeholder = \
             "saved — type a new one to replace it"
         self._hb_msg(f"saved — connected as {name}", good=True)
+
+    # ---------- Claude: skills ----------
+    _sk_filter = ""
+
+    def _sk_refresh(self):
+        try:
+            box = self.query_one("#sk_rows", Vertical)
+        except Exception:
+            return
+        rows = skill_list()
+        props = skill_proposals()
+        self._sk_props = {}
+        for j, (name, src, prop, target) in enumerate(props):
+            self._sk_props[j] = (prop, target)
+            line = (f"[{C['yellow']}]◆[/] [{C['text']}]{_esc(_col(name, 20))}[/] "
+                    f"[{C['subtext']}]{_col('proposed', 9)}{_esc(_col(f'{src} · from lesson-proposer', 42))}[/]")
+            box.mount(Horizontal(
+                Static(line, classes="skrow"),
+                Button("󰄬", id=f"sk_acc_{j}", classes="small", variant="primary"),
+                Button("✕", id=f"sk_rej_{j}", classes="small"),
+                classes="row"))
+        q = self._sk_filter.lower()
+        shown = [r for r in rows if not q or q in r[0].lower() or q in r[2].lower()]
+        self._sk_paths = {}
+        box.remove_children()
+        for i, (name, src, desc, enabled, path) in enumerate(shown):
+            self._sk_paths[i] = path
+            ink = C["green"] if enabled else C["subtext"]
+            line = (f"[{ink}]{'●' if enabled else '○'}[/] "
+                    f"[{C['text'] if enabled else C['subtext']}]{_esc(_col(name, 20))}[/] "
+                    f"[{C['subtext']}]{_col(src, 9)}{_esc(_col(desc, 42))}[/]")
+            box.mount(Horizontal(
+                Static(line, classes="skrow"),
+                Button("󰏫", id=f"sk_edit_{i}", classes="small"),
+                Button("⏻", id=f"sk_tog_{i}", classes="small"),
+                classes="row"))
+        on = sum(1 for r in rows if r[3])
+        msg = f"{len(rows)} skills — {on} enabled, {len(rows) - on} disabled"
+        if props:
+            msg += f" · {len(props)} proposed (◆ accept 󰄬 or reject ✕)"
+        if q:
+            msg += f" · {len(shown)} match"
+        self.query_one("#sk_status", Static).update(f"[{C['subtext']}]{msg}[/]")
+
+    def on_input_changed(self, event: Input.Changed):
+        if (event.input.id or "") == "sk_filter":
+            self._sk_filter = event.value.strip()
+            self._sk_refresh()
+
+    # ---------- Claude: env ----------
+    def _env_msg(self, text, bad=False, good=False):
+        col = C["red"] if bad else (C["green"] if good else C["subtext"])
+        try:
+            self.query_one("#env_status", Static).update(f"[{col}]{text}[/]")
+        except Exception:
+            pass
+
+    def _env_refresh(self):
+        try:
+            box = self.query_one("#env_rows", Vertical)
+        except Exception:
+            return
+        cfg = claude_settings()
+        env = cfg.get("env", {}) or {}
+        self._env_keys = {}
+        box.remove_children()
+        for i, key in enumerate(sorted(env)):
+            self._env_keys[i] = key
+            val = str(env[key])
+            shown = ("•" * min(len(val), 12)) if SECRET_KEY_RE.search(key) else val
+            line = (f"[{C['text']}]{_esc(_col(key, 30))}[/] "
+                    f"[{C['subtext']}]{_esc(_col(shown, 50))}[/]")
+            box.mount(Horizontal(Static(line, classes="envrow"),
+                                 Button("✕", id=f"env_rm_{i}", classes="small"),
+                                 classes="row"))
+        self._env_msg(f"{len(env)} variable(s) passed to every Claude Code "
+                      "process — new sessions only")
+        hooks = sum(len(v) for v in (cfg.get("hooks") or {}).values())
+        plugins = [p.split("@")[0] for p, on in
+                   (cfg.get("enabledPlugins") or {}).items() if on]
+        self.query_one("#env_info", Static).update(
+            f"model {_esc(str(cfg.get('model', 'default')))} · "
+            f"effort {_esc(str(cfg.get('effortLevel', 'default')))} · "
+            f"{hooks} hook(s) · plugins: {_esc(', '.join(plugins) or 'none')} · "
+            f"{len(cfg.get('permissions', {}).get('allow', []))} allow rules")
+
+    # ---------- Claude: sessions ----------
+    def _cs_refresh(self):
+        def work():
+            n_proj, n_tr, size, oldest = session_stats()
+            age = ""
+            if oldest:
+                days = int((time.time() - oldest) / 86400)
+                age = f" · oldest {days} d"
+            self.call_from_thread(
+                self.query_one("#cs_status", Static).update,
+                f"[{C['subtext']}]{n_proj} projects · {n_tr} transcripts · "
+                f"{human(size)}{age}[/]")
+        try:
+            self.query_one("#cs_status", Static).update(
+                f"[{C['subtext']}]counting…[/]")
+        except Exception:
+            return
+        self.run_worker(work, thread=True, group="cs", exclusive=True)
+
+    # ---------- Claude: voice ----------
+    def _vc_refresh(self):
+        try:
+            st = self.query_one("#vc_status", Static)
+        except Exception:
+            return
+        on = voice_unit_active()
+        model = "custom “hey draven” model" if VOICE_MODEL.exists() \
+            else "pretrained “hey jarvis” (drop hey_draven.onnx to change)"
+        st.update(dot(on, f"listening — {model}", f"off — {model}"))
+        self._refreshing = True
+        try:
+            self.query_one("#sw_voice", Switch).value = on
+        finally:
+            self._refreshing = False
+
+    def _vc_set(self, key, val):
+        widgets_conf_set(key, val)
+        self.widgets = widgets_conf()
+        if voice_unit_active() and not DRY:
+            subprocess.run(["systemctl", "--user", "restart", VOICE_UNIT],
+                           capture_output=True)
 
     # ---------- MCP ----------
     def _mcp_msg(self, text, bad=False, good=False):
@@ -1689,6 +2121,130 @@ class HyprSettings(App):
             self.widgets = widgets_conf()
             event.button.label = nxt
             self.schedule_widget_restart()
+            return
+        if bid.startswith("sk_acc_") or bid.startswith("sk_rej_"):
+            prop, target = getattr(self, "_sk_props", {}).get(int(bid[7:]), (None, None))
+            if prop:
+                try:
+                    if not DRY:
+                        (skill_accept(prop, target) if bid.startswith("sk_acc_") else skill_reject(prop))
+                except OSError as e:
+                    self.notify(f"proposal: {e}", severity="error")
+                self.notify("accepted — live in the next session" if bid.startswith("sk_acc_") else "rejected")
+                self._sk_refresh()
+            return
+        if bid.startswith("sk_edit_"):
+            path = getattr(self, "_sk_paths", {}).get(int(bid[8:]))
+            if path:
+                launch("kitty", "--class", "floatterm", "--title", "SKILL.md",
+                       "nvim", str(path / "SKILL.md"))
+            return
+        if bid.startswith("sk_tog_"):
+            path = getattr(self, "_sk_paths", {}).get(int(bid[7:]))
+            if path:
+                try:
+                    if not DRY:
+                        skill_toggle(path)
+                except OSError as e:
+                    self.notify(f"could not rename: {e}", severity="error")
+                self._sk_refresh()
+            return
+        if bid == "sk_new":
+            name = self.query_one("#sk_new_name", Input).value.strip()
+            if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", name):
+                self.notify("name: lowercase letters, digits, dashes",
+                            severity="warning")
+                return
+            try:
+                md = skill_new(name) if not DRY else None
+            except FileExistsError:
+                self.notify(f"{name} already exists", severity="warning")
+                return
+            self.query_one("#sk_new_name", Input).value = ""
+            self._sk_refresh()
+            if md:
+                launch("kitty", "--class", "floatterm", "--title", "SKILL.md",
+                       "nvim", str(md))
+            return
+        if bid == "env_paste":
+            try:
+                r = subprocess.run(["wl-paste", "-n"], capture_output=True,
+                                   text=True, timeout=5)
+                self.query_one("#env_val", Input).value = r.stdout.strip()
+            except (OSError, subprocess.TimeoutExpired):
+                self.notify("clipboard unavailable", severity="warning")
+            return
+        if bid == "env_add":
+            key = self.query_one("#env_key", Input).value.strip()
+            val = self.query_one("#env_val", Input).value
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+                self._env_msg("key must be an identifier (A-Z, 0-9, _)", bad=True)
+                return
+            try:
+                if not DRY:
+                    claude_env_set(key, val)
+            except (OSError, ValueError) as e:
+                self._env_msg(f"write failed: {e}", bad=True)
+                return
+            self.query_one("#env_key", Input).value = ""
+            self.query_one("#env_val", Input).value = ""
+            self._env_refresh()
+            self._env_msg(f"{key} set — applies to new Claude sessions", good=True)
+            return
+        if bid.startswith("env_rm_"):
+            key = getattr(self, "_env_keys", {}).get(int(bid[7:]))
+            if key:
+                try:
+                    if not DRY:
+                        claude_env_set(key, delete=True)
+                except (OSError, ValueError) as e:
+                    self._env_msg(f"write failed: {e}", bad=True)
+                    return
+                self._env_refresh()
+                self._env_msg(f"{key} removed", good=True)
+            return
+        if bid == "env_open":
+            launch("kitty", "--class", "floatterm", "--title", "settings.json",
+                   "nvim", str(CLAUDE_SETTINGS))
+            return
+        if bid == "vc_source":
+            srcs = voice_sources()
+            cur = self.widgets.get("voice_source", "")
+            ids = [""] + [i for i, _ in srcs]
+            nxt = ids[(ids.index(cur) + 1) % len(ids)] if cur in ids else ""
+            if nxt:
+                widgets_conf_set("voice_source", nxt)
+            else:
+                _conf_set({}, delete=["voice_source"])
+            self.widgets = widgets_conf()
+            name = dict(srcs).get(nxt, "default")
+            event.button.label = f"{nxt} {name}".strip() if nxt else "default"
+            self._vc_set("voice_source", nxt) if nxt else None
+            return
+        if bid in ("vc_thr_up", "vc_thr_down"):
+            cur = float(self.widgets.get("voice_threshold", "0.6"))
+            cur = round(min(0.95, max(0.2, cur + (0.05 if bid == "vc_thr_up" else -0.05))), 2)
+            self._vc_set("voice_threshold", str(cur))
+            self.query_one("#vc_thr", Static).update(str(cur))
+            return
+        if bid == "vc_lang":
+            nxt = "th" if self.widgets.get("voice_lang", "en") == "en" else "en"
+            self._vc_set("voice_lang", nxt)
+            event.button.label = nxt
+            return
+        if bid == "vc_test":
+            launch("kitty", "--class", "floatterm", "--title", "hypr-voice test",
+                   "sh", "-c", f"{HOME}/.local/bin/hypr-voice --test 10; echo; echo 'press Enter to close'; read x")
+            return
+        if bid == "vc_docs":
+            launch("kitty", "--class", "floatterm", "--title", "voice.md",
+                   "nvim", str(HOME / "hyprland-dots/docs/voice.md"))
+            return
+        if bid == "cs_studio":
+            launch(str(HOME / ".local/bin/draveniq"))
+            return
+        if bid == "cs_refresh":
+            self._cs_refresh()
             return
         if bid == "mcp_refresh":
             self._mcp_at = 0.0                       # an explicit ask wins

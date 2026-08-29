@@ -25,9 +25,9 @@ see <a href="docs/architecture.md"><code>docs/architecture.md</code></a>.</sub>
 | smart top bar | `ALT+B` pins | waybar auto-hide, owned by `hypr-appdock` (`bar_smart=on`): hover the top screen edge to fade the bar in (250ms), leave to fade out; `ALT+B` pins it open / releases it; toggle from the Tools hub. (`waybar-autohide.sh` is the retired standalone predecessor) |
 | `screenshot.sh` | `ALT+SHIFT+S` | Region/screen/all screenshots → file + clipboard + notification |
 | `drop-claude` | `ALT+SHIFT+U` | Dropdown **Claude Code** terminal (guake-style, keeps its session) — the AI sibling of `ALT+U` drop-term |
-| `hypr-claude-studio` | `ALT+CTRL+U` | **Claude Studio** — a VS-Code-style workspace: expandable session tree (🟢 running · 󰑮 background · projects → conversations) in tab 0, every opened session is its own **tab** named from Claude's own title for the conversation, with a **✕ to close it**. Closing a tab ends the terminal, not the conversation — it stays resumable from the tree. Any tab **splits into panes** (`C-b |` side by side, `C-b -` stacked, or the `[|]` `[-]` buttons in the tab bar) so a session can sit next to its build log. `n` = new session, `s` = open a conversation **beside** the one you are
+| `draveniq` | `ALT+CTRL+U` | **DravenIQ Meta Harness** (ex Claude Studio, launcher alias `draveniq`) — a VS-Code-style workspace: expandable session tree (🟢 running · 󰑮 background · projects → conversations) in tab 0, every opened session is its own **tab** named from Claude's own title for the conversation, with a **✕ to close it**. Closing a tab ends the terminal, not the conversation — it stays resumable from the tree. Any tab **splits into panes** (`C-b |` side by side, `C-b -` stacked, or the `[|]` `[-]` buttons in the tab bar) so a session can sit next to its build log. `n` = new session, `s` = open a conversation **beside** the one you are
 reading, `t` = plain terminal there, `m` = the settings panel (MCP
-servers) as a tab, `x` = stop a background one. Full detail in [`docs/claude-studio.md`](docs/claude-studio.md) |
+servers) as a tab, `x` = stop a background one. Full detail in [`docs/draveniq.md`](docs/draveniq.md) |
 | `hypr-launcher claude` | Tools hub | Quick session picker — the flat filterable list version of the same data |
 | `hypr-kanban` | `ALT+CTRL+K` | **Habitica board** — six tabs, because Habitica holds several different questions: **Today** (overdue, due today, today's dailies), **To-Dos** (To do · Doing · Done), **Sprint** (Backlog · To do · Doing · Done for one ISO week), **Week** (seven day columns — drop a card on a day to set its due date), **Dailies**, **Habits** (a ＋/− you press). Tasks are cards you **drag** between columns; `d` sets a due date; `[` `]` move a card from the keyboard; `1…6` switch tabs. Two states Habitica lacks are kept as tags — `doing` and `sprint-2026-W31` — so they show on the phone and the website too, and neither is created until you move something that needs it. Keys live in `~/.config/hyprdesk/secrets.json` (0600), never in this repo |
 | `hypr-claude-office` | `ALT+CTRL+O` | **The 2D Claude office** — one pixel-art desk per live Claude session, each labelled with what that session *is*. States come from Claude's own job state, not a CPU guess; a desk that needs you is tinted and the header counts them. Clicking a desk opens that session, clicking anywhere else opens the Studio. Full detail in [`docs/claude-office.md`](docs/claude-office.md) |
@@ -57,7 +57,7 @@ python3 docs/diagrams/gen_c4.py
 | Doc | What it covers |
 |---|---|
 | [`docs/architecture.md`](docs/architecture.md) | The whole fleet: context, containers, the dock's components, and the smart-bar cycle |
-| [`docs/claude-studio.md`](docs/claude-studio.md) | Tabs, splits, and why a split button pressed on the session tree opens a terminal tab instead |
+| [`docs/draveniq.md`](docs/draveniq.md) | Tabs, splits, and why a split button pressed on the session tree opens a terminal tab instead |
 | [`docs/claude-office.md`](docs/claude-office.md) | How a desk is bound to a conversation, how "needs you" is derived, and every `office_*` key |
 | [`docs/habitica-board.md`](docs/habitica-board.md) | The tag trick behind Doing and sprints, and the request budget that shapes the board |
 
@@ -165,7 +165,7 @@ clicking it toggles nothing.
 | double-click a titlebar | maximize toggle (hyprbars; keeps waybar + gaps) |
 | `ALT+T` / `ALT+K` | reminder / keybind cheatsheet |
 | `ALT+SHIFT+U` / `ALT+SHIFT+N` / `ALT+SHIFT+I` | Claude: dropdown / selection actions / region vision |
-| `ALT+CTRL+U` / `ALT+CTRL+O` | Claude Studio (tabbed workspace) / 2D Claude office |
+| `ALT+CTRL+U` (or `ALT+CTRL+D`) / `ALT+CTRL+O` | DravenIQ Meta Harness (tabbed workspace) / 2D Claude office |
 | `ALT+SHIFT+F` / `ALT+SHIFT+Y` | focus session / audio visualizer |
 | `ALT+SHIFT+S` / `PRINT` | region screenshot |
 | `ALT+1-0`, `ALT+SHIFT+1-0` | workspace switch / move |

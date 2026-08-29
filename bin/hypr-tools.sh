@@ -479,7 +479,7 @@ main_menu() {
         *"Apps — launcher"*)     launcher apps ;;
         *"file manager"*)        thunar & ;;
         *"window switcher"*)     launcher windows ;;
-        *"Claude — Studio"*)     "$HOME/.local/bin/hypr-claude-studio" ;;
+        *"Claude — Studio"*)     "$HOME/.local/bin/draveniq" ;;
         *"quick session picker"*) launcher claude ;;
         *"Wallpaper — pick"*)    launcher wallpaper ;;
         *"Wallpaper — random"*)  wallpaper.sh ;;

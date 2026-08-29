@@ -1,10 +1,11 @@
 //! Tab 0 — the session tree, hand-rolled in ratatui. The Textual app in
-//! bin/hypr-claude-studio is the spec: everything that sidebar learned —
+//! bin/draveniq is the spec: everything that sidebar learned —
 //! first-click-aims, the q-confirm that names its stake, the 6 s
 //! signature-checked reload, cursor/expansion preservation — is contract
-//! here, not decoration (docs/claude-studio.md).
+//! here, not decoration (docs/draveniq.md).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::io::Write as _;
 use std::time::{Duration, Instant};
 
@@ -92,7 +93,7 @@ enum NodeKind {
 }
 
 #[derive(Clone, PartialEq)]
-struct OpenWin {
+pub struct OpenWin {
     idx: String,
     name: String,
     beside: String,
@@ -101,7 +102,7 @@ struct OpenWin {
     activity: bool,
 }
 
-fn open_windows() -> Vec<OpenWin> {
+pub fn open_windows() -> Vec<OpenWin> {
     super::tmux_out(&[
         "list-windows",
         "-F",
@@ -145,6 +146,43 @@ struct Confirm {
     quit_rect: Rect,
 }
 
+/// Does the file mention `needle`? Searched from the END in 1 MB chunks
+/// (with overlap) and capped at 64 MB, so a plan written a moment ago is
+/// found in the first chunk of even a 48 MB transcript, and an old plan
+/// costs at most one bounded read — this runs only when a plan file
+/// appears, never on the 6 s reload.
+fn mentions(path: &std::path::Path, needle: &str) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    const CHUNK: u64 = 1 << 20;
+    const CAP: u64 = 64 << 20;
+    let Ok(mut f) = std::fs::File::open(path) else { return false };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let nb = needle.len() as u64;
+    let floor = len.saturating_sub(CAP);
+    let mut end = len;
+    let mut buf = Vec::new();
+    while end > floor {
+        let start = end.saturating_sub(CHUNK).max(floor);
+        let want = (end - start) as usize;
+        if f.seek(SeekFrom::Start(start)).is_err() {
+            return false;
+        }
+        buf.clear();
+        buf.resize(want, 0);
+        if f.read_exact(&mut buf).is_err() {
+            return false;
+        }
+        if buf.windows(needle.len()).any(|w| w == needle.as_bytes()) {
+            return true;
+        }
+        if start == floor {
+            break;
+        }
+        end = start + nb; // overlap so a needle straddling chunks is seen
+    }
+    false
+}
+
 pub struct App {
     pal: hyprdesk::Palette,
     rows: Vec<Row>,
@@ -162,6 +200,9 @@ pub struct App {
     notify: Option<(String, Instant, bool)>, // (msg, expires, warning)
     tree_area: Rect,
     header_area: Rect,
+    plans: HashMap<String, PathBuf>, // window index -> its plan-mode plan
+    plans_dir_seen: Option<std::time::SystemTime>,
+    plans_auto_done: HashSet<(String, PathBuf)>,
     dirty: bool,
     exit: bool,
 }
@@ -188,6 +229,9 @@ impl App {
             filter_mode: false,
             confirm: None,
             notify: None,
+            plans: HashMap::new(),
+            plans_dir_seen: None,
+            plans_auto_done: HashSet::new(),
             tree_area: Rect::default(),
             header_area: Rect::default(),
             dirty: true,
@@ -204,9 +248,16 @@ impl App {
     /// every poll must do nothing — the signature check carries that.
     fn reload(&mut self, force: bool) {
         let rows = hyprdesk::session_rows();
+        self.scan_plans();
         let winsig: String = open_windows()
             .iter()
-            .map(|w| format!("{}|{}|{}{}{}|{};", w.idx, w.name, w.active as u8, w.bell as u8, w.activity as u8, w.beside))
+            .map(|w| {
+                format!(
+                    "{}|{}|{}{}{}|{}|{};",
+                    w.idx, w.name, w.active as u8, w.bell as u8, w.activity as u8, w.beside,
+                    self.plans.get(&w.idx).map(|p| p.display().to_string()).unwrap_or_default()
+                )
+            })
             .collect();
         let mut sig: Vec<(String, String, String, i32, String)> = rows
             .iter()
@@ -219,6 +270,69 @@ impl App {
         self.sig = sig;
         self.rows = rows;
         self.rebuild(true);
+    }
+
+
+    /// Which tab is a plan-mode plan for? `~/.claude/plans/` changes its
+    /// mtime when Claude creates a plan file; only then (not every reload)
+    /// do we ask tmux for the tabs' session ids and grep each transcript's
+    /// tail for the plan's file name — Claude's plan-mode text and the
+    /// Write call both carry the path. The viewer itself follows edits.
+    fn scan_plans(&mut self) {
+        let dir = hyprdesk::home().join(".claude/plans");
+        let now = std::fs::metadata(&dir).and_then(|m| m.modified()).ok();
+        if now.is_none() || now == self.plans_dir_seen {
+            return;
+        }
+        self.plans_dir_seen = now;
+        let cutoff = std::time::SystemTime::now() - Duration::from_secs(2 * 86400);
+        let mut files: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(&dir)
+            .map(|rd| {
+                rd.flatten()
+                    .filter(|e| e.path().extension().is_some_and(|x| x == "md"))
+                    .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+                    .filter(|(m, _)| *m >= cutoff)
+                    .collect()
+            })
+            .unwrap_or_default();
+        files.sort(); // oldest first: the newest mention wins
+        if files.is_empty() {
+            return;
+        }
+        let txs = hyprdesk::recent_transcripts(40);
+        let auto = hyprdesk::conf_get("studio_plan_auto", "0") == "1";
+        for (idx, sid) in super::window_sids() {
+            let tx = hyprdesk::tx_for_sid(&sid, &txs);
+            if tx.is_empty() {
+                continue;
+            }
+            for (_, f) in &files {
+                let Some(name) = f.file_name().map(|n| n.to_string_lossy().to_string()) else { continue };
+                if mentions(std::path::Path::new(&tx), &name) {
+                    let fresh = self.plans.get(&idx) != Some(f);
+                    self.plans.insert(idx.clone(), f.clone());
+                    if fresh {
+                        // voice / CLI `--open-plan` read this without the tree
+                        super::tmux(&["set-option", "-w", "-t", &format!("{}:{}", super::TMUX_SESSION, idx), "@plan", &f.display().to_string()]);
+                    }
+                    if auto && fresh && !self.plans_auto_done.contains(&(idx.clone(), f.clone())) {
+                        self.plans_auto_done.insert((idx.clone(), f.clone()));
+                        super::open_plan_pane(&idx, f);
+                    }
+                }
+            }
+        }
+    }
+
+    fn action_plan(&mut self) {
+        let Some(w) = self.nodes.get(self.cursor).and_then(|n| n.win.clone()) else {
+            self.say("P works on an open tab — plans belong to tabs", true);
+            return;
+        };
+        match self.plans.get(&w.idx).cloned() {
+            Some(f) => super::open_plan_pane(&w.idx, &f),
+            None => self.say("no plan-mode plan seen for this tab yet", true),
+        }
     }
 
     /// Flatten rows → visible nodes, keeping the shape the user arranged.
@@ -490,6 +604,16 @@ impl App {
         super::new_session_tab(&cwd, "codex");
     }
 
+    fn action_new_hermes(&mut self) {
+        let cwd = self
+            .current()
+            .map(|r| r.cwd.clone())
+            .or_else(|| self.nodes.get(self.cursor).map(|n| n.project_cwd.clone()))
+            .filter(|c| !c.is_empty())
+            .unwrap_or_else(|| hyprdesk::home().display().to_string());
+        super::new_session_tab(&cwd, "hermes");
+    }
+
     fn action_beside(&mut self) {
         let Some(row) = self.current().cloned() else {
             self.say("Highlight a conversation to open it beside the one you are reading", false);
@@ -691,9 +815,11 @@ impl App {
             }
             KeyCode::Char('n') => self.action_new(),
             KeyCode::Char('N') => self.action_new_codex(),
+            KeyCode::Char('H') => self.action_new_hermes(),
+            KeyCode::Char('P') => self.action_plan(),
             KeyCode::Char('s') => self.action_beside(),
             KeyCode::Char('t') => self.action_term(),
-            KeyCode::Char('m') => super::open_settings_tab("integrations"),
+            KeyCode::Char('m') => super::open_settings_tab("claude"),
             KeyCode::Char('x') => self.action_kill_bg(),
             KeyCode::Char('r') => self.reload(true),
             KeyCode::Char('w') => self.toggle_width(),
@@ -894,6 +1020,9 @@ impl App {
                             Style::default().fg(col(pal.sub)),
                         ));
                     }
+                    if self.plans.contains_key(&w.idx) {
+                        spans.push(Span::styled("  󰈙", Style::default().fg(col(pal.accent2))));
+                    }
                     if !w.active {
                         if w.bell {
                             spans.push(Span::styled("  ●", Style::default().fg(col(pal.good))));
@@ -929,9 +1058,9 @@ impl App {
                     match r.kind.as_str() {
                         "run" => {
                             spans.push(Span::styled("●  ", Style::default().fg(col(pal.good))));
-                            if r.agent == "codex" {
+                            if r.agent == "codex" || r.agent == "hermes" {
                                 spans.push(Span::styled(
-                                    format!("{} ", super::CODEX_GLYPH),
+                                    format!("{} ", if r.agent == "codex" { super::CODEX_GLYPH } else { super::HERMES_GLYPH }),
                                     Style::default().fg(col(pal.sub)),
                                 ));
                             }
@@ -959,9 +1088,9 @@ impl App {
                                 format!("󰥔 {age:<4} "),
                                 Style::default().fg(col(pal.sub)),
                             ));
-                            if r.agent == "codex" {
+                            if r.agent == "codex" || r.agent == "hermes" {
                                 spans.push(Span::styled(
-                                    format!("{} ", super::CODEX_GLYPH),
+                                    format!("{} ", if r.agent == "codex" { super::CODEX_GLYPH } else { super::HERMES_GLYPH }),
                                     Style::default().fg(col(pal.sub)),
                                 ));
                             }
@@ -1011,7 +1140,7 @@ impl App {
                 lines.push(Line::from(""));
             } else {
                 lines.push(Line::from(
-                    [key("↵", "open"), key("s", "beside"), key("n", "new"), key("N", "codex")].concat(),
+                    [key("↵", "open"), key("s", "beside"), key("n", "new"), key("N", "codex"), key("H", "hermes")].concat(),
                 ));
                 lines.push(Line::from(
                     [key("t", "term"), key("w", "wide"), key("q", "quit")].concat(),
@@ -1038,6 +1167,7 @@ impl App {
                     ("s", "beside"),
                     ("n", "new"),
                     ("N", "codex"),
+                    ("H", "hermes"),
                     ("t", "term"),
                     ("m", "mcp"),
                     ("p", "pin"),
@@ -1158,12 +1288,22 @@ pub fn run() {
         super::rename_open_tabs();
     }
     let my_pane = std::env::var("TMUX_PANE").unwrap_or_default();
-    let window_active = |pane: &str| -> bool {
+    // one fork at birth, then "am I on screen?" is a file read: the hooks
+    // write the active window index (see main::note_active); tmux is only
+    // asked again every 20 s to reconcile a hook that never fired
+    let my_idx = if my_pane.is_empty() {
+        String::new()
+    } else {
+        super::tmux_out(&["display-message", "-p", "-t", &my_pane, "#{window_index}"]).trim().to_string()
+    };
+    let active_file = super::active_file();
+    let window_active_tmux = |pane: &str| -> bool {
         pane.is_empty()
             || super::tmux_out(&["display-message", "-p", "-t", pane, "#{window_active}"])
                 .trim()
                 == "1"
     };
+    let mut file_seen: Option<std::time::SystemTime> = None;
 
     let mut stdout = std::io::stdout();
     let _ = crossterm::terminal::enable_raw_mode();
@@ -1180,6 +1320,7 @@ pub fn run() {
     let mut last_reload = Instant::now();
     let mut last_rename = Instant::now();
     let mut last_active_check = Instant::now();
+    let mut last_reconcile = Instant::now();
     let mut active = true;
 
     loop {
@@ -1198,10 +1339,20 @@ pub fn run() {
         let now = Instant::now();
         // only the VISIBLE tree polls the world — with one instance per
         // window, N instances all polling would multiply the cost
-        if now.duration_since(last_active_check) >= Duration::from_secs(2) {
+        if now.duration_since(last_active_check) >= Duration::from_millis(500) {
             last_active_check = now;
             let was = active;
-            active = window_active(&my_pane);
+            let mtime = std::fs::metadata(&active_file).and_then(|m| m.modified()).ok();
+            let reconcile = now.duration_since(last_reconcile) >= Duration::from_secs(20);
+            if my_idx.is_empty() || mtime.is_none() || reconcile {
+                last_reconcile = now;
+                active = window_active_tmux(&my_pane);
+            } else if mtime != file_seen {
+                file_seen = mtime;
+                active = std::fs::read_to_string(&active_file)
+                    .map(|s| s.trim() == my_idx)
+                    .unwrap_or(active);
+            }
             if active && !was {
                 app.reload(false); // catch up the moment we come on screen
                 last_reload = now;

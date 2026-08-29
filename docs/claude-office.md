@@ -245,7 +245,7 @@ the bare command, which would *close* the office you just clicked to see.
 ## Related
 
 - [`architecture.md`](architecture.md) — the fleet as a whole
-- `bin/hypr-claude-studio` — tabbed session workspace (**ALT+CTRL+U**)
+- `bin/draveniq` — tabbed session workspace (**ALT+CTRL+U**)
 - `lib/hyprdesk/claudesessions.py` — shared session discovery
 
 ## The design-handoff floor (Aug 2026)

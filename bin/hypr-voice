@@ -1,0 +1,367 @@
+#!/bin/sh
+''''exec "$HOME/.local/share/hyprdesk/voice-venv/bin/python" "$0" "$@" # '''
+"""hypr-voice — the ear of DravenIQ Meta Harness.
+
+Always-on wake word ("Hey Draven"; the pretrained "hey jarvis" until a
+custom model is dropped in), then one spoken command, transcribed offline
+and matched against the grammar in hyprdesk/voice_intents.py. Nothing here
+talks to a network.
+
+Cost discipline (measured, see docs/perf/voice-baseline.md):
+- the wake model runs on 160 ms chunks in ONE onnxruntime thread;
+- whisper (≈480 MB resident) lives in a CHILD process that exits after
+  5 min without a command, so idle RAM is the wake model only;
+- the mic stream is pw-record piped to us — no PortAudio, no callbacks.
+
+Modes:  (none)        daemon
+        --test [SECS] print the wake score for SECS seconds, no actions
+        --say TEXT    run TEXT through the grammar and execute (no audio)
+        --transcriber internal: whisper worker (stdin: wav path per line)
+"""
+import os
+import re
+import subprocess
+import sys
+import threading
+import time
+import wave
+from pathlib import Path
+
+HOME = Path.home()
+CONF = HOME / ".config/conky/widgets.conf"
+VOICE_DIR = HOME / ".local/share/hyprdesk/voice"
+CUSTOM_MODEL = VOICE_DIR / "hey_draven.onnx"
+STUDIO = HOME / ".local/bin/draveniq"
+SETTINGS = HOME / ".local/bin/hypr-settings"
+TMUX = ["tmux", "-L", "draveniq"]
+SESSION = "draveniq"
+RATE = 16000
+FRAME = 1280            # 80 ms, what openWakeWord expects
+CHUNK = FRAME * int(os.environ.get("HYPR_VOICE_FRAMES", "2"))  # inference every 160 ms by default
+TONE = "/usr/share/sounds/freedesktop/stereo/message.oga"
+
+sys.path.insert(0, str(HOME / ".local/lib"))
+from hyprdesk.voice_intents import parse  # noqa: E402
+
+
+# ---------------------------------------------------------------- config
+def conf():
+    out = {}
+    try:
+        for line in CONF.read_text().splitlines():
+            m = re.match(r"^(\w+)\s*=\s*(\S+)", line)
+            if m:
+                out[m.group(1)] = m.group(2)
+    except OSError:
+        pass
+    return out
+
+
+def cfg(key, default):
+    return conf().get(key, default)
+
+
+def log(*a):
+    print(time.strftime("%H:%M:%S"), *a, flush=True)
+
+
+# ---------------------------------------------------------------- feedback
+def toast(title, body="", ms=2500):
+    subprocess.Popen(["notify-send", "-a", "DravenIQ", "-t", str(ms), title, body],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def tone():
+    if os.path.exists(TONE):
+        subprocess.Popen(["pw-play", TONE], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+_voice_timer = None
+
+
+def status(text, clear_after=4.0):
+    """Tab-bar slot: `#{?@voice, 󰍬 #{@voice},}` in the studio's status line."""
+    global _voice_timer
+    subprocess.run(TMUX + ["set", "-g", "@voice", text], capture_output=True)
+    if _voice_timer:
+        _voice_timer.cancel()
+    if clear_after:
+        _voice_timer = threading.Timer(clear_after, lambda: subprocess.run(
+            TMUX + ["set", "-gu", "@voice"], capture_output=True))
+        _voice_timer.daemon = True
+        _voice_timer.start()
+
+
+# ---------------------------------------------------------------- actions
+def tmux_out(*args):
+    r = subprocess.run(TMUX + list(args), capture_output=True, text=True)
+    return r.stdout.strip()
+
+
+def studio_alive():
+    return subprocess.run(TMUX + ["has-session", "-t", SESSION], capture_output=True).returncode == 0
+
+
+def active_cwd():
+    return tmux_out("display-message", "-p", "-t", SESSION + ":", "#{pane_current_path}") or str(HOME)
+
+
+def execute(actions):
+    for verb, payload in actions:
+        if verb == "focus":
+            subprocess.Popen([str(STUDIO)], start_new_session=True)
+            toast("DravenIQ", "here")
+        elif verb == "new_tab":
+            n, agent = payload["n"], payload["agent"]
+            if not studio_alive():
+                subprocess.Popen([str(STUDIO)], start_new_session=True)
+                time.sleep(1.5)
+            cwd = active_cwd()
+            for _ in range(n):
+                subprocess.run([str(STUDIO), "--new-tab", "--agent", agent, "--cwd", cwd])
+            toast("DravenIQ", f"opened {n} {agent} tab{'s' if n > 1 else ''}")
+        elif verb == "open_plan":
+            r = subprocess.run([str(STUDIO), "--open-plan"], capture_output=True, text=True)
+            toast("DravenIQ", (r.stdout or r.stderr).strip() or "plan")
+        elif verb == "close_tab":
+            idx = tmux_out("display-message", "-p", "-t", SESSION + ":", "#{window_index}")
+            if idx:
+                subprocess.run([str(STUDIO), "--close-tab", idx])
+                toast("DravenIQ", f"closed tab {idx}")
+        elif verb == "select_tab":
+            subprocess.run(TMUX + ["select-window", "-t", SESSION + (":+" if payload == "next" else ":-")])
+        elif verb == "settings":
+            subprocess.Popen([str(SETTINGS), "claude"], start_new_session=True)
+        elif verb == "hide":
+            subprocess.run(["hyprctl", "dispatch", "movetoworkspacesilent",
+                            "special:hidden,class:draveniq"], capture_output=True)
+        elif verb == "enter":
+            subprocess.run(TMUX + ["send-keys", "-t", SESSION + ":", "Enter"])
+        elif verb == "dictate":
+            # -l = literal; NO Enter — the user reads it, then says "send"
+            subprocess.run(TMUX + ["send-keys", "-t", SESSION + ":", "-l", payload])
+            toast("typed", payload, 4000)
+        elif verb == "unknown":
+            toast("didn't catch that", payload, 3000)
+        # pause/listen are handled by the daemon loop
+
+
+# ---------------------------------------------------------------- audio
+def mic_cmd():
+    cmd = ["pw-record", "--rate", str(RATE), "--channels", "1", "--format", "s16",
+           "--latency", os.environ.get("HYPR_VOICE_LATENCY", "160ms")]  # fewer, bigger pipe reads
+    src = cfg("voice_source", "")
+    if src:
+        cmd += ["--target", src]
+    return cmd + ["-"]
+
+
+def rms(a):
+    import numpy as np
+    return float(np.sqrt(np.mean(a.astype(np.float32) ** 2))) if len(a) else 0.0
+
+
+class Transcriber:
+    """whisper in a child process; exits after IDLE seconds unused."""
+    IDLE = 300
+
+    def __init__(self):
+        self.proc = None
+        self.lock = threading.Lock()
+
+    def _spawn(self):
+        self.proc = subprocess.Popen([sys.executable, __file__, "--transcriber"],
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+                                     bufsize=1)
+
+    def transcribe(self, wav):
+        with self.lock:
+            if self.proc is None or self.proc.poll() is not None:
+                self._spawn()
+            try:
+                self.proc.stdin.write(wav + "\n")
+                self.proc.stdin.flush()
+                return self.proc.stdout.readline().strip()
+            except (BrokenPipeError, OSError):
+                self.proc = None
+                return ""
+
+
+def transcriber_main():
+    """Child: load whisper once, answer 'path' lines with text lines."""
+    import select
+    from faster_whisper import WhisperModel
+    lang = cfg("voice_lang", "en")
+    name = "base.en" if lang == "en" else "base"
+    model = WhisperModel(name, device="cpu", compute_type="int8", cpu_threads=2)
+    while True:
+        r, _, _ = select.select([sys.stdin], [], [], Transcriber.IDLE)
+        if not r:
+            return  # idle: free the ~480 MB
+        line = sys.stdin.readline()
+        if not line:
+            return
+        try:
+            segs, _ = model.transcribe(line.strip(), beam_size=1, language=lang,
+                                       vad_filter=True, condition_on_previous_text=False)
+            text = " ".join(s.text for s in segs).strip()
+        except Exception as e:  # noqa: BLE001 — never kill the ear
+            text = ""
+            print("ERR", e, file=sys.stderr, flush=True)
+        print(text, flush=True)
+
+
+def load_wake_model():
+    import onnxruntime as ort
+    ort.set_default_logger_severity(3)
+    # openWakeWord 0.4 builds its sessions with default options: a thread
+    # pool that SPIN-WAITS between our 160 ms chunks (7 % of a core doing
+    # nothing, measured). One intra-op thread, no spinning: real inference
+    # cost only.
+    _Sess = ort.InferenceSession
+
+    class _QuietSession(_Sess):
+        def __init__(self, path, sess_options=None, **kw):
+            if sess_options is None:
+                sess_options = ort.SessionOptions()
+            sess_options.intra_op_num_threads = 1
+            sess_options.inter_op_num_threads = 1
+            sess_options.add_session_config_entry("session.intra_op.allow_spinning", "0")
+            super().__init__(path, sess_options=sess_options, **kw)
+
+    ort.InferenceSession = _QuietSession
+    from openwakeword.model import Model
+    import openwakeword
+    if CUSTOM_MODEL.exists():
+        path, name = str(CUSTOM_MODEL), "hey_draven"
+    else:
+        path = os.path.join(os.path.dirname(openwakeword.__file__), "resources/models/hey_jarvis_v0.1.onnx")
+        name = "hey_jarvis"
+    return Model(wakeword_model_paths=[path], ncpu=1), name
+
+
+def capture_command(stream, floor, max_s=8.0, silence_s=0.9, start_timeout=3.0):
+    """Read frames after the wake word until the speaker pauses."""
+    import numpy as np
+    frames, spoke, quiet, t0 = [], False, 0.0, time.time()
+    thresh = max(floor * 2.5, 300.0)
+    while time.time() - t0 < max_s:
+        buf = stream.read(FRAME * 2)
+        if len(buf) < FRAME * 2:
+            break
+        a = np.frombuffer(buf, dtype=np.int16)
+        frames.append(a)
+        loud = rms(a) > thresh
+        if loud:
+            spoke, quiet = True, 0.0
+        elif spoke:
+            quiet += FRAME / RATE
+            if quiet >= silence_s:
+                break
+        elif time.time() - t0 > start_timeout:
+            return None  # nothing said
+    if not spoke:
+        return None
+    audio = np.concatenate(frames)
+    VOICE_DIR.mkdir(parents=True, exist_ok=True)
+    wav = VOICE_DIR / "last-command.wav"
+    with wave.open(str(wav), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(RATE)
+        w.writeframes(audio.tobytes())
+    return str(wav)
+
+
+def daemon(test_seconds=None):
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    import numpy as np
+    model, name = load_wake_model()
+    threshold = float(cfg("voice_threshold", "0.6"))
+    log(f"wake model {name} threshold {threshold} chunk {CHUNK / RATE * 1000:.0f} ms")
+    mic = subprocess.Popen(mic_cmd(), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    stream = mic.stdout
+    tx = Transcriber()
+    paused = False
+    hits, last_wake, t_start = 0, 0.0, time.time()
+    recent = []  # rms history for the noise floor
+    peak, last_report = 0.0, time.time()
+    cpu0, t_start = time.process_time(), time.time()  # steady state, after model load
+    while True:
+        buf = stream.read(CHUNK * 2)
+        if len(buf) < CHUNK * 2:
+            log("mic stream ended — restarting pw-record")
+            mic.kill()
+            time.sleep(1)
+            mic = subprocess.Popen(mic_cmd(), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            stream = mic.stdout
+            continue
+        a = np.frombuffer(buf, dtype=np.int16)
+        recent.append(rms(a))
+        del recent[:-12]
+        score = max(model.predict(a).values())
+        if test_seconds is not None:
+            peak = max(peak, score)
+            if time.time() - last_report >= 1.0:
+                print(f"score {score:.3f}  peak {peak:.3f}  rms {recent[-1]:.0f}", flush=True)
+                last_report = time.time()
+            if time.time() - t_start >= test_seconds:
+                mic.kill()
+                import resource
+                el = time.time() - t_start
+                print(f"cpu {(time.process_time() - cpu0) / el * 100:.1f}% of one core over {el:.0f}s (steady state), "
+                      f"maxrss {resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024} MB, peak score {peak:.3f}", flush=True)
+                return
+            continue
+        hits = hits + 1 if score >= threshold else 0
+        if hits < 2 or time.time() - last_wake < 2.0:
+            continue
+        hits, last_wake = 0, time.time()
+        model.reset()
+        if paused:
+            # only "listen" / "wake up" gets through
+            wav = capture_command(stream, sorted(recent)[len(recent) // 2])
+            text = tx.transcribe(wav) if wav else ""
+            if any(v == "listen" for v, _ in parse(text)):
+                paused = False
+                toast("DravenIQ", "listening again")
+                status("on")
+            continue
+        tone()
+        status("listening…", clear_after=0)
+        toast("Draven", "listening…", 1500)
+        wav = capture_command(stream, sorted(recent)[len(recent) // 2])
+        if not wav:
+            status("")
+            continue
+        t = time.time()
+        text = tx.transcribe(wav)
+        log(f"heard {text!r} ({time.time() - t:.1f}s)")
+        status(f"heard: {text[:40]}" if text else "?")
+        actions = parse(text)
+        if any(v == "pause" for v, _ in actions):
+            paused = True
+            toast("DravenIQ", "paused — say “Draven, listen” to resume")
+            status("paused", clear_after=0)
+            continue
+        execute(actions)
+        model.reset()
+
+
+def main():
+    args = sys.argv[1:]
+    if args[:1] == ["--transcriber"]:
+        transcriber_main()
+    elif args[:1] == ["--test"]:
+        daemon(test_seconds=float(args[1]) if len(args) > 1 else 10.0)
+    elif args[:1] == ["--say"]:
+        text = " ".join(args[1:])
+        actions = parse(text)
+        print(actions)
+        execute(actions)
+    else:
+        daemon()
+
+
+if __name__ == "__main__":
+    main()
