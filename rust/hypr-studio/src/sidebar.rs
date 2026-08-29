@@ -92,7 +92,7 @@ enum NodeKind {
 }
 
 #[derive(Clone, PartialEq)]
-struct OpenWin {
+pub struct OpenWin {
     idx: String,
     name: String,
     beside: String,
@@ -101,7 +101,7 @@ struct OpenWin {
     activity: bool,
 }
 
-fn open_windows() -> Vec<OpenWin> {
+pub fn open_windows() -> Vec<OpenWin> {
     super::tmux_out(&[
         "list-windows",
         "-F",
@@ -1158,12 +1158,22 @@ pub fn run() {
         super::rename_open_tabs();
     }
     let my_pane = std::env::var("TMUX_PANE").unwrap_or_default();
-    let window_active = |pane: &str| -> bool {
+    // one fork at birth, then "am I on screen?" is a file read: the hooks
+    // write the active window index (see main::note_active); tmux is only
+    // asked again every 20 s to reconcile a hook that never fired
+    let my_idx = if my_pane.is_empty() {
+        String::new()
+    } else {
+        super::tmux_out(&["display-message", "-p", "-t", &my_pane, "#{window_index}"]).trim().to_string()
+    };
+    let active_file = super::active_file();
+    let window_active_tmux = |pane: &str| -> bool {
         pane.is_empty()
             || super::tmux_out(&["display-message", "-p", "-t", pane, "#{window_active}"])
                 .trim()
                 == "1"
     };
+    let mut file_seen: Option<std::time::SystemTime> = None;
 
     let mut stdout = std::io::stdout();
     let _ = crossterm::terminal::enable_raw_mode();
@@ -1180,6 +1190,7 @@ pub fn run() {
     let mut last_reload = Instant::now();
     let mut last_rename = Instant::now();
     let mut last_active_check = Instant::now();
+    let mut last_reconcile = Instant::now();
     let mut active = true;
 
     loop {
@@ -1198,10 +1209,20 @@ pub fn run() {
         let now = Instant::now();
         // only the VISIBLE tree polls the world — with one instance per
         // window, N instances all polling would multiply the cost
-        if now.duration_since(last_active_check) >= Duration::from_secs(2) {
+        if now.duration_since(last_active_check) >= Duration::from_millis(500) {
             last_active_check = now;
             let was = active;
-            active = window_active(&my_pane);
+            let mtime = std::fs::metadata(&active_file).and_then(|m| m.modified()).ok();
+            let reconcile = now.duration_since(last_reconcile) >= Duration::from_secs(20);
+            if my_idx.is_empty() || mtime.is_none() || reconcile {
+                last_reconcile = now;
+                active = window_active_tmux(&my_pane);
+            } else if mtime != file_seen {
+                file_seen = mtime;
+                active = std::fs::read_to_string(&active_file)
+                    .map(|s| s.trim() == my_idx)
+                    .unwrap_or(active);
+            }
             if active && !was {
                 app.reload(false); // catch up the moment we come on screen
                 last_reload = now;

@@ -17,7 +17,7 @@ mod theme;
 
 pub use conf::{conf_all, conf_get, conf_set};
 pub use sessions::{
-    active_subagents, ago, claude_procs, codex_meta, codex_procs, codex_sid, codex_tx_for_sid,
+    active_subagents, ago, claude_procs, codex_meta, daemon_hosted, WindowMap, codex_procs, codex_sid, codex_tx_for_sid,
     recent_codex_transcripts, job_state, recent_transcripts, session_meta,
     session_rows, session_title, sid_key, window_of_pid, ClaudeProc, JobState, Row,
 };
