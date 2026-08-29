@@ -4,6 +4,20 @@ All notable changes to this desktop. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## v1.8.0 — the Claude page (2026-08-29)
+
+- **Hypr Settings → Claude page** (new sidebar entry 󰚩): Skills card lists every
+  `~/.claude/skills/*` and repo `claude/skills/*` skill (1 KB head read each),
+  `/`-style filter, 󰏫 opens SKILL.md in nvim, ⏻ disables by renaming the folder
+  to `name.disabled`, ＋ scaffolds a new skill from a frontmatter template.
+- Environment card edits the `env` object of `~/.claude/settings.json`
+  (secret-looking keys masked) through the new atomic
+  `hyprdesk.confwrite.json_set` (flock + tmp + replace + one-deep `.undo`,
+  corrupt file never overwritten); shows model/effort/hooks/plugins summary.
+- MCP servers card moved from Integrations to the Claude page (unchanged).
+- Sessions card: projects / transcripts / size / oldest, Open Claude Studio.
+- `hypr-settings claude` opens straight on the page.
+
 ## [Unreleased]
 
 ## [1.7.0] — 2026-08-24

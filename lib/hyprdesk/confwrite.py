@@ -11,8 +11,10 @@ that want a true "session" snapshot (e.g. arrange-commit undo) should
 batch all their changes into a single conf_set() call.
 """
 import fcntl
+import json
 import os
 import re
+from pathlib import Path
 
 from .theme import WIDGETS_CONF
 
@@ -128,3 +130,31 @@ def restore(tag):
         TMP.write_text(text)
         os.replace(TMP, WIDGETS_CONF)
     return True
+
+
+def json_set(path, mutate):
+    """Atomically rewrite a JSON file: ``mutate(obj)`` edits it in place.
+
+    Same contract as conf_set — flock on ``<path>.lock``, temp + os.replace,
+    previous content kept one-deep in ``<path>.undo``. Used for
+    ~/.claude/settings.json, which Claude Code itself also rewrites; an
+    unreadable file is NOT overwritten (the corrupt-read rule), the caller
+    gets the exception instead.
+    """
+    path = Path(path)
+    lock = path.with_name(path.name + ".lock")
+    tmp = path.with_name(path.name + ".tmp")
+    undo = path.with_name(path.name + ".undo")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock, "w") as lockf:
+        fcntl.flock(lockf, fcntl.LOCK_EX)
+        original = path.read_text() if path.exists() else ""
+        obj = json.loads(original) if original.strip() else {}
+        mutate(obj)
+        text = json.dumps(obj, indent=2, ensure_ascii=False) + "\n"
+        if text != original:
+            if original:
+                undo.write_text(original)
+            tmp.write_text(text)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, path)

@@ -31,6 +31,7 @@ from textual.widgets import (Button, ContentSwitcher, Footer, Input, Label,
 
 sys.path.insert(0, str(Path.home() / ".local/lib"))
 from hyprdesk.confwrite import conf_set as _conf_set   # atomic writer
+from hyprdesk.confwrite import json_set as _json_set
 
 HOME = Path.home()
 CONF = HOME / ".config/hypr/hyprland.conf"
@@ -66,6 +67,7 @@ NAV = [
     ("network",    "󰤨", "Network"),
     ("security",   "󰕥", "Security"),
     ("integrations", "󰌘", "Integrations"),
+    ("claude",     "󰚩", "Claude"),
     ("power",      "⏻", "Power"),
 ]
 
@@ -276,6 +278,133 @@ def mcp_list():
         out.append((name, m.group("target").strip(), state,
                     m.group("note").strip(), name.startswith("claude.ai")))
     return out
+
+
+
+# ---------- Claude Code: skills, env, sessions ----------
+CLAUDE_HOME = HOME / ".claude"
+CLAUDE_SETTINGS = CLAUDE_HOME / "settings.json"
+# (label, dir) — personal skills, then the ones this repo ships
+SKILL_SOURCES = [("personal", CLAUDE_HOME / "skills"),
+                 ("repo", HOME / "hyprland-dots/claude/skills")]
+SECRET_KEY_RE = re.compile(r"KEY|TOKEN|SECRET|PASS|CREDENTIAL", re.I)
+DISABLED = ".disabled"
+
+
+def skill_list():
+    """[(name, source, description, enabled, path)] — one row per skill dir.
+
+    Only the first 1 KB of each SKILL.md is read (frontmatter lives there);
+    27 personal skills must not cost 27 full file reads on every page show.
+    A dir renamed to ``<name>.disabled`` is invisible to Claude Code, which
+    only loads dirs whose SKILL.md sits at ``skills/<name>/SKILL.md``.
+    """
+    rows = []
+    for src, base in SKILL_SOURCES:
+        if not base.is_dir():
+            continue
+        for d in sorted(base.iterdir()):
+            if not d.is_dir():
+                continue
+            md = d / "SKILL.md"
+            if not md.is_file():
+                continue
+            enabled = not d.name.endswith(DISABLED)
+            name = d.name.removesuffix(DISABLED)
+            desc = ""
+            try:
+                with open(md, encoding="utf-8", errors="replace") as fh:
+                    head = fh.read(1024)
+                m = re.search(r"^description:\s*(.+)$", head, re.M)
+                if m:
+                    desc = m.group(1).strip().strip("\"'")
+            except OSError:
+                desc = "(unreadable)"
+            rows.append((name, src, desc, enabled, d))
+    return rows
+
+
+def skill_toggle(path):
+    """Enable/disable by renaming the dir; returns the new path."""
+    p = Path(path)
+    new = p.with_name(p.name.removesuffix(DISABLED)) if p.name.endswith(DISABLED) \
+        else p.with_name(p.name + DISABLED)
+    if new.exists():
+        raise FileExistsError(new.name)
+    p.rename(new)
+    return new
+
+
+SKILL_TEMPLATE = """---
+name: {name}
+description: TODO one line — what it does and WHEN to use it (this line is the trigger).
+---
+
+# {name}
+
+## When to use
+
+## Steps
+
+## Traps
+"""
+
+
+def skill_new(name):
+    d = SKILL_SOURCES[0][1] / name
+    if d.exists():
+        raise FileExistsError(name)
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text(SKILL_TEMPLATE.format(name=name))
+    return d / "SKILL.md"
+
+
+def claude_settings():
+    try:
+        return json.loads(CLAUDE_SETTINGS.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def claude_env_set(key, value=None, delete=False):
+    def mutate(obj):
+        env = obj.setdefault("env", {})
+        if delete:
+            env.pop(key, None)
+        else:
+            env[key] = value
+        if not env:
+            obj.pop("env", None)
+    _json_set(CLAUDE_SETTINGS, mutate)
+
+
+def session_stats():
+    """(projects, transcripts, total bytes, oldest mtime) of ~/.claude/projects."""
+    base = CLAUDE_HOME / "projects"
+    n_proj = n_tr = size = 0
+    oldest = None
+    if base.is_dir():
+        for proj in base.iterdir():
+            if not proj.is_dir():
+                continue
+            n_proj += 1
+            for f in proj.glob("*.jsonl"):
+                try:
+                    st = f.stat()
+                except OSError:
+                    continue
+                n_tr += 1
+                size += st.st_size
+                oldest = st.st_mtime if oldest is None else min(oldest, st.st_mtime)
+    return n_proj, n_tr, size, oldest
+
+
+def human(n):
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{n:.0f} {unit}"
+        n /= 1024
+    return f"{n:.1f} TB"
 
 
 def hyprctl_get(option, default):
@@ -612,6 +741,9 @@ class HyprSettings(App):
             color: {C['accent']}; text-style: bold; }}
     .hint {{ color: {C['subtext']}; }}
     .mcprow {{ width: 1fr; }}
+    .skrow, .envrow {{ width: 1fr; }}
+    #sk_rows, #env_rows {{ height: auto; }}
+    #sk_rows .row, #env_rows .row {{ height: auto; }}
     #mcp_rows {{ height: auto; }}
     #mcp_rows .row {{ height: auto; }}
     .status {{ padding: 0 0 1 0; }}
@@ -909,6 +1041,43 @@ class HyprSettings(App):
                 "~/.config/hyprdesk/secrets.json (0600) — never to "
                 "widgets.conf, which is in a public repo.",
                 classes="hint")
+
+    def _build_claude(self):
+        """Claude Code's home in Settings: skills, env, MCP, sessions.
+        Every list here is rebuilt by its own refresh on page entry —
+        nothing spawns a process except the MCP health check."""
+        with Card("Skills · ~/.claude/skills + this repo"):
+            yield Static("", id="sk_status", classes="status")
+            with Horizontal(classes="row"):
+                yield Label("Filter")
+                yield Input(placeholder="type to filter by name or description",
+                            id="sk_filter")
+            yield Vertical(id="sk_rows")
+            with Horizontal(classes="row"):
+                yield Label("New skill")
+                yield Input(placeholder="kebab-case-name", id="sk_new_name")
+                yield Button("＋ Create", id="sk_new", variant="primary")
+            yield Static(
+                "󰏫 opens SKILL.md in nvim · ⏻ disables by renaming the "
+                "folder to name.disabled (Claude Code only loads "
+                "skills/<name>/SKILL.md) — takes effect in the NEXT "
+                "session. Plugin skills (loop-*) live in the same "
+                "folder and toggle the same way.", classes="hint")
+        with Card("Environment · settings.json → env"):
+            yield Static("", id="env_status", classes="status")
+            yield Vertical(id="env_rows")
+            with Horizontal(classes="row"):
+                yield Label("Key")
+                yield Input(placeholder="e.g. ANTHROPIC_MODEL", id="env_key")
+            with Horizontal(classes="row"):
+                yield Label("Value")
+                yield Input(placeholder="kept hidden if the key looks secret",
+                            password=True, id="env_val")
+                yield Button("󰅌", id="env_paste", classes="small")
+            with Horizontal(classes="row"):
+                yield Button("󰄬 Set", id="env_add", variant="primary")
+                yield Button("󰏫 Open settings.json", id="env_open")
+            yield Static("", id="env_info", classes="hint")
         with Card("MCP servers · Claude Code"):
             yield Static("", id="mcp_status", classes="status")
             yield Vertical(id="mcp_rows")
@@ -932,6 +1101,13 @@ class HyprSettings(App):
                 "~/.claude.json) get a ✕. An https:// target is "
                 "added as HTTP transport; anything else runs as "
                 "a stdio command.", classes="hint")
+
+        with Card("Sessions · ~/.claude/projects"):
+            yield Static("", id="cs_status", classes="status")
+            with Horizontal(classes="row"):
+                yield Button("󰚩 Open Claude Studio", id="cs_studio",
+                             variant="primary")
+                yield Button("󰑓 Recount", id="cs_refresh")
 
     def _build_network(self):
         """Body of the network pane, built on first show. Every nmcli call
@@ -1088,6 +1264,10 @@ class HyprSettings(App):
             self.refresh_network()                   # cached scan, threaded
         elif pane == "pane-integrations":
             self._hb_refresh()                       # local file, instant
+        elif pane == "pane-claude":
+            self._sk_refresh()                       # 1 KB per skill
+            self._env_refresh()                      # one json read
+            self._cs_refresh()                       # stat() walk, threaded
             # health is only worth re-checking if it could have changed
             if time.time() - self._mcp_at > MCP_MAX_AGE:
                 self.run_worker(self._mcp_refresh(), group="mcp",
@@ -1510,6 +1690,97 @@ class HyprSettings(App):
             "saved — type a new one to replace it"
         self._hb_msg(f"saved — connected as {name}", good=True)
 
+    # ---------- Claude: skills ----------
+    _sk_filter = ""
+
+    def _sk_refresh(self):
+        try:
+            box = self.query_one("#sk_rows", Vertical)
+        except Exception:
+            return
+        rows = skill_list()
+        q = self._sk_filter.lower()
+        shown = [r for r in rows if not q or q in r[0].lower() or q in r[2].lower()]
+        self._sk_paths = {}
+        box.remove_children()
+        for i, (name, src, desc, enabled, path) in enumerate(shown):
+            self._sk_paths[i] = path
+            ink = C["green"] if enabled else C["subtext"]
+            line = (f"[{ink}]{'●' if enabled else '○'}[/] "
+                    f"[{C['text'] if enabled else C['subtext']}]{_esc(_col(name, 20))}[/] "
+                    f"[{C['subtext']}]{_col(src, 9)}{_esc(_col(desc, 42))}[/]")
+            box.mount(Horizontal(
+                Static(line, classes="skrow"),
+                Button("󰏫", id=f"sk_edit_{i}", classes="small"),
+                Button("⏻", id=f"sk_tog_{i}", classes="small"),
+                classes="row"))
+        on = sum(1 for r in rows if r[3])
+        msg = f"{len(rows)} skills — {on} enabled, {len(rows) - on} disabled"
+        if q:
+            msg += f" · {len(shown)} match"
+        self.query_one("#sk_status", Static).update(f"[{C['subtext']}]{msg}[/]")
+
+    def on_input_changed(self, event: Input.Changed):
+        if (event.input.id or "") == "sk_filter":
+            self._sk_filter = event.value.strip()
+            self._sk_refresh()
+
+    # ---------- Claude: env ----------
+    def _env_msg(self, text, bad=False, good=False):
+        col = C["red"] if bad else (C["green"] if good else C["subtext"])
+        try:
+            self.query_one("#env_status", Static).update(f"[{col}]{text}[/]")
+        except Exception:
+            pass
+
+    def _env_refresh(self):
+        try:
+            box = self.query_one("#env_rows", Vertical)
+        except Exception:
+            return
+        cfg = claude_settings()
+        env = cfg.get("env", {}) or {}
+        self._env_keys = {}
+        box.remove_children()
+        for i, key in enumerate(sorted(env)):
+            self._env_keys[i] = key
+            val = str(env[key])
+            shown = ("•" * min(len(val), 12)) if SECRET_KEY_RE.search(key) else val
+            line = (f"[{C['text']}]{_esc(_col(key, 30))}[/] "
+                    f"[{C['subtext']}]{_esc(_col(shown, 50))}[/]")
+            box.mount(Horizontal(Static(line, classes="envrow"),
+                                 Button("✕", id=f"env_rm_{i}", classes="small"),
+                                 classes="row"))
+        self._env_msg(f"{len(env)} variable(s) passed to every Claude Code "
+                      "process — new sessions only")
+        hooks = sum(len(v) for v in (cfg.get("hooks") or {}).values())
+        plugins = [p.split("@")[0] for p, on in
+                   (cfg.get("enabledPlugins") or {}).items() if on]
+        self.query_one("#env_info", Static).update(
+            f"model {_esc(str(cfg.get('model', 'default')))} · "
+            f"effort {_esc(str(cfg.get('effortLevel', 'default')))} · "
+            f"{hooks} hook(s) · plugins: {_esc(', '.join(plugins) or 'none')} · "
+            f"{len(cfg.get('permissions', {}).get('allow', []))} allow rules")
+
+    # ---------- Claude: sessions ----------
+    def _cs_refresh(self):
+        def work():
+            n_proj, n_tr, size, oldest = session_stats()
+            age = ""
+            if oldest:
+                days = int((time.time() - oldest) / 86400)
+                age = f" · oldest {days} d"
+            self.call_from_thread(
+                self.query_one("#cs_status", Static).update,
+                f"[{C['subtext']}]{n_proj} projects · {n_tr} transcripts · "
+                f"{human(size)}{age}[/]")
+        try:
+            self.query_one("#cs_status", Static).update(
+                f"[{C['subtext']}]counting…[/]")
+        except Exception:
+            return
+        self.run_worker(work, thread=True, group="cs", exclusive=True)
+
     # ---------- MCP ----------
     def _mcp_msg(self, text, bad=False, good=False):
         col = C["red"] if bad else (C["green"] if good else C["subtext"])
@@ -1689,6 +1960,86 @@ class HyprSettings(App):
             self.widgets = widgets_conf()
             event.button.label = nxt
             self.schedule_widget_restart()
+            return
+        if bid.startswith("sk_edit_"):
+            path = getattr(self, "_sk_paths", {}).get(int(bid[8:]))
+            if path:
+                launch("kitty", "--class", "floatterm", "--title", "SKILL.md",
+                       "nvim", str(path / "SKILL.md"))
+            return
+        if bid.startswith("sk_tog_"):
+            path = getattr(self, "_sk_paths", {}).get(int(bid[7:]))
+            if path:
+                try:
+                    if not DRY:
+                        skill_toggle(path)
+                except OSError as e:
+                    self.notify(f"could not rename: {e}", severity="error")
+                self._sk_refresh()
+            return
+        if bid == "sk_new":
+            name = self.query_one("#sk_new_name", Input).value.strip()
+            if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", name):
+                self.notify("name: lowercase letters, digits, dashes",
+                            severity="warning")
+                return
+            try:
+                md = skill_new(name) if not DRY else None
+            except FileExistsError:
+                self.notify(f"{name} already exists", severity="warning")
+                return
+            self.query_one("#sk_new_name", Input).value = ""
+            self._sk_refresh()
+            if md:
+                launch("kitty", "--class", "floatterm", "--title", "SKILL.md",
+                       "nvim", str(md))
+            return
+        if bid == "env_paste":
+            try:
+                r = subprocess.run(["wl-paste", "-n"], capture_output=True,
+                                   text=True, timeout=5)
+                self.query_one("#env_val", Input).value = r.stdout.strip()
+            except (OSError, subprocess.TimeoutExpired):
+                self.notify("clipboard unavailable", severity="warning")
+            return
+        if bid == "env_add":
+            key = self.query_one("#env_key", Input).value.strip()
+            val = self.query_one("#env_val", Input).value
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+                self._env_msg("key must be an identifier (A-Z, 0-9, _)", bad=True)
+                return
+            try:
+                if not DRY:
+                    claude_env_set(key, val)
+            except (OSError, ValueError) as e:
+                self._env_msg(f"write failed: {e}", bad=True)
+                return
+            self.query_one("#env_key", Input).value = ""
+            self.query_one("#env_val", Input).value = ""
+            self._env_refresh()
+            self._env_msg(f"{key} set — applies to new Claude sessions", good=True)
+            return
+        if bid.startswith("env_rm_"):
+            key = getattr(self, "_env_keys", {}).get(int(bid[7:]))
+            if key:
+                try:
+                    if not DRY:
+                        claude_env_set(key, delete=True)
+                except (OSError, ValueError) as e:
+                    self._env_msg(f"write failed: {e}", bad=True)
+                    return
+                self._env_refresh()
+                self._env_msg(f"{key} removed", good=True)
+            return
+        if bid == "env_open":
+            launch("kitty", "--class", "floatterm", "--title", "settings.json",
+                   "nvim", str(CLAUDE_SETTINGS))
+            return
+        if bid == "cs_studio":
+            launch(str(HOME / ".local/bin/hypr-claude-studio"))
+            return
+        if bid == "cs_refresh":
+            self._cs_refresh()
             return
         if bid == "mcp_refresh":
             self._mcp_at = 0.0                       # an explicit ask wins
