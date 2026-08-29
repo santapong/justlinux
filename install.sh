@@ -57,6 +57,21 @@ if command -v cargo >/dev/null 2>&1 && [ -d rust ]; then
         install -m755 rust/target/release/hypr-viz "$HOME/.local/bin/hypr-viz"
         install -m755 rust/target/release/hypr-claude-studio "$HOME/.local/bin/hypr-claude-studio"
         ln -sf hypr-claude-studio "$HOME/.local/bin/draveniq"   # DravenIQ Meta Harness launcher alias
+        # DravenIQ voice: openWakeWord needs Python 3.10-3.12 (system is 3.14) — its own venv
+        if command -v uv >/dev/null 2>&1; then
+            VENV="$HOME/.local/share/hyprdesk/voice-venv"
+            [ -x "$VENV/bin/python" ] || uv venv --python 3.12 "$VENV" >/dev/null 2>&1
+            uv pip install --python "$VENV/bin/python" -q openwakeword faster-whisper numpy >/dev/null 2>&1 \
+                && echo "installed: voice venv ($VENV)" || echo "skipped: voice venv (uv pip install failed)"
+        else
+            echo "skipped: voice venv (uv not found — see docs/voice.md)"
+        fi
+        mkdir -p "$HOME/.config/systemd/user"
+        cp config/systemd/user/hypr-voice.service "$HOME/.config/systemd/user/"
+        systemctl --user daemon-reload 2>/dev/null || true
+        if grep -q '^voice_enabled=1' "$HOME/.config/conky/widgets.conf" 2>/dev/null; then
+            systemctl --user enable --now hypr-voice.service 2>/dev/null && echo "enabled: hypr-voice.service"
+        fi
         install -m755 rust/target/release/hypr-docker "$HOME/.local/bin/hypr-docker"
         install -m755 rust/target/release/serial-watch "$HOME/.local/bin/serial-watch"
         echo "installed: ~/.local/bin/{hypr-office2d,hypr-pet,hypr-cardhost,hypr-appdock,hypr-viz,hypr-claude-studio,hypr-docker} (built from rust/)"

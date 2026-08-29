@@ -1,0 +1,15 @@
+[Unit]
+Description=DravenIQ voice — wake word + spoken commands
+After=pipewire.service wireplumber.service graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/hypr-voice
+Restart=on-failure
+RestartSec=3
+Nice=10
+MemoryMax=900M
+Environment=OMP_NUM_THREADS=1
+
+[Install]
+WantedBy=graphical-session.target

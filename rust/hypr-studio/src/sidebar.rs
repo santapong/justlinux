@@ -311,6 +311,10 @@ impl App {
                 if mentions(std::path::Path::new(&tx), &name) {
                     let fresh = self.plans.get(&idx) != Some(f);
                     self.plans.insert(idx.clone(), f.clone());
+                    if fresh {
+                        // voice / CLI `--open-plan` read this without the tree
+                        super::tmux(&["set-option", "-w", "-t", &format!("{}:{}", super::TMUX_SESSION, idx), "@plan", &f.display().to_string()]);
+                    }
                     if auto && fresh && !self.plans_auto_done.contains(&(idx.clone(), f.clone())) {
                         self.plans_auto_done.insert((idx.clone(), f.clone()));
                         super::open_plan_pane(&idx, f);

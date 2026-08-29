@@ -258,7 +258,7 @@ pub fn style_tmux() {
         "set",
         "-g",
         "status-format[0]",
-        "#[align=left]#{E:status-left}#[align=centre]#{E:@status-centre}#[align=right]#{E:status-right}",
+        "#[align=left]#{E:status-left}#[align=centre]#{E:@status-centre}#{?@voice, 󰍬 #{@voice},}#[align=right]#{E:status-right}",
     ]);
     tmux(&[
         "set",
@@ -1057,6 +1057,18 @@ fn main() {
         let cwd = args.iter().position(|a| a == "--cwd").and_then(|i| args.get(i + 1)).cloned()
             .unwrap_or_else(|| std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default());
         new_session_tab(&cwd, agent);
+        return;
+    }
+    if args.iter().any(|a| a == "--open-plan") {
+        // the sidebar records each tab's plan in the @plan window option
+        let line = tmux_out(&["display-message", "-p", "-t", &format!("{TMUX_SESSION}:"), "#{window_index}|#{@plan}"]);
+        let (idx, plan) = line.trim().split_once('|').unwrap_or(("", ""));
+        if idx.is_empty() || plan.is_empty() {
+            println!("no plan seen for the active tab yet");
+        } else {
+            open_plan_pane(idx, Path::new(plan));
+            println!("plan: {}", Path::new(plan).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
+        }
         return;
     }
     if let Some(i) = args.iter().position(|a| a == "--plan-dump") {

@@ -400,6 +400,37 @@ def session_stats():
     return n_proj, n_tr, size, oldest
 
 
+VOICE_MODEL = HOME / ".local/share/hyprdesk/voice/hey_draven.onnx"
+VOICE_UNIT = "hypr-voice.service"
+
+
+def voice_sources():
+    """[(id, name)] microphones from `wpctl status` (Sources block)."""
+    try:
+        out = subprocess.run(["wpctl", "status"], capture_output=True, text=True,
+                             timeout=5).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    rows, in_src = [], False
+    for line in out.splitlines():
+        if "Sources:" in line:
+            in_src = True
+            continue
+        if in_src:
+            m = re.search(r"(\d+)\.\s+(.+?)\s+\[vol", line)
+            if m:
+                rows.append((m.group(1), m.group(2).strip()))
+            elif line.strip(" │├└─") == "" or "Filters" in line or "Streams" in line:
+                if rows:
+                    break
+    return rows
+
+
+def voice_unit_active():
+    return subprocess.run(["systemctl", "--user", "is-active", "--quiet", VOICE_UNIT],
+                          capture_output=True).returncode == 0
+
+
 def human(n):
     for unit in ("B", "KB", "MB", "GB"):
         if n < 1024:
@@ -1114,6 +1145,33 @@ class HyprSettings(App):
                 yield Button("󰚩 Open DravenIQ", id="cs_studio",
                              variant="primary")
                 yield Button("󰑓 Recount", id="cs_refresh")
+        with Card("Voice · “Hey Draven” wake word + spoken commands"):
+            yield Static("", id="vc_status", classes="status")
+            with Horizontal(classes="row"):
+                yield Label("Listen (hypr-voice service)")
+                yield Switch(value=voice_unit_active(), id="sw_voice")
+            with Horizontal(classes="row"):
+                yield Label("Microphone")
+                yield Button(self.widgets.get("voice_source") or "default",
+                             id="vc_source")
+            with Horizontal(classes="row"):
+                yield Label("Wake sensitivity (score needed)")
+                yield Button("−", id="vc_thr_down", classes="small")
+                yield Static(self.widgets.get("voice_threshold", "0.6"),
+                             id="vc_thr", classes="val")
+                yield Button("+", id="vc_thr_up", classes="small")
+            with Horizontal(classes="row"):
+                yield Label("Language")
+                yield Button(self.widgets.get("voice_lang", "en"), id="vc_lang")
+            with Horizontal(classes="row"):
+                yield Button("󰍬 Test wake word (10 s)", id="vc_test")
+                yield Button("󰈙 docs/voice.md", id="vc_docs")
+            yield Static(
+                "Offline: openWakeWord + whisper, nothing leaves the machine. "
+                "Say the wake word, then e.g. “open three tabs”, “show the "
+                "plan”, “tell Claude …” then “send”. Until a custom model "
+                "is trained it listens for “hey jarvis” — see docs/voice.md.",
+                classes="hint")
 
     def _build_network(self):
         """Body of the network pane, built on first show. Every nmcli call
@@ -1274,6 +1332,7 @@ class HyprSettings(App):
             self._sk_refresh()                       # 1 KB per skill
             self._env_refresh()                      # one json read
             self._cs_refresh()                       # stat() walk, threaded
+            self._vc_refresh()                       # one systemctl + stat
             # health is only worth re-checking if it could have changed
             if time.time() - self._mcp_at > MCP_MAX_AGE:
                 self.run_worker(self._mcp_refresh(), group="mcp",
@@ -1589,6 +1648,16 @@ class HyprSettings(App):
         if self._refreshing:
             return
         sid = event.switch.id or ""
+        if sid == "sw_voice":
+            verb = "enable" if event.value else "disable"
+            if not DRY:
+                subprocess.run(["systemctl", "--user", verb, "--now", VOICE_UNIT],
+                               capture_output=True)
+                widgets_conf_set("voice_enabled", "1" if event.value else "0")
+                self.widgets = widgets_conf()
+            self.notify("Voice " + ("ON — say the wake word" if event.value else "OFF"))
+            self.set_timer(1.5, self._vc_refresh)
+            return
         if sid == "sw_plan_auto":
             widgets_conf_set("studio_plan_auto", "1" if event.value else "0")
             self.widgets = widgets_conf()
@@ -1792,6 +1861,29 @@ class HyprSettings(App):
         except Exception:
             return
         self.run_worker(work, thread=True, group="cs", exclusive=True)
+
+    # ---------- Claude: voice ----------
+    def _vc_refresh(self):
+        try:
+            st = self.query_one("#vc_status", Static)
+        except Exception:
+            return
+        on = voice_unit_active()
+        model = "custom “hey draven” model" if VOICE_MODEL.exists() \
+            else "pretrained “hey jarvis” (drop hey_draven.onnx to change)"
+        st.update(dot(on, f"listening — {model}", f"off — {model}"))
+        self._refreshing = True
+        try:
+            self.query_one("#sw_voice", Switch).value = on
+        finally:
+            self._refreshing = False
+
+    def _vc_set(self, key, val):
+        widgets_conf_set(key, val)
+        self.widgets = widgets_conf()
+        if voice_unit_active() and not DRY:
+            subprocess.run(["systemctl", "--user", "restart", VOICE_UNIT],
+                           capture_output=True)
 
     # ---------- MCP ----------
     def _mcp_msg(self, text, bad=False, good=False):
@@ -2046,6 +2138,39 @@ class HyprSettings(App):
         if bid == "env_open":
             launch("kitty", "--class", "floatterm", "--title", "settings.json",
                    "nvim", str(CLAUDE_SETTINGS))
+            return
+        if bid == "vc_source":
+            srcs = voice_sources()
+            cur = self.widgets.get("voice_source", "")
+            ids = [""] + [i for i, _ in srcs]
+            nxt = ids[(ids.index(cur) + 1) % len(ids)] if cur in ids else ""
+            if nxt:
+                widgets_conf_set("voice_source", nxt)
+            else:
+                _conf_set({}, delete=["voice_source"])
+            self.widgets = widgets_conf()
+            name = dict(srcs).get(nxt, "default")
+            event.button.label = f"{nxt} {name}".strip() if nxt else "default"
+            self._vc_set("voice_source", nxt) if nxt else None
+            return
+        if bid in ("vc_thr_up", "vc_thr_down"):
+            cur = float(self.widgets.get("voice_threshold", "0.6"))
+            cur = round(min(0.95, max(0.2, cur + (0.05 if bid == "vc_thr_up" else -0.05))), 2)
+            self._vc_set("voice_threshold", str(cur))
+            self.query_one("#vc_thr", Static).update(str(cur))
+            return
+        if bid == "vc_lang":
+            nxt = "th" if self.widgets.get("voice_lang", "en") == "en" else "en"
+            self._vc_set("voice_lang", nxt)
+            event.button.label = nxt
+            return
+        if bid == "vc_test":
+            launch("kitty", "--class", "floatterm", "--title", "hypr-voice test",
+                   "sh", "-c", f"{HOME}/.local/bin/hypr-voice --test 10; echo; echo 'press Enter to close'; read x")
+            return
+        if bid == "vc_docs":
+            launch("kitty", "--class", "floatterm", "--title", "voice.md",
+                   "nvim", str(HOME / "hyprland-dots/docs/voice.md"))
             return
         if bid == "cs_studio":
             launch(str(HOME / ".local/bin/hypr-claude-studio"))
