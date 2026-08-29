@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""hypr-claude-studio — a VS-Code-style workspace for Claude Code sessions.
+"""draveniq — a VS-Code-style workspace for Claude Code sessions.
 
 One kitty window running a tmux session:
   · TOP: a two-row bar. Row 0 brands the studio, says where you are and how
@@ -38,8 +38,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path.home() / ".local/lib"))
 
 ME = os.path.realpath(__file__)
-TMUX_SESSION = "claude-studio"
-KITTY_CLASS = "hyprclaudestudio"
+TMUX_SESSION = "draveniq"
+KITTY_CLASS = "draveniq"
 # per-tab close button. Window 0 is the session tree — it has no ✕,
 # closing it would take the sidebar with it. The range tag names the
 # window so the click handler knows WHICH tab the ✕ belonged to.
@@ -1159,7 +1159,7 @@ def sidebar():
                 self.notify("no plan-mode plans in ~/.claude/plans", severity="warning")
                 return
             tmux("split-window", "-d", "-h", "-l", "45%",
-                 f"{Path.home()}/.local/bin/hypr-claude-studio --plan '{plans[-1]}'")
+                 f"{Path.home()}/.local/bin/draveniq --plan '{plans[-1]}'")
 
         def action_term(self):
             data = self._current() or {}

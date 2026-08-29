@@ -275,6 +275,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 
 [[package]]
+name = "draveniq"
+version = "0.1.0"
+dependencies = [
+ "crossterm",
+ "hyprdesk",
+ "pulldown-cmark",
+ "ratatui",
+ "serde_json",
+]
+
+[[package]]
 name = "either"
 version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -415,17 +426,6 @@ dependencies = [
  "tiny-skia",
  "toml",
  "wayland-client",
-]
-
-[[package]]
-name = "hypr-claude-studio"
-version = "0.1.0"
-dependencies = [
- "crossterm",
- "hyprdesk",
- "pulldown-cmark",
- "ratatui",
- "serde_json",
 ]
 
 [[package]]

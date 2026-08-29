@@ -1,4 +1,4 @@
-//! `hypr-claude-studio --plan <file>` — a readable, live-following view of a
+//! `draveniq --plan <file>` — a readable, live-following view of a
 //! plan-mode plan (`~/.claude/plans/*.md`) in a tmux split beside its tab.
 //!
 //! Markdown → pre-wrapped styled lines (pulldown-cmark, no external

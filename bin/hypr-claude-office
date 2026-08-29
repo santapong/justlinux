@@ -95,8 +95,8 @@ TYPING_FRESH = 3             # s since the transcript grew ⇒ typing
 READ_FRESH = 8               # ... ⇒ paused mid-turn (thought dots)
 JOB_FRESH = 60               # s: older state.json = history, not state
 SLEEP_AFTER = 120            # s of idle ⇒ zzz
-STUDIO_CLASS = "hyprclaudestudio"
-STUDIO_TMUX = "claude-studio"   # hypr-claude-studio's private tmux server
+STUDIO_CLASS = "draveniq"
+STUDIO_TMUX = "draveniq"   # draveniq's private tmux server
 CLAUDE_JOBS = Path.home() / ".claude/jobs"
 # Claude's own job state ⇒ desk state. Only some sessions have a
 # state.json, so anything missing/unknown falls back to the heuristic.
@@ -524,7 +524,7 @@ class Office(LayerWindow):
         Clicking anywhere that isn't a desk goes there."""
         try:
             subprocess.Popen(
-                ["python3", str(Path.home() / ".local/bin/hypr-claude-studio")],
+                ["python3", str(Path.home() / ".local/bin/draveniq")],
                 start_new_session=True,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except OSError:
@@ -641,7 +641,7 @@ class Office(LayerWindow):
                             f"{wk['label']}: could not open a terminal"])
 
     def _studio_tab(self, sid, cwd, tty=""):
-        """Mirror of hypr-claude-studio open_session_tab: focus the tab
+        """Mirror of draveniq open_session_tab: focus the tab
         already running this session, else start one. The tty is checked
         FIRST — the start command only names the sid for tabs the studio
         itself resumed, so scanning it alone spawned duplicates."""

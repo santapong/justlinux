@@ -24,7 +24,7 @@ Wi-Fi dialogs) stays Python and always will.
 
 **Rust residents** (`rust/`, one bin crate each, shared `hyprdesk` crate):
 `hypr-cardhost` · `hypr-appdock` · `hypr-office2d` · `hypr-pet` ·
-`hypr-viz` · `hypr-claude-studio` · `hypr-docker` · `serial-watch`
+`hypr-viz` · `draveniq` · `hypr-docker` · `serial-watch`
 
 **Python on demand** (`bin/`, shared `lib/hyprdesk`):
 `hypr-settings` · `hypr-launcher` · `hypr-kanban` · `hypr-arrange` ·

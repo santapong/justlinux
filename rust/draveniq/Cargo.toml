@@ -1,10 +1,10 @@
 [package]
-name = "hypr-claude-studio"
+name = "draveniq"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "hypr-claude-studio"
+name = "draveniq"
 path = "src/main.rs"
 
 [dependencies]

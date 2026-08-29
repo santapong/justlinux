@@ -31,10 +31,10 @@ HOME = Path.home()
 CONF = HOME / ".config/conky/widgets.conf"
 VOICE_DIR = HOME / ".local/share/hyprdesk/voice"
 CUSTOM_MODEL = VOICE_DIR / "hey_draven.onnx"
-STUDIO = HOME / ".local/bin/hypr-claude-studio"
+STUDIO = HOME / ".local/bin/draveniq"
 SETTINGS = HOME / ".local/bin/hypr-settings"
-TMUX = ["tmux", "-L", "claude-studio"]
-SESSION = "claude-studio"
+TMUX = ["tmux", "-L", "draveniq"]
+SESSION = "draveniq"
 RATE = 16000
 FRAME = 1280            # 80 ms, what openWakeWord expects
 CHUNK = FRAME * int(os.environ.get("HYPR_VOICE_FRAMES", "2"))  # inference every 160 ms by default
@@ -134,7 +134,7 @@ def execute(actions):
             subprocess.Popen([str(SETTINGS), "claude"], start_new_session=True)
         elif verb == "hide":
             subprocess.run(["hyprctl", "dispatch", "movetoworkspacesilent",
-                            "special:hidden,class:hyprclaudestudio"], capture_output=True)
+                            "special:hidden,class:draveniq"], capture_output=True)
         elif verb == "enter":
             subprocess.run(TMUX + ["send-keys", "-t", SESSION + ":", "Enter"])
         elif verb == "dictate":

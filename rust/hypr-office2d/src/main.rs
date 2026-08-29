@@ -155,7 +155,7 @@ fn window_of_pid(pid: i32) -> Option<String> {
 
 fn launch_studio() {
     let _ = Command::new("setsid")
-        .arg(hyprdesk::home().join(".local/bin/hypr-claude-studio"))
+        .arg(hyprdesk::home().join(".local/bin/draveniq"))
         .spawn();
 }
 

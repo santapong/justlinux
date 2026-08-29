@@ -2241,7 +2241,7 @@ class HyprSettings(App):
                    "nvim", str(HOME / "hyprland-dots/docs/voice.md"))
             return
         if bid == "cs_studio":
-            launch(str(HOME / ".local/bin/hypr-claude-studio"))
+            launch(str(HOME / ".local/bin/draveniq"))
             return
         if bid == "cs_refresh":
             self._cs_refresh()

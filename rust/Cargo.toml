@@ -4,7 +4,7 @@
 # and the contract table there are the spec.
 [workspace]
 resolver = "2"
-members = ["hyprdesk", "hypr-viz", "hypr-office2d", "hypr-pet", "hypr-cardhost", "hypr-appdock", "hypr-studio", "hypr-docker", "hypr-serialwatch", "hypr-miner"]
+members = ["hyprdesk", "hypr-viz", "hypr-office2d", "hypr-pet", "hypr-cardhost", "hypr-appdock", "draveniq", "hypr-docker", "hypr-serialwatch", "hypr-miner"]
 
 [profile.release]
 strip = true

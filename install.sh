@@ -47,7 +47,7 @@ done
 # python grid office, so office_layout=floor is simply unavailable until
 # a `cargo` appears and install.sh runs again.
 if command -v cargo >/dev/null 2>&1 && [ -d rust ]; then
-    if (cd rust && cargo build --release -p hypr-office2d -p hypr-pet -p hypr-cardhost -p hypr-appdock -p hypr-viz -p hypr-claude-studio -p hypr-docker -p serial-watch -p hyprdesk-mine >/dev/null 2>&1); then
+    if (cd rust && cargo build --release -p hypr-office2d -p hypr-pet -p hypr-cardhost -p hypr-appdock -p hypr-viz -p draveniq -p hypr-docker -p serial-watch -p hyprdesk-mine >/dev/null 2>&1); then
         install -m755 rust/target/release/hypr-office2d "$HOME/.local/bin/hypr-office2d"
         # AFTER the bin/ loop above, so the binary wins over the python
         # script it replaces; without cargo the python copy stands
@@ -55,8 +55,8 @@ if command -v cargo >/dev/null 2>&1 && [ -d rust ]; then
         install -m755 rust/target/release/hypr-cardhost "$HOME/.local/bin/hypr-cardhost"
         install -m755 rust/target/release/hypr-appdock "$HOME/.local/bin/hypr-appdock"
         install -m755 rust/target/release/hypr-viz "$HOME/.local/bin/hypr-viz"
-        install -m755 rust/target/release/hypr-claude-studio "$HOME/.local/bin/hypr-claude-studio"
-        ln -sf hypr-claude-studio "$HOME/.local/bin/draveniq"   # DravenIQ Meta Harness launcher alias
+        install -m755 rust/target/release/draveniq "$HOME/.local/bin/draveniq"
+        ln -sf draveniq "$HOME/.local/bin/hypr-claude-studio"   # compat shim for the old name — remove at v2.1
         install -m755 rust/target/release/hyprdesk-mine "$HOME/.local/bin/hyprdesk-mine"
         cp config/systemd/user/hypr-lesson-proposer.* "$HOME/.config/systemd/user/" 2>/dev/null || true
         # DravenIQ voice: openWakeWord needs Python 3.10-3.12 (system is 3.14) — its own venv
@@ -76,7 +76,7 @@ if command -v cargo >/dev/null 2>&1 && [ -d rust ]; then
         fi
         install -m755 rust/target/release/hypr-docker "$HOME/.local/bin/hypr-docker"
         install -m755 rust/target/release/serial-watch "$HOME/.local/bin/serial-watch"
-        echo "installed: ~/.local/bin/{hypr-office2d,hypr-pet,hypr-cardhost,hypr-appdock,hypr-viz,hypr-claude-studio,hypr-docker} (built from rust/)"
+        echo "installed: ~/.local/bin/{hypr-office2d,hypr-pet,hypr-cardhost,hypr-appdock,hypr-viz,draveniq,hypr-docker} (built from rust/)"
     else
         echo "skipped: rust build failed — the python versions cover it" >&2
     fi

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Idle CPU of every hypr-claude-studio --sidebar over N seconds (default 30)."""
+"""Idle CPU of every draveniq --sidebar over N seconds (default 30)."""
 import glob, sys, time
 def pids():
     out = []
@@ -8,7 +8,7 @@ def pids():
             c = open(d + "/cmdline", "rb").read().split(b"\0")
         except OSError:
             continue
-        if c and c[0].endswith(b"hypr-claude-studio") and b"--sidebar" in c:
+        if c and c[0].endswith(b"draveniq") and b"--sidebar" in c:
             out.append(int(d[6:]))
     return sorted(out)
 def ticks(p):

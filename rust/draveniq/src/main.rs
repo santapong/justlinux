@@ -1,6 +1,6 @@
-//! hypr-claude-studio — a VS-Code-style workspace for Claude Code
-//! sessions. bin/hypr-claude-studio (python/Textual) is the spec;
-//! docs/claude-studio.md is the contract. Rung 4 — the LAST rung — of
+//! draveniq — a VS-Code-style workspace for Claude Code
+//! sessions. bin/draveniq (python/Textual) is the spec;
+//! docs/draveniq.md is the contract. Rung 4 — the LAST rung — of
 //! the Rust migration: the tmux orchestration ports as subprocess work,
 //! the Textual sidebar is hand-rolled in ratatui (sidebar.rs).
 //!
@@ -15,15 +15,15 @@ mod sidebar;
 use std::path::Path;
 use std::process::Command;
 
-pub const TMUX_SESSION: &str = "claude-studio";
-const KITTY_CLASS: &str = "hyprclaudestudio";
+pub const TMUX_SESSION: &str = "draveniq";
+const KITTY_CLASS: &str = "draveniq";
 
 pub fn me() -> String {
     std::env::current_exe()
         .ok()
         .and_then(|p| p.canonicalize().ok())
         .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "hypr-claude-studio".into())
+        .unwrap_or_else(|| "draveniq".into())
 }
 
 pub fn hex(c: hyprdesk::Rgb) -> String {
@@ -91,7 +91,7 @@ fn launch() {
     // normal config if the overlay was never installed, so a partial install
     // degrades to "as before" rather than a kitty that refuses to start.
     let studio_conf = format!(
-        "{}/.config/kitty/claude-studio.conf",
+        "{}/.config/kitty/draveniq.conf",
         std::env::var("HOME").unwrap_or_default()
     );
     let mut kitty_args: Vec<String> = vec!["kitty".into()];
@@ -127,7 +127,7 @@ fn launch() {
 
 // ---------------- tab-bar theme (python style_tmux, verbatim) ----------
 
-// See bin/hypr-claude-studio for the full commentary on every choice
+// See bin/draveniq for the full commentary on every choice
 // here — the ranges, the missing scrollport, the run-shell ✕ path. The
 // format strings are copied verbatim; only the interpolation moved.
 // every window is a real tab in the per-window-tree model — the old
@@ -880,7 +880,7 @@ fn palette() {
 /// of each forking tmux every 2 s (4.7 ms × instances, measured).
 pub fn active_file() -> std::path::PathBuf {
     std::path::PathBuf::from(std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into()))
-        .join("claude-studio.active")
+        .join("draveniq.active")
 }
 
 pub fn note_active(idx: &str) {
@@ -998,7 +998,7 @@ fn window_solo() {
 
 
 /// Measure the studio's hot paths against the REAL machine state.
-/// `hypr-claude-studio --bench [n]` — mean/p95 ms per call + RSS.
+/// `draveniq --bench [n]` — mean/p95 ms per call + RSS.
 /// Numbers, not guesses, pick the optimisation targets (docs/perf/).
 fn bench(n: usize) {
     fn rss_kb() -> u64 {

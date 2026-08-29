@@ -230,7 +230,7 @@ def containers():
         d.box(x, yA, 210, 96, n, k, dsc)
     yB = 228
     for x, (n, k, dsc) in zip(xs, [
-            ("hypr-claude-studio", "Rust / kitty+tmux+ratatui",
+            ("draveniq", "Rust / kitty+tmux+ratatui",
              "tabbed session workspace; sidebar is tab 0"),
             ("hypr-docker", "Rust / ratatui",
              "containers, compose, images, logs, a Kubernetes pane"),
@@ -308,7 +308,7 @@ def containers():
 # ============ Level 3 — Components: Claude Studio ===================
 def studio():
     d = Diagram("Components — Claude Studio (C4 level 3)", 1080, 760)
-    d.boundary(30, 60, 1020, 570, "hypr-claude-studio [Container]")
+    d.boundary(30, 60, 1020, 570, "draveniq [Container]")
     d.box(60, 96, 250, 110, "launch()", "Python",
           "focuses the existing window and summons it to this workspace, "
           "or spawns kitty running tmux")
@@ -331,7 +331,7 @@ def studio():
     # the outside of it: the tmux server does not read claudesessions,
     # and a diagram that says it does is worse than one arrow fewer
     d.box(200, 440, 590, 76, "tmux server", "own socket",
-          "-L claude-studio with -f /dev/null: the studio can never "
+          "-L draveniq with -f /dev/null: the studio can never "
           "inherit or restyle your real tmux", fill=STORE)
     d.external(60, 590, 250, 86, "claudesessions", "library",
                "session_rows, session_title, transcript_for")
@@ -554,8 +554,8 @@ def process_view():
                 "run-again kills (toggle)")
     d.component(520, 200, 200, 76, "serial-watch", "2 s poll",
                 "/dev/serial/by-id")
-    d.component(60, 304, 430, 76, "claude-studio tmux server",
-                "own socket -L claude-studio",
+    d.component(60, 304, 430, 76, "draveniq tmux server",
+                "own socket -L draveniq",
                 "sidebar (ratatui) is pane 0; tabs run claude")
     d.component(520, 304, 200, 76, "hypr-docker", "child streams",
                 "docker/kubectl logs -f")
@@ -650,7 +650,7 @@ def deployment():
                 "cards+office+viz on bottom; docks, strips, bar on top; "
                 "arrange overlay on top of everything")
     d.component(446, 220, 360, 100, "kitty windows", "floating, blurred",
-                "studio (hyprclaudestudio), docker (hyprdocker), "
+                "studio (draveniq), docker (hyprdocker), "
                 "exec shells (hyprdockerexec)")
     d.component(836, 220, 350, 100, "layerrules", "blur + ignore_alpha",
                 "namespaces are the CONTRACT: hypr-card-*, "

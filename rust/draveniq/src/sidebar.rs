@@ -1,8 +1,8 @@
 //! Tab 0 — the session tree, hand-rolled in ratatui. The Textual app in
-//! bin/hypr-claude-studio is the spec: everything that sidebar learned —
+//! bin/draveniq is the spec: everything that sidebar learned —
 //! first-click-aims, the q-confirm that names its stake, the 6 s
 //! signature-checked reload, cursor/expansion preservation — is contract
-//! here, not decoration (docs/claude-studio.md).
+//! here, not decoration (docs/draveniq.md).
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;

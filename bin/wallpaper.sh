@@ -153,8 +153,8 @@ pkill -USR2 -xf "$HOME/.local/bin/hypr-viz" 2>/dev/null || true
 # every kitty window re-inks from the fresh colors-kitty.conf (wallust)
 pkill -USR1 -x kitty 2>/dev/null || true
 # a LIVE studio re-dresses its tmux bar in the new palette
-if pgrep -xf "$HOME/.local/bin/hypr-claude-studio --sidebar" >/dev/null 2>&1; then
-    ~/.local/bin/hypr-claude-studio --style >/dev/null 2>&1 || true
+if pgrep -xf "$HOME/.local/bin/draveniq --sidebar" >/dev/null 2>&1; then
+    ~/.local/bin/draveniq --style >/dev/null 2>&1 || true
 fi
 if [ $live_ok = 1 ]; then
     # the pet bakes its palette at spawn — bounce only the pet
