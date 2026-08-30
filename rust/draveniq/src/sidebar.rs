@@ -201,6 +201,7 @@ pub struct App {
     tree_area: Rect,
     header_area: Rect,
     plans: HashMap<String, PathBuf>, // window index -> its plan-mode plan
+    plan_marks: HashMap<usize, (u16, u16)>, // node index -> column span of its 󰈙 mark (this frame)
     plans_dir_seen: Option<std::time::SystemTime>,
     plans_auto_done: HashSet<(String, PathBuf)>,
     dirty: bool,
@@ -230,6 +231,7 @@ impl App {
             confirm: None,
             notify: None,
             plans: HashMap::new(),
+            plan_marks: HashMap::new(),
             plans_dir_seen: None,
             plans_auto_done: HashSet::new(),
             tree_area: Rect::default(),
@@ -895,6 +897,13 @@ impl App {
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 let Some(i) = self.node_at(m.column, m.row) else { return };
+                if let Some((x0, x1)) = self.plan_marks.get(&i).copied() {
+                    if m.column >= x0 && m.column < x1 {
+                        self.cursor = i;
+                        self.action_plan(); // the 󰈙 mark itself is the button
+                        return;
+                    }
+                }
                 if i == self.cursor {
                     // second click on the aimed row: commit (spec)
                     match self.nodes[i].kind {
@@ -982,6 +991,7 @@ impl App {
             self.scroll = self.cursor + 1 - h;
         }
         let mut lines: Vec<Line> = Vec::new();
+        let mut plan_marks: HashMap<usize, (u16, u16)> = HashMap::new();
         for (i, n) in self.nodes.iter().enumerate().skip(self.scroll).take(h) {
             let mut spans: Vec<Span> = vec![Span::raw(" ".repeat(n.depth as usize))];
             match n.kind {
@@ -1021,6 +1031,8 @@ impl App {
                         ));
                     }
                     if self.plans.contains_key(&w.idx) {
+                        let x0 = self.tree_area.x + spans.iter().map(|s| s.content.chars().count() as u16).sum::<u16>();
+                        plan_marks.insert(i, (x0, x0 + 3));
                         spans.push(Span::styled("  󰈙", Style::default().fg(col(pal.accent2))));
                     }
                     if !w.active {
@@ -1114,6 +1126,7 @@ impl App {
             }
             lines.push(line);
         }
+        self.plan_marks = plan_marks;
         f.render_widget(Paragraph::new(lines), chunks[ti]);
 
         // footer: the keys, in sub ink. In the 34-cell pane the handoff

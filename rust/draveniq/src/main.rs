@@ -589,8 +589,7 @@ pub const HERMES_GLYPH: &str = "󰘧";
 /// The CLI line that resumes `sid` under `agent` ("claude" | "codex").
 pub fn resume_cmd(agent: &str, sid: &str) -> String {
     if agent == "hermes" {
-        // hermes sessions live in ~/.hermes/sessions; v1 opens a fresh REPL
-        "hermes".to_string()
+        if sid.is_empty() { "hermes".to_string() } else { format!("hermes --resume {sid}") }
     } else if agent == "codex" {
         format!("codex resume {sid}")
     } else {

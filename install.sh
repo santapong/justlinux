@@ -56,7 +56,9 @@ if command -v cargo >/dev/null 2>&1 && [ -d rust ]; then
         install -m755 rust/target/release/hypr-appdock "$HOME/.local/bin/hypr-appdock"
         install -m755 rust/target/release/hypr-viz "$HOME/.local/bin/hypr-viz"
         install -m755 rust/target/release/draveniq "$HOME/.local/bin/draveniq"
-        ln -sf draveniq "$HOME/.local/bin/hypr-claude-studio"   # compat shim for the old name — remove at v2.1
+        # compat shim for the old name — only once the old Claude Studio server is gone (bin/retire-claude-studio)
+        tmux -L claude-studio list-windows >/dev/null 2>&1 || ln -sf draveniq "$HOME/.local/bin/hypr-claude-studio"
+        install -m755 bin/retire-claude-studio "$HOME/.local/bin/retire-claude-studio"
         install -m755 rust/target/release/hyprdesk-mine "$HOME/.local/bin/hyprdesk-mine"
         install -m755 rust/target/release/hypr-voice-console "$HOME/.local/bin/hypr-voice-console"
         cp config/systemd/user/hypr-lesson-proposer.* "$HOME/.config/systemd/user/" 2>/dev/null || true
