@@ -337,8 +337,18 @@ def daemon(test_seconds=None):
         t = time.time()
         text = tx.transcribe(wav)
         log(f"heard {text!r} ({time.time() - t:.1f}s)")
-        status(f"heard: {text[:40]}" if text else "?")
         actions = parse(text)
+        if not actions:
+            # the wake fired late and we captured the name itself — the
+            # command is still coming: listen once more
+            status("yes?", clear_after=0)
+            toast("Draven", "yes?", 1500)
+            wav = capture_command(stream, sorted(recent)[len(recent) // 2], start_timeout=4.0)
+            if wav:
+                text = tx.transcribe(wav)
+                log(f"heard (2nd) {text!r}")
+                actions = parse(text)
+        status(f"heard: {text[:40]}" if text else "?")
         if any(v == "pause" for v, _ in actions):
             paused = True
             toast("DravenIQ", "paused — say “Draven, listen” to resume")

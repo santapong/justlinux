@@ -21,8 +21,10 @@ Actions are (verb, payload) tuples:
 """
 import re
 
-WAKE_WORDS = ("hey draven", "hey drayven", "ok draven", "draven", "drayven",
-              "hey jarvis", "jarvis")
+# every way whisper has spelled the name so far, longest first
+WAKE_WORDS = ("hey draven", "hey drayven", "hey darren", "hey driven", "hey dravin",
+              "hey draven iq", "ok draven", "draven iq", "draven", "drayven", "darren",
+              "driven", "dravin", "hey jarvis", "hey marvin", "hey mycroft", "jarvis")
 
 NUMBERS = {"a": 1, "an": 1, "one": 1, "two": 2, "to": 2, "too": 2,
            "three": 3, "four": 4, "for": 4, "five": 5, "six": 6,
