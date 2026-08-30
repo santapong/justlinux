@@ -23,7 +23,7 @@ import re
 
 # every way whisper has spelled the name so far, longest first
 WAKE_WORDS = ("hey draven", "hey drayven", "hey darren", "hey driven", "hey dravin",
-              "hey draven iq", "ok draven", "draven iq", "draven", "drayven", "darren",
+              "hey draven iq", "hey devin", "hey daven", "ok draven", "draven iq", "draven", "drayven", "darren", "devin", "daven",
               "driven", "dravin", "hey jarvis", "hey marvin", "hey mycroft", "jarvis")
 
 NUMBERS = {"a": 1, "an": 1, "one": 1, "two": 2, "to": 2, "too": 2,
@@ -34,7 +34,7 @@ AGENTS = ("claude", "codex", "hermes")
 
 
 NAME_TOKENS = {"hey", "ok", "okay", "hi", "draven", "drayven", "dravin", "darren", "darwin",
-               "driven", "jarvis", "marvin", "mycroft", "iq"}
+               "driven", "devin", "daven", "deven", "jarvis", "marvin", "mycroft", "iq", "oh", "man"}
 
 
 def normalize(text):
