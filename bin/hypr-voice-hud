@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""hypr-voice-hud — the face of DravenIQ's ear.
+
+A display-only layer-shell pill at the top-middle of the focused monitor
+that shows what hypr-voice is doing: a pulsing mic while it listens for
+your command, "…" while whisper thinks, and THE WORDS IT HEARD for a few
+seconds, so a mis-hearing is visible before it acts. Idle = hidden.
+
+It never eats a click (empty input region) and never steals focus; the
+ON/OFF toggle lives in waybar (click 󰍬) and Settings → DravenIQ → Voice.
+State comes from $XDG_RUNTIME_DIR/hypr-voice.state (written by
+hypr-voice), polled every 150 ms — a stat(), nothing more, while hidden.
+"""
+import json
+import math
+import os
+import sys
+import time
+from pathlib import Path
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, GLib  # noqa: E402
+import cairo  # noqa: E402
+
+sys.path.insert(0, str(Path.home() / ".local/lib"))
+from hyprdesk.layer import LayerWindow  # noqa: E402
+from hyprdesk.theme import colors  # noqa: E402
+
+STATE = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "hypr-voice.state"
+FONT = "JetBrainsMono Nerd Font"
+W, H = 560, 64
+HOLD = {"listening": 15, "asking": 15, "thinking": 15, "heard": 7, "paused": 6, "off": 3}
+
+
+def rgb(hexstr, a=1.0):
+    h = str(hexstr).lstrip("#")
+    try:
+        return int(h[0:2], 16) / 255, int(h[2:4], 16) / 255, int(h[4:6], 16) / 255, a
+    except ValueError:
+        return 0.9, 0.9, 0.9, a
+
+
+class Hud(LayerWindow):
+    def __init__(self):
+        super().__init__("voicehud", default_pos="top_middle", default_y=14,
+                         layer="overlay", namespace="hypr-voice-hud")
+        self.set_app_paintable(True)
+        self.set_default_size(W, H)
+        self.pal = colors()
+        self.state, self.text, self.ts = "idle", "", 0.0
+        self.mtime = None
+        self.visible = False
+        area = Gtk.DrawingArea()
+        area.set_size_request(W, H)
+        area.connect("draw", self.draw)
+        self.add(area)
+        self.area = area
+        self.connect("realize", self._no_input)
+        GLib.timeout_add(150, self.poll)
+        GLib.timeout_add(80, self.tick)
+
+    def _no_input(self, *_):
+        # display-only: an empty input region means every click falls through
+        self.input_shape_combine_region(cairo.Region(), 0, 0)
+
+    def poll(self):
+        try:
+            mt = STATE.stat().st_mtime
+        except OSError:
+            mt = None
+        if mt != self.mtime:
+            self.mtime = mt
+            try:
+                d = json.loads(STATE.read_text())
+                self.state, self.text, self.ts = d.get("state", "idle"), d.get("text", ""), float(d.get("ts", 0))
+                self.pal = colors()  # wallpaper may have recolored meanwhile
+            except (OSError, ValueError):
+                self.state = "idle"
+        want = self.state in HOLD and (time.time() - self.ts) < HOLD[self.state]
+        if want and not self.visible:
+            self.show_all()
+            self.visible = True
+        elif not want and self.visible:
+            self.hide()
+            self.visible = False
+        return True
+
+    def tick(self):
+        if self.visible:
+            self.area.queue_draw()
+        return True
+
+    def draw(self, _w, cr):
+        cr.set_operator(cairo.OPERATOR_SOURCE)
+        cr.set_source_rgba(0, 0, 0, 0)
+        cr.paint()
+        cr.set_operator(cairo.OPERATOR_OVER)
+        pal = self.pal
+        r = 18
+        # glass pill
+        cr.new_sub_path()
+        cr.arc(W - r - 1, r + 1, r, -math.pi / 2, 0)
+        cr.arc(W - r - 1, H - r - 1, r, 0, math.pi / 2)
+        cr.arc(r + 1, H - r - 1, r, math.pi / 2, math.pi)
+        cr.arc(r + 1, r + 1, r, math.pi, 3 * math.pi / 2)
+        cr.close_path()
+        cr.set_source_rgba(*rgb(pal["bg"], 205 / 255))
+        cr.fill_preserve()
+        cr.set_source_rgba(*rgb(pal["accent"], 0.45))
+        cr.set_line_width(1)
+        cr.stroke()
+        # mic glyph, pulsing while it listens
+        t = time.time()
+        pulse = 0.55 + 0.45 * (0.5 + 0.5 * math.sin(t * 5)) if self.state in ("listening", "asking") else 1.0
+        ink = {"listening": pal["accent"], "asking": pal["accent"], "thinking": pal["sub"],
+               "heard": pal["good"], "paused": pal["bad"], "off": pal["sub"]}.get(self.state, pal["fg"])
+        cr.select_font_face(FONT, cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+        cr.set_font_size(26)
+        cr.set_source_rgba(*rgb(ink, pulse))
+        cr.move_to(20, 42)
+        cr.show_text("󰍭" if self.state in ("off", "paused") else "󰍬")
+        # headline + words
+        title = {"listening": "Listening — say the command", "asking": "Yes? — say the command",
+                 "thinking": "Thinking…", "heard": "Heard", "paused": "Paused — say “Draven, listen”",
+                 "off": "Voice off"}.get(self.state, "")
+        cr.select_font_face(FONT, cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+        cr.set_font_size(13)
+        cr.set_source_rgba(*rgb(ink if self.state != "heard" else pal["sub"]))
+        cr.move_to(62, 26)
+        cr.show_text(title)
+        body = self.text if self.state == "heard" else ""
+        if self.state in ("listening", "asking"):
+            n = int(t * 3) % 4
+            body = "●" * n + "○" * (3 - n)
+        if body:
+            cr.select_font_face(FONT, cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_NORMAL)
+            cr.set_font_size(15)
+            cr.set_source_rgba(*rgb(pal["fg"]))
+            # ellipsize to the pill
+            while body and cr.text_extents(body).x_advance > W - 62 - 18:
+                body = body[:-2] + "…"
+            cr.move_to(62, 50)
+            cr.show_text(body)
+        return True
+
+
+if __name__ == "__main__":
+    hud = Hud()
+    Gtk.main()

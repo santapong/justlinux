@@ -69,7 +69,7 @@ if command -v cargo >/dev/null 2>&1 && [ -d rust ]; then
             echo "skipped: voice venv (uv not found — see docs/voice.md)"
         fi
         mkdir -p "$HOME/.config/systemd/user"
-        cp config/systemd/user/hypr-voice.service "$HOME/.config/systemd/user/"
+        cp config/systemd/user/hypr-voice.service config/systemd/user/hypr-voice-hud.service "$HOME/.config/systemd/user/"
         systemctl --user daemon-reload 2>/dev/null || true
         if grep -q '^voice_enabled=1' "$HOME/.config/conky/widgets.conf" 2>/dev/null; then
             systemctl --user enable --now hypr-voice.service 2>/dev/null && echo "enabled: hypr-voice.service"
