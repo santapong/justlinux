@@ -5,9 +5,7 @@ After=hypr-voice.service graphical-session.target
 
 [Service]
 ExecStart=%h/.local/bin/hypr-voice-hud
-Restart=on-failure
+Restart=no
 RestartSec=2
 Nice=5
 
-[Install]
-WantedBy=hypr-voice.service

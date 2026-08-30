@@ -79,6 +79,11 @@ class Hud(LayerWindow):
             except (OSError, ValueError):
                 self.state = "idle"
         want = self.state in HOLD and (time.time() - self.ts) < HOLD[self.state]
+        if want:
+            self.last_shown = time.time()
+        elif time.time() - getattr(self, "last_shown", time.time()) > 120:
+            Gtk.main_quit()   # nothing to show for 2 min: give the 56 MB back; the daemon restarts us on the next wake
+            return False
         if want and not self.visible:
             self.show_all()
             self.visible = True

@@ -260,7 +260,7 @@ def rms(a):
 
 class Transcriber:
     """whisper in a child process; exits after IDLE seconds unused."""
-    IDLE = 300
+    IDLE = 120   # whisper's 480 MB lives at most 2 min past the last command
 
     def __init__(self):
         self.proc = None
@@ -329,6 +329,9 @@ def load_wake_model():
             sess_options.intra_op_num_threads = 1
             sess_options.inter_op_num_threads = 1
             sess_options.add_session_config_entry("session.intra_op.allow_spinning", "0")
+            # no memory arenas: these graphs are tiny, the arenas were not (RSS)
+            sess_options.enable_cpu_mem_arena = False
+            sess_options.enable_mem_pattern = False
             super().__init__(path, sess_options=sess_options, **kw)
 
     ort.InferenceSession = _QuietSession
@@ -499,6 +502,9 @@ def daemon(test_seconds=None):
                     toast("DravenIQ", "listening again")
                 continue
             paused = False
+            # the HUD is on-demand: 0 MB idle, started here, exits itself when hidden
+            subprocess.Popen(["systemctl", "--user", "start", "--no-block", "hypr-voice-hud.service"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             tone()
             set_state("listening", hold=12)
             wav, loud = capture_command(mic, floor)
