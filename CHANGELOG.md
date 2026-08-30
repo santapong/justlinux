@@ -4,6 +4,22 @@ All notable changes to this desktop. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## v2.1.0 — the voice that follows you (2026-08-30)
+
+- **Voice, working end to end** on the stock wake model: single-chunk wake, name check only on
+  weak wakes, whisper vocabulary prompt, polite phrasing ("can you open the codex"), "open
+  codex/hermes/claude", push-to-talk `ALT+CTRL+M`, energy gate with hysteresis, near-miss logging.
+  Fixed: the loop that crashed on every wake (numpy score in the JSON log), the command lost while
+  whisper was thinking (mic ring buffer), doubled keybinds opening two windows.
+- **Voice HUD** (`hypr-voice-hud`): glass pill under waybar — listening pulse, live waveform of
+  your voice, partial transcript as you speak, the words heard, paused/off. On-demand: 0 MB idle.
+- **Voice Console** (`hypr-voice-console`, `ALT+CTRL+V`): mic + wake meters against the threshold
+  tick, history of what was heard and what it did, `l/p/t/+/-/r/s/e/x` controls; waybar `󰍬`
+  button shows state/heard text and toggles the service.
+- Cost: daemon 10.3 → 1.8 % of one core idle, 229 → 161 MB; DravenIQ itself 0.3 % / 18 MB.
+- `ALT+CTRL+D` returned to the Docker panel; DravenIQ is `ALT+CTRL+U` / `draveniq`.
+- Settings DravenIQ page no longer runs `claude mcp list` on entry (the 100 % CPU); filter debounced.
+
 ## v2.0.0 — DravenIQ Meta Harness (2026-08-29)
 
 - **Rename**: Claude Studio is the **DravenIQ Meta Harness** — tab-bar brand `󰚩 DravenIQ`,
