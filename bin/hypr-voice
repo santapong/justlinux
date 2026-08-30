@@ -30,7 +30,7 @@ from pathlib import Path
 HOME = Path.home()
 CONF = HOME / ".config/conky/widgets.conf"
 VOICE_DIR = HOME / ".local/share/hyprdesk/voice"
-CUSTOM_MODEL = VOICE_DIR / "hey_draven.onnx"
+CUSTOM_MODEL = VOICE_DIR / "hey_draven.onnx"   # or ANY *.onnx dropped into VOICE_DIR
 STUDIO = HOME / ".local/bin/draveniq"
 SETTINGS = HOME / ".local/bin/hypr-settings"
 TMUX = ["tmux", "-L", "draveniq"]
@@ -232,8 +232,10 @@ def load_wake_model():
     ort.InferenceSession = _QuietSession
     from openwakeword.model import Model
     import openwakeword
-    if CUSTOM_MODEL.exists():
-        paths, name = [str(CUSTOM_MODEL)], "hey_draven"
+    custom = sorted(VOICE_DIR.glob("*.onnx")) if VOICE_DIR.is_dir() else []
+    if custom:
+        paths = [str(x) for x in custom]
+        name = "+".join(x.stem for x in custom)
     else:
         # no custom model yet: "hey draven" is phonetically close to the
         # bundled "hey jarvis" / "hey marvin" / "hey mycroft" — listen to all
@@ -335,7 +337,7 @@ def daemon(test_seconds=None):
             continue
         tone()
         status("listening…", clear_after=0)
-        toast("Draven", "listening…", 1500)
+        toast("Draven", "listening…", 2500)
         wav = capture_command(stream, sorted(recent)[len(recent) // 2])
         if not wav:
             status("")
@@ -348,7 +350,7 @@ def daemon(test_seconds=None):
             # the wake fired late and we captured the name itself — the
             # command is still coming: listen once more
             status("yes?", clear_after=0)
-            toast("Draven", "yes?", 1500)
+            toast("Draven", "yes? (say the command)", 2500)
             wav = capture_command(stream, sorted(recent)[len(recent) // 2], start_timeout=4.0)
             if wav:
                 text = tx.transcribe(wav)

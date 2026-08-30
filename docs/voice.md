@@ -42,7 +42,7 @@ jarvis"** (bundled with openWakeWord 0.4). To get **"Hey Draven"**:
 1. Train a model — needs a GPU, so use one of:
    - <https://openwakeword.com/train> (hosted, type the phrase, download the `.onnx`), or
    - the 2026 Colab notebook <https://github.com/alfiedennen/openwakeword-colab-2026> (75–90 min on Colab).
-2. Save it as `~/.local/share/hyprdesk/voice/hey_draven.onnx`.
+2. Save it in `~/.local/share/hyprdesk/voice/` (any name, e.g. `draven.onnx` — a single-word wake phrase works but false-wakes more than “hey draven”).
 3. `systemctl --user restart hypr-voice`. The Settings card shows which model is live.
 
 Tune `voice_threshold` (default 0.6) in `~/.config/conky/widgets.conf` — raise it

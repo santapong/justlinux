@@ -33,7 +33,14 @@ NUMBERS = {"a": 1, "an": 1, "one": 1, "two": 2, "to": 2, "too": 2,
 AGENTS = ("claude", "codex", "hermes")
 
 
+NAME_TOKENS = {"hey", "ok", "okay", "hi", "draven", "drayven", "dravin", "darren", "darwin",
+               "driven", "jarvis", "marvin", "mycroft", "iq"}
+
+
 def normalize(text):
+    """Lower-case, strip punctuation, drop the wake phrase however whisper
+    spelled it. Returns "" when the utterance was ONLY the name (the wake
+    fired early and the real command is still coming)."""
     t = text.lower().strip()
     t = re.sub(r"[^\w\s']", " ", t)
     t = re.sub(r"\s+", " ", t).strip()
@@ -43,7 +50,10 @@ def normalize(text):
             break
         if t == w:
             return ""
-    return t.strip(" ,")
+    words = t.split()
+    while words and words[0] in NAME_TOKENS:
+        words.pop(0)
+    return " ".join(words).strip(" ,")
 
 
 def _count(word):
