@@ -516,9 +516,13 @@ def daemon(test_seconds=None):
                 text = tx.transcribe(wav)
                 log(f"heard {text!r} ({time.time() - t:.1f}s)")
                 actions = parse(text)
-            if not forced and text and not has_name(text):
-                # the wake model only APPROXIMATES the name: if what we heard
-                # never mentions Draven, it was not for us — ignore silently
+            confident = score >= 0.5
+            command_like = bool(actions) and actions[0][0] not in ("unknown", "dictate")
+            if not forced and text and not confident and not has_name(text) and not command_like:
+                # a WEAK wake (0.25–0.5) on speech that neither names Draven
+                # nor parses as a real command was not for us — ignore. A
+                # strong wake, or a clean command, is trusted: the name was in
+                # the wake audio, not in what follows it.
                 log(f"ignored (no name): {text!r}")
                 voice_log("ignored", text=text, score=round(score, 3))
                 set_state("idle")
