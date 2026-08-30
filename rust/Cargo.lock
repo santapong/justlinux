@@ -482,6 +482,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hypr-voice-console"
+version = "0.1.0"
+dependencies = [
+ "crossterm",
+ "hyprdesk",
+ "ratatui",
+ "serde_json",
+]
+
+[[package]]
 name = "hyprdesk"
 version = "0.1.0"
 dependencies = [

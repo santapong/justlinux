@@ -42,6 +42,11 @@ FRAME = 1280            # 80 ms, what openWakeWord expects
 CHUNK = FRAME * int(os.environ.get("HYPR_VOICE_FRAMES", "2"))  # inference every 160 ms by default
 TONE = "/usr/share/sounds/freedesktop/stereo/message.oga"
 STATE = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "hypr-voice.state"
+RUNTIME = STATE.parent
+CMD = RUNTIME / "hypr-voice.cmd"            # one-line commands from shortcuts / console
+METER = RUNTIME / "hypr-voice.meter"        # "rms score threshold" per chunk, only while…
+CONSOLE_FLAG = RUNTIME / "hypr-voice.console-open"   # …the console is open
+LOG = HOME / ".local/state/hyprdesk/voice-log.jsonl"
 NOTIFY_ID = "9911"          # one replaced notification, never a pile
 WAYBAR_SIGNAL = 12          # waybar custom/voice "signal": 12
 
@@ -114,6 +119,22 @@ def set_state(state, text="", hold=4.0):
         _voice_timer = threading.Timer(hold, lambda: set_state("idle"))
         _voice_timer.daemon = True
         _voice_timer.start()
+
+
+def voice_log(kind, **fields):
+    """Append-only history the console shows: what was heard, what was done."""
+    try:
+        LOG.parent.mkdir(parents=True, exist_ok=True)
+        with open(LOG, "a") as f:
+            f.write(json.dumps({"ts": time.time(), "kind": kind, **fields}, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def send_cmd(line):
+    tmp = CMD.with_suffix(".tmp")
+    tmp.write_text(line + "\n")
+    os.replace(tmp, CMD)
 
 
 def status(text, clear_after=4.0):  # kept for callers: maps onto set_state
@@ -190,7 +211,7 @@ class Mic:
     the next capture starts from what was said, not from now."""
 
     def __init__(self):
-        self.q = queue.Queue(maxsize=375)
+        self.q = queue.Queue(maxsize=190)   # 190 × 160 ms ≈ 30 s
         self.proc = None
         self.start()
 
@@ -201,8 +222,8 @@ class Mic:
 
     def _pump(self):
         while True:
-            buf = self.proc.stdout.read(FRAME * 2)
-            if len(buf) < FRAME * 2:
+            buf = self.proc.stdout.read(CHUNK * 2)   # one put per 160 ms chunk
+            if len(buf) < CHUNK * 2:
                 self.q.put(None)
                 return
             if self.q.full():
@@ -308,7 +329,7 @@ def load_wake_model():
         # no custom model yet: "hey draven" is phonetically close to the
         # bundled "hey jarvis" / "hey marvin" / "hey mycroft" — listen to all
         # three and wake on whichever scores (voice_models overrides)
-        want = cfg("voice_models", "hey_jarvis,hey_marvin,hey_mycroft").split(",")
+        want = cfg("voice_models", "hey_jarvis").split(",")  # the trio measured no cheaper to wake, 2× to run
         base = os.path.join(os.path.dirname(openwakeword.__file__), "resources/models")
         paths = [os.path.join(base, f"{w.strip()}_v0.1.onnx") for w in want if w.strip()]
         paths = [x for x in paths if os.path.exists(x)] or [os.path.join(base, "hey_jarvis_v0.1.onnx")]
@@ -323,7 +344,7 @@ def capture_command(mic, floor, max_s=10.0, silence_s=1.2, start_timeout=4.0, mi
     import numpy as np
     frames, spoke, quiet, elapsed = [], False, 0.0, 0.0
     thresh = max(floor * 2.5, 300.0)
-    step = FRAME / RATE
+    step = CHUNK / RATE
     while elapsed < max_s:
         buf = mic.frame()
         if buf is None:
@@ -360,78 +381,147 @@ def daemon(test_seconds=None):
     log(f"wake model {name} threshold {threshold} chunk {CHUNK / RATE * 1000:.0f} ms")
     mic = Mic()
     tx = Transcriber()
-    set_state("idle")
+    if test_seconds is None:
+        set_state("idle")
     paused = False
-    hits, last_wake, t_start = 0, 0.0, time.time()
-    recent = []  # rms history for the noise floor
+    hits, last_wake = 0, 0.0
+    recent = []                      # chunk RMS history → noise floor
+    gated_prev, skipped = False, None
+    last_actions = []
     peak, last_report = 0.0, time.time()
-    cpu0, t_start = time.process_time(), time.time()  # steady state, after model load
-    while True:
-        parts = [mic.frame() for _ in range(CHUNK // FRAME)]
-        if any(x is None for x in parts):
-            log("mic stream ended — restarting pw-record")
-            mic.restart()
-            continue
-        a = np.frombuffer(b"".join(parts), dtype=np.int16)
-        recent.append(rms(a))
-        del recent[:-12]
-        score = max(model.predict(a).values())
-        if test_seconds is not None:
-            peak = max(peak, score)
-            if time.time() - last_report >= 1.0:
-                print(f"score {score:.3f}  peak {peak:.3f}  rms {recent[-1]:.0f}", flush=True)
-                last_report = time.time()
-            if time.time() - t_start >= test_seconds:
-                mic.proc.kill()
-                import resource
-                el = time.time() - t_start
-                print(f"cpu {(time.process_time() - cpu0) / el * 100:.1f}% of one core over {el:.0f}s (steady state), "
-                      f"maxrss {resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024} MB, peak score {peak:.3f}", flush=True)
-                return
-            continue
-        hits = hits + 1 if score >= threshold else 0
-        if hits < 2 or time.time() - last_wake < 2.0:
-            continue
-        hits, last_wake = 0, time.time()
-        model.reset()
-        if paused:
-            # only "listen" / "wake up" gets through
-            wav = capture_command(stream, sorted(recent)[len(recent) // 2])
-            text = tx.transcribe(wav) if wav else ""
-            if any(v == "listen" for v, _ in parse(text)):
-                paused = False
-                toast("DravenIQ", "listening again")
-                status("on")
-            continue
-        tone()
-        status("listening…", clear_after=0)
-        toast("Draven", "listening…", 2500)
-        wav = capture_command(stream, sorted(recent)[len(recent) // 2])
-        if not wav:
-            status("")
-            continue
-        t = time.time()
-        text = tx.transcribe(wav)
-        log(f"heard {text!r} ({time.time() - t:.1f}s)")
-        actions = parse(text)
-        if not actions:
-            # the wake fired late and we captured the name itself — the
-            # command is still coming: listen once more
-            status("yes?", clear_after=0)
-            toast("Draven", "yes? (say the command)", 2500)
-            wav = capture_command(stream, sorted(recent)[len(recent) // 2], start_timeout=4.0)
-            if wav:
-                text = tx.transcribe(wav)
-                log(f"heard (2nd) {text!r}")
-                actions = parse(text)
-        status(f"heard: {text[:40]}" if text else "?")
-        if any(v == "pause" for v, _ in actions):
-            paused = True
-            toast("DravenIQ", "paused — say “Draven, listen” to resume")
-            status("paused", clear_after=0)
-            continue
-        execute(actions)
-        model.reset()
+    cpu0, t_start = time.process_time(), time.time()   # steady state, after model load
+    try:
+        while True:
+            buf = mic.frame()
+            if buf is None:
+                log("mic stream ended — restarting pw-record")
+                mic.restart()
+                continue
+            a = np.frombuffer(buf, dtype=np.int16)
+            level = rms(a)
+            recent.append(level)
+            del recent[:-30]
+            floor = sorted(recent)[len(recent) // 2]
+            # ---- energy gate: silence never reaches the network (µs, not ms).
+            # Two quiet chunks in a row → skip inference; when sound returns,
+            # feed the last skipped chunk first so the mel window is continuous.
+            quiet = level < max(floor * 1.8, 150.0)
+            if quiet and gated_prev:
+                skipped = a
+                score = 0.0
+            else:
+                if skipped is not None:
+                    model.predict(skipped)
+                    skipped = None
+                score = max(model.predict(a).values())
+            gated_prev = quiet
+            if CONSOLE_FLAG.exists():
+                try:
+                    METER.write_text(f"{level:.0f} {score:.3f} {threshold:.2f}")
+                except OSError:
+                    pass
+            if test_seconds is not None:
+                peak = max(peak, score)
+                if time.time() - last_report >= 1.0:
+                    print(f"score {score:.3f}  peak {peak:.3f}  rms {level:.0f}  gate {'closed' if (quiet and gated_prev) else 'open'}", flush=True)
+                    last_report = time.time()
+                if time.time() - t_start >= test_seconds:
+                    import resource
+                    el = time.time() - t_start
+                    print(f"cpu {(time.process_time() - cpu0) / el * 100:.1f}% of one core over {el:.0f}s (steady state), "
+                          f"maxrss {resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024} MB, peak score {peak:.3f}", flush=True)
+                    return
+                continue
+            # ---- commands from shortcuts / the console
+            forced = False
+            if CMD.exists():
+                try:
+                    line = CMD.read_text().strip()
+                    CMD.unlink()
+                except OSError:
+                    line = ""
+                verb, _, arg = line.partition(" ")
+                if verb == "listen":
+                    forced = True
+                elif verb == "pause":
+                    paused = True
+                    set_state("paused", hold=0)
+                elif verb == "resume":
+                    paused = False
+                    set_state("idle")
+                elif verb == "threshold":
+                    try:
+                        threshold = float(arg)
+                        log(f"threshold {threshold}")
+                    except ValueError:
+                        pass
+                elif verb == "retry" and last_actions:
+                    voice_log("actions", text="(retry)", actions=[list(x) for x in last_actions])
+                    execute(last_actions)
+                elif verb == "say" and arg:
+                    acts = parse(arg)
+                    voice_log("heard", text=arg, actions=[list(x) for x in acts], secs=0, score=0)
+                    set_state("heard", arg[:60], hold=6)
+                    execute(acts)
+                    if acts and acts[0][0] != "unknown":
+                        last_actions = acts
+            hits = hits + 1 if score >= threshold else 0
+            if not forced and (hits < 2 or time.time() - last_wake < 2.0):
+                continue
+            hits, last_wake = 0, time.time()
+            model.reset()
+            voice_log("wake", score=round(score, 3), forced=forced)
+            if paused and not forced:
+                # only "listen" / "wake up" gets through
+                wav = capture_command(mic, floor)
+                text = tx.transcribe(wav) if wav else ""
+                if any(v == "listen" for v, _ in parse(text)):
+                    paused = False
+                    set_state("idle")
+                    toast("DravenIQ", "listening again")
+                continue
+            paused = False
+            tone()
+            set_state("listening", hold=12)
+            wav = capture_command(mic, floor)
+            if not wav:
+                voice_log("heard", text="", actions=[], secs=0, score=round(score, 3))
+                set_state("idle")
+                continue
+            set_state("thinking", hold=12)
+            t = time.time()
+            text = tx.transcribe(wav)
+            log(f"heard {text!r} ({time.time() - t:.1f}s)")
+            actions = parse(text)
+            if not actions:
+                # woke on the name alone — the command is still coming (and was
+                # buffered while whisper ran): listen again
+                set_state("asking", hold=12)
+                wav = capture_command(mic, floor, start_timeout=5.0)
+                if wav:
+                    set_state("thinking", hold=12)
+                    text = tx.transcribe(wav)
+                    log(f"heard (2nd) {text!r}")
+                    actions = parse(text)
+            set_state("heard", text[:60] if text else "(nothing)", hold=6)
+            log(f"actions {actions}")
+            voice_log("heard", text=text, actions=[list(x) for x in actions], secs=round(time.time() - t, 1), score=round(score, 3))
+            if any(v == "pause" for v, _ in actions):
+                paused = True
+                set_state("paused", hold=0)
+                continue
+            execute(actions)
+            if actions and actions[0][0] != "unknown":
+                last_actions = actions
+            model.reset()
+            while not mic.q.empty():   # drop audio of our own tone/toast era
+                mic.q.get_nowait()
+    finally:
+        try:
+            mic.proc.kill()
+            mic.proc.wait()
+        except OSError:
+            pass
 
 
 def waybar():
@@ -474,6 +564,12 @@ def main():
         return
     if args[:1] == ["--toggle"]:
         toggle()
+        return
+    if args[:1] == ["--listen-now"]:
+        send_cmd("listen")
+        return
+    if args[:1] == ["--cmd"]:
+        send_cmd(" ".join(args[1:]))
         return
     if args[:1] == ["--transcriber"]:
         transcriber_main()

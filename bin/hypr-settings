@@ -1208,6 +1208,7 @@ class HyprSettings(App):
                 yield Label("Language")
                 yield Button(self.widgets.get("voice_lang", "en"), id="vc_lang")
             with Horizontal(classes="row"):
+                yield Button("󰍬 Open voice console", id="vc_console", variant="primary")
                 yield Button("󰍬 Test wake word (10 s)", id="vc_test")
                 yield Button("󰈙 docs/voice.md", id="vc_docs")
             yield Static(
@@ -2238,6 +2239,9 @@ class HyprSettings(App):
             nxt = "th" if self.widgets.get("voice_lang", "en") == "en" else "en"
             self._vc_set("voice_lang", nxt)
             event.button.label = nxt
+            return
+        if bid == "vc_console":
+            launch(str(HOME / ".local/bin/hypr-voice-console"))
             return
         if bid == "vc_test":
             launch("kitty", "--class", "floatterm", "--title", "hypr-voice test",

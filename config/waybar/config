@@ -164,7 +164,7 @@
         "interval": 30,
         "signal": 12,
         "on-click": "~/.local/bin/hypr-voice --toggle",
-        "on-click-right": "~/.local/bin/hypr-settings claude",
+        "on-click-right": "~/.local/bin/hypr-voice-console",
         "tooltip": true
     },
     "custom/docker": {

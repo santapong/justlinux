@@ -20,4 +20,16 @@ three ONNX graphs, and a lower-rate pipe (`pw-record` cannot deliver
 Things that did **not** help, measured: disabling ORT thread spinning (the
 sessions already run one thread), bigger inference chunks.
 
+## 30 Aug 2026 — energy gate
+
+| condition | before | after |
+|---|---|---|
+| quiet room, daemon steady state | 10.3 % of one core (three wake models + reader thread) | **1.8 %** — two quiet 160 ms chunks in a row skip inference; the last skipped chunk is replayed when sound returns so the mel window stays continuous |
+| three models vs one | 10.0 % vs 10.3 % | no cheaper to wake for this user's voice → default back to `hey_jarvis` alone (`voice_models` opts the trio in) |
+| speech present | ≈ 8–10 % | unchanged — inference runs whenever there is sound |
+
+Why real-time inference costs 2× the back-to-back bench: 160 ms of idle
+between runs lets the CPU downclock; each run wakes cold. The gate makes the
+idle case free instead of fighting that.
+
 Re-measure: `HYPR_VOICE_FRAMES=2 HYPR_VOICE_LATENCY=160ms hypr-voice --test 20`.
