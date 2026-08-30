@@ -44,7 +44,7 @@ def rgb(hexstr, a=1.0):
 
 class Hud(LayerWindow):
     def __init__(self):
-        super().__init__("voicehud", default_pos="top_middle", default_y=14,
+        super().__init__("voicehud", default_pos="top_middle", default_y=52,
                          layer="overlay", namespace="hypr-voice-hud")
         self.set_app_paintable(True)
         self.set_default_size(W, H)
