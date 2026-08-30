@@ -429,7 +429,12 @@ fn tui() {
     let mut app = App::new();
     let mut last_log = SystemTime::UNIX_EPOCH;
     let log_path = hyprdesk::home().join(".local/state/hyprdesk/voice-log.jsonl");
+    let mut last_beat = Instant::now();
     loop {
+        if last_beat.elapsed() >= Duration::from_secs(1) {
+            last_beat = Instant::now();
+            let _ = std::fs::write(&flag, ""); // heartbeat: a killed console stops it within 3 s
+        }
         let _ = terminal.draw(|f| app.draw(f));
         if event::poll(Duration::from_millis(120)).unwrap_or(false) {
             if let Ok(Event::Key(k)) = event::read() {

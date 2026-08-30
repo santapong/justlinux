@@ -415,11 +415,11 @@ def daemon(test_seconds=None):
                     skipped = None
                 score = max(model.predict(a).values())
             gated_prev = quiet
-            if CONSOLE_FLAG.exists():
-                try:
+            try:   # the console heartbeats this flag; a stale one (window killed) is ignored
+                if time.time() - CONSOLE_FLAG.stat().st_mtime < 3.0:
                     METER.write_text(f"{level:.0f} {score:.3f} {threshold:.2f}")
-                except OSError:
-                    pass
+            except OSError:
+                pass
             if test_seconds is not None:
                 peak = max(peak, score)
                 if time.time() - last_report >= 1.0:
