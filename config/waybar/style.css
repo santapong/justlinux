@@ -129,6 +129,16 @@ window#waybar.hidden {
     opacity: 0;
 }
 
+/* DravenIQ voice: the mic is STATUS ink — good = listening for the wake
+   word, accent while it hears you, sub when off; the heard words ride
+   the same slot for a few seconds so you can see what it understood */
+#custom-voice { padding: 0 8px; color: @subtext; }
+#custom-voice.on { color: @status-good; }
+#custom-voice.listening { color: @accent; font-weight: bold; }
+#custom-voice.heard { color: @accent; }
+#custom-voice.paused { color: @status-bad; }
+#custom-voice:hover { background: alpha(@accent, 0.2); border-radius: 6px; }
+
 /* docker panel launcher: the count is STATUS ink by the fleet rule —
    good while containers run, sub at rest, bad when the daemon is down */
 #custom-docker { padding: 0 8px; color: @subtext; }

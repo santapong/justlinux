@@ -61,7 +61,44 @@ fn hypr_json(args: &[&str]) -> serde_json::Value {
 
 // ---------------- default mode: focus or spawn ----------------
 
+
+/// Two binds (or two fast presses) must never open two windows: the first
+/// launcher holds this lock while it spawns; the second sees it and exits.
+fn launch_lock() -> Option<std::fs::File> {
+    use fs2::FileExt;
+    let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
+    let f = std::fs::OpenOptions::new().create(true).write(true).open(format!("{dir}/draveniq.launch")).ok()?;
+    if f.try_lock_exclusive().is_err() {
+        return None;
+    }
+    Some(f)
+}
+
+
+/// A `windowrule` added live with `hyprctl keyword` was seen NOT to apply
+/// (console and studio both came up tiled on the wrong workspace): once
+/// the window maps, float/size/center it ourselves and bring it here.
+fn ensure_float() {
+    for _ in 0..25 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let Some(clients) = hypr_json(&["clients", "-j"]).as_array().cloned() else { continue };
+        if let Some(c) = clients.iter().find(|c| c.get("class").and_then(|v| v.as_str()) == Some(KITTY_CLASS)) {
+            let addr = format!("address:{}", c.get("address").and_then(|v| v.as_str()).unwrap_or(""));
+            let ws = hypr_json(&["-j", "activeworkspace"]).get("id").and_then(|v| v.as_i64()).unwrap_or(1);
+            let _ = Command::new("hyprctl").args(["dispatch", "movetoworkspace", &format!("{ws},{addr}")]).status();
+            if c.get("floating").and_then(|v| v.as_bool()) != Some(true) {
+                let _ = Command::new("hyprctl").args(["dispatch", "setfloating", &addr]).status();
+                let _ = Command::new("hyprctl").args(["dispatch", "resizewindowpixel", &format!("exact 1440 820,{addr}")]).status();
+            }
+            let _ = Command::new("hyprctl").args(["dispatch", "focuswindow", &addr]).status();
+            let _ = Command::new("hyprctl").args(["dispatch", "centerwindow"]).status();
+            return;
+        }
+    }
+}
+
 fn launch() {
+    let Some(_lock) = launch_lock() else { return }; // another launch is in flight
     if let Some(clients) = hypr_json(&["clients", "-j"]).as_array() {
         for c in clients {
             if c.get("class").and_then(|v| v.as_str()) == Some(KITTY_CLASS) {
@@ -123,6 +160,7 @@ fn launch() {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn();
+    ensure_float();
 }
 
 // ---------------- tab-bar theme (python style_tmux, verbatim) ----------

@@ -21,8 +21,10 @@ Actions are (verb, payload) tuples:
 """
 import re
 
-WAKE_WORDS = ("hey draven", "hey drayven", "ok draven", "draven", "drayven",
-              "hey jarvis", "jarvis")
+# every way whisper has spelled the name so far, longest first
+WAKE_WORDS = ("hey draven", "hey drayven", "hey darren", "hey driven", "hey dravin",
+              "hey draven iq", "hey devin", "hey daven", "hey david", "ok draven", "draven iq", "draven", "drayven", "darren", "devin", "daven",
+              "driven", "dravin", "hey jarvis", "hey marvin", "hey mycroft", "jarvis")
 
 NUMBERS = {"a": 1, "an": 1, "one": 1, "two": 2, "to": 2, "too": 2,
            "three": 3, "four": 4, "for": 4, "five": 5, "six": 6,
@@ -31,7 +33,20 @@ NUMBERS = {"a": 1, "an": 1, "one": 1, "two": 2, "to": 2, "too": 2,
 AGENTS = ("claude", "codex", "hermes")
 
 
+NAME_TOKENS = {"hey", "ok", "okay", "hi", "draven", "drayven", "dravin", "darren", "darwin",
+               "driven", "devin", "daven", "deven", "david", "dave", "jarvis", "marvin", "mycroft", "iq", "oh", "man"}
+
+
+def has_name(text):
+    """Does the utterance address Draven (in any spelling whisper uses)?"""
+    words = set(re.sub(r"[^\w\s']", " ", text.lower()).split())
+    return bool(words & (NAME_TOKENS - {"hey", "ok", "okay", "hi", "oh", "man", "iq"}))
+
+
 def normalize(text):
+    """Lower-case, strip punctuation, drop the wake phrase however whisper
+    spelled it. Returns "" when the utterance was ONLY the name (the wake
+    fired early and the real command is still coming)."""
     t = text.lower().strip()
     t = re.sub(r"[^\w\s']", " ", t)
     t = re.sub(r"\s+", " ", t).strip()
@@ -41,6 +56,13 @@ def normalize(text):
             break
         if t == w:
             return ""
+    words = t.split()
+    while words and words[0] in NAME_TOKENS:
+        words.pop(0)
+    t = " ".join(words).strip(" ,")
+    # politeness and filler carry no meaning: "can you please open the codex"
+    t = re.sub(r"^(?:(?:can|could|would|will) you |please |just |go ahead and |i want you to |i need you to |i'd like you to )+", "", t)
+    t = re.sub(r" please$", "", t)
     return t.strip(" ,")
 
 
@@ -62,6 +84,9 @@ _PATTERNS = [
     (re.compile(r"^(?:open|show|focus|come here|wake(?: up)? draven)(?: draven| the harness)?$"), lambda m: [("focus", None)]),
     (_TABS, lambda m: [("new_tab", {"n": _count(m.group("n")), "agent": m.group("agent") or "claude"})]),
     (re.compile(r"^(?:show|open|view)(?: me)?(?: the)? plan$"), lambda m: [("open_plan", None)]),
+    # "open the codex" / "start hermes" / "open claude" — one tab of that agent
+    (re.compile(r"^(?:open|start|launch|run)(?: up)?(?: me)?(?: a| the| new)? (?P<agent>claude|codex|cod|hermes|hermès)(?: agent| session| here)?$"),
+     lambda m: [("new_tab", {"n": 1, "agent": {"cod": "codex", "hermès": "hermes"}.get(m.group("agent"), m.group("agent"))})]),
     (re.compile(r"^close(?: this| the)? tab$"), lambda m: [("close_tab", None)]),
     (re.compile(r"^(?:next|forward) tab$"), lambda m: [("select_tab", "next")]),
     (re.compile(r"^(?:previous|prev|last|back) tab$"), lambda m: [("select_tab", "prev")]),

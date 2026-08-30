@@ -10,6 +10,7 @@ RestartSec=3
 Nice=10
 MemoryMax=900M
 Environment=OMP_NUM_THREADS=1
+Environment=MALLOC_ARENA_MAX=2
 
 [Install]
 WantedBy=graphical-session.target

@@ -1,10 +1,10 @@
 [package]
-name = "draveniq"
+name = "hypr-voice-console"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "draveniq"
+name = "hypr-voice-console"
 path = "src/main.rs"
 
 [dependencies]
@@ -12,5 +12,4 @@ hyprdesk = { path = "../hyprdesk" }
 ratatui = "0.29"
 crossterm = "0.28"
 serde_json = "1"
-pulldown-cmark = { version = "0.12", default-features = false }
 fs2 = "0.4"

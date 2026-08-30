@@ -22,6 +22,7 @@
         "tray",
         "custom/firewall",
         "custom/clamav",
+        "custom/voice",
         "custom/docker",
         "custom/claude",
         "custom/notification",
@@ -156,6 +157,15 @@
         "interval": 30,
         "on-click": "~/.local/bin/hypr-tools.sh settings security",
         "on-click-right": "~/.local/bin/hypr-tools.sh clamav"
+    },
+    "custom/voice": {
+        "return-type": "json",
+        "exec": "~/.local/bin/hypr-voice --waybar",
+        "interval": 30,
+        "signal": 12,
+        "on-click": "~/.local/bin/hypr-voice --toggle",
+        "on-click-right": "~/.local/bin/hypr-voice-console",
+        "tooltip": true
     },
     "custom/docker": {
         "return-type": "json",

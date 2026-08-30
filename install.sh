@@ -47,7 +47,7 @@ done
 # python grid office, so office_layout=floor is simply unavailable until
 # a `cargo` appears and install.sh runs again.
 if command -v cargo >/dev/null 2>&1 && [ -d rust ]; then
-    if (cd rust && cargo build --release -p hypr-office2d -p hypr-pet -p hypr-cardhost -p hypr-appdock -p hypr-viz -p draveniq -p hypr-docker -p serial-watch -p hyprdesk-mine >/dev/null 2>&1); then
+    if (cd rust && cargo build --release -p hypr-office2d -p hypr-pet -p hypr-cardhost -p hypr-appdock -p hypr-viz -p draveniq -p hypr-docker -p serial-watch -p hyprdesk-mine -p hypr-voice-console >/dev/null 2>&1); then
         install -m755 rust/target/release/hypr-office2d "$HOME/.local/bin/hypr-office2d"
         # AFTER the bin/ loop above, so the binary wins over the python
         # script it replaces; without cargo the python copy stands
@@ -58,6 +58,7 @@ if command -v cargo >/dev/null 2>&1 && [ -d rust ]; then
         install -m755 rust/target/release/draveniq "$HOME/.local/bin/draveniq"
         ln -sf draveniq "$HOME/.local/bin/hypr-claude-studio"   # compat shim for the old name — remove at v2.1
         install -m755 rust/target/release/hyprdesk-mine "$HOME/.local/bin/hyprdesk-mine"
+        install -m755 rust/target/release/hypr-voice-console "$HOME/.local/bin/hypr-voice-console"
         cp config/systemd/user/hypr-lesson-proposer.* "$HOME/.config/systemd/user/" 2>/dev/null || true
         # DravenIQ voice: openWakeWord needs Python 3.10-3.12 (system is 3.14) — its own venv
         if command -v uv >/dev/null 2>&1; then
@@ -69,7 +70,7 @@ if command -v cargo >/dev/null 2>&1 && [ -d rust ]; then
             echo "skipped: voice venv (uv not found — see docs/voice.md)"
         fi
         mkdir -p "$HOME/.config/systemd/user"
-        cp config/systemd/user/hypr-voice.service "$HOME/.config/systemd/user/"
+        cp config/systemd/user/hypr-voice.service config/systemd/user/hypr-voice-hud.service "$HOME/.config/systemd/user/"
         systemctl --user daemon-reload 2>/dev/null || true
         if grep -q '^voice_enabled=1' "$HOME/.config/conky/widgets.conf" 2>/dev/null; then
             systemctl --user enable --now hypr-voice.service 2>/dev/null && echo "enabled: hypr-voice.service"

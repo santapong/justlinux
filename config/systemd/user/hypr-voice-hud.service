@@ -1,0 +1,11 @@
+[Unit]
+Description=DravenIQ voice HUD — shows listening state and the words heard
+BindsTo=hypr-voice.service
+After=hypr-voice.service graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/hypr-voice-hud
+Restart=no
+RestartSec=2
+Nice=5
+

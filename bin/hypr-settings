@@ -1208,6 +1208,7 @@ class HyprSettings(App):
                 yield Label("Language")
                 yield Button(self.widgets.get("voice_lang", "en"), id="vc_lang")
             with Horizontal(classes="row"):
+                yield Button("󰍬 Open voice console", id="vc_console", variant="primary")
                 yield Button("󰍬 Test wake word (10 s)", id="vc_test")
                 yield Button("󰈙 docs/voice.md", id="vc_docs")
             yield Static(
@@ -1377,10 +1378,12 @@ class HyprSettings(App):
             self._env_refresh()                      # one json read
             self._cs_refresh()                       # stat() walk, threaded
             self._vc_refresh()                       # one systemctl + stat
-            # health is only worth re-checking if it could have changed
-            if time.time() - self._mcp_at > MCP_MAX_AGE:
-                self.run_worker(self._mcp_refresh(), group="mcp",
-                                exclusive=True)
+            # NOT the MCP health check: `claude mcp list` is a Node process
+            # that pegs a core for seconds — it pinned the CPU at 100 % on
+            # every visit to this page. Button-only; last result stays.
+            if not self._mcp_at:
+                self._mcp_msg("health not checked yet — 󰑓 Re-check health "
+                              "runs `claude mcp list` (~5 s of CPU)")
 
     # ---------- dynamic labels ----------
     def refresh_security(self):
@@ -1858,10 +1861,15 @@ class HyprSettings(App):
             msg += f" · {len(shown)} match"
         self.query_one("#sk_status", Static).update(f"[{C['subtext']}]{msg}[/]")
 
+    _sk_timer = None
+
     def on_input_changed(self, event: Input.Changed):
         if (event.input.id or "") == "sk_filter":
             self._sk_filter = event.value.strip()
-            self._sk_refresh()
+            # rebuilding ~30 rows costs ~0.25 s CPU: once per pause, not per key
+            if self._sk_timer:
+                self._sk_timer.stop()
+            self._sk_timer = self.set_timer(0.3, self._sk_refresh)
 
     # ---------- Claude: env ----------
     def _env_msg(self, text, bad=False, good=False):
@@ -2231,6 +2239,9 @@ class HyprSettings(App):
             nxt = "th" if self.widgets.get("voice_lang", "en") == "en" else "en"
             self._vc_set("voice_lang", nxt)
             event.button.label = nxt
+            return
+        if bid == "vc_console":
+            launch(str(HOME / ".local/bin/hypr-voice-console"))
             return
         if bid == "vc_test":
             launch("kitty", "--class", "floatterm", "--title", "hypr-voice test",

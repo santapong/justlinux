@@ -279,6 +279,7 @@ name = "draveniq"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "fs2",
  "hyprdesk",
  "pulldown-cmark",
  "ratatui",
@@ -479,6 +480,17 @@ dependencies = [
  "smithay-client-toolkit",
  "tiny-skia",
  "wayland-client",
+]
+
+[[package]]
+name = "hypr-voice-console"
+version = "0.1.0"
+dependencies = [
+ "crossterm",
+ "fs2",
+ "hyprdesk",
+ "ratatui",
+ "serde_json",
 ]
 
 [[package]]
