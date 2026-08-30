@@ -414,7 +414,8 @@ def daemon(test_seconds=None):
     paused = False
     hits, last_wake = 0, 0.0
     recent = []                      # chunk RMS history → noise floor
-    gated_prev, skipped = False, None
+    gated_prev, skipped, open_until = False, None, 0.0
+    last_near = 0.0
     last_actions = []
     peak, last_report = 0.0, time.time()
     cpu0, t_start = time.process_time(), time.time()   # steady state, after model load
@@ -433,8 +434,10 @@ def daemon(test_seconds=None):
             # ---- energy gate: silence never reaches the network (µs, not ms).
             # Two quiet chunks in a row → skip inference; when sound returns,
             # feed the last skipped chunk first so the mel window is continuous.
-            quiet = level < max(floor * 1.8, 150.0)
-            if quiet and gated_prev:
+            quiet = level < max(floor * 1.5, 150.0)
+            if not quiet:
+                open_until = time.time() + 0.6   # hysteresis: stay open through a word's dips
+            if quiet and gated_prev and time.time() > open_until:
                 skipped = a
                 score = 0.0
             else:
@@ -496,6 +499,10 @@ def daemon(test_seconds=None):
             # ONE chunk over the line is enough: the name check after
             # transcription makes a false wake cost only a transcription,
             # while a 2-chunk debounce missed the user's single 0.3 peak
+            if 0.12 <= score < threshold and time.time() - last_near > 2.0 and test_seconds is None:
+                last_near = time.time()
+                log(f"near miss: wake score {score:.2f} < {threshold}")
+                voice_log("near", score=round(score, 3), level=round(level))
             hits = 1 if score >= threshold else 0
             if not forced and (hits < 1 or time.time() - last_wake < 2.0):
                 continue
