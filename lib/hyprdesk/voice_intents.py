@@ -37,6 +37,12 @@ NAME_TOKENS = {"hey", "ok", "okay", "hi", "draven", "drayven", "dravin", "darren
                "driven", "devin", "daven", "deven", "jarvis", "marvin", "mycroft", "iq", "oh", "man"}
 
 
+def has_name(text):
+    """Does the utterance address Draven (in any spelling whisper uses)?"""
+    words = set(re.sub(r"[^\w\s']", " ", text.lower()).split())
+    return bool(words & (NAME_TOKENS - {"hey", "ok", "okay", "hi", "oh", "man", "iq"}))
+
+
 def normalize(text):
     """Lower-case, strip punctuation, drop the wake phrase however whisper
     spelled it. Returns "" when the utterance was ONLY the name (the wake

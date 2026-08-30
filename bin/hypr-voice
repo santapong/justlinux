@@ -51,7 +51,7 @@ NOTIFY_ID = "9911"          # one replaced notification, never a pile
 WAYBAR_SIGNAL = 12          # waybar custom/voice "signal": 12
 
 sys.path.insert(0, str(HOME / ".local/lib"))
-from hyprdesk.voice_intents import parse  # noqa: E402
+from hyprdesk.voice_intents import has_name, parse  # noqa: E402
 
 
 # ---------------------------------------------------------------- config
@@ -123,12 +123,20 @@ def set_state(state, text="", hold=4.0):
 
 def voice_log(kind, **fields):
     """Append-only history the console shows: what was heard, what was done."""
+    def plain(v):   # numpy floats are not JSON — and the log must never kill the ear
+        if hasattr(v, "item"):
+            return v.item()
+        if isinstance(v, (list, tuple)):
+            return [plain(x) for x in v]
+        if isinstance(v, dict):
+            return {k: plain(x) for k, x in v.items()}
+        return v
     try:
         LOG.parent.mkdir(parents=True, exist_ok=True)
         with open(LOG, "a") as f:
-            f.write(json.dumps({"ts": time.time(), "kind": kind, **fields}, ensure_ascii=False) + "\n")
-    except OSError:
-        pass
+            f.write(json.dumps({"ts": time.time(), "kind": kind, **plain(fields)}, ensure_ascii=False) + "\n")
+    except Exception as e:  # noqa: BLE001
+        log(f"voice_log failed: {e}")
 
 
 def send_cmd(line):
@@ -413,7 +421,7 @@ def daemon(test_seconds=None):
                 if skipped is not None:
                     model.predict(skipped)
                     skipped = None
-                score = max(model.predict(a).values())
+                score = float(max(model.predict(a).values()))
             gated_prev = quiet
             try:   # the console heartbeats this flag; a stale one (window killed) is ignored
                 if time.time() - CONSOLE_FLAG.stat().st_mtime < 3.0:
@@ -493,6 +501,14 @@ def daemon(test_seconds=None):
             text = tx.transcribe(wav)
             log(f"heard {text!r} ({time.time() - t:.1f}s)")
             actions = parse(text)
+            if not forced and text and not has_name(text):
+                # the wake model only APPROXIMATES the name: if what we heard
+                # never mentions Draven, it was not for us — ignore silently
+                log(f"ignored (no name): {text!r}")
+                voice_log("ignored", text=text, score=round(score, 3))
+                set_state("idle")
+                model.reset()
+                continue
             if not actions:
                 # woke on the name alone — the command is still coming (and was
                 # buffered while whisper ran): listen again
