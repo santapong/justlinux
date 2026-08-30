@@ -59,7 +59,11 @@ def normalize(text):
     words = t.split()
     while words and words[0] in NAME_TOKENS:
         words.pop(0)
-    return " ".join(words).strip(" ,")
+    t = " ".join(words).strip(" ,")
+    # politeness and filler carry no meaning: "can you please open the codex"
+    t = re.sub(r"^(?:(?:can|could|would|will) you |please |just |go ahead and |i want you to |i need you to |i'd like you to )+", "", t)
+    t = re.sub(r" please$", "", t)
+    return t.strip(" ,")
 
 
 def _count(word):
@@ -80,6 +84,9 @@ _PATTERNS = [
     (re.compile(r"^(?:open|show|focus|come here|wake(?: up)? draven)(?: draven| the harness)?$"), lambda m: [("focus", None)]),
     (_TABS, lambda m: [("new_tab", {"n": _count(m.group("n")), "agent": m.group("agent") or "claude"})]),
     (re.compile(r"^(?:show|open|view)(?: me)?(?: the)? plan$"), lambda m: [("open_plan", None)]),
+    # "open the codex" / "start hermes" / "open claude" — one tab of that agent
+    (re.compile(r"^(?:open|start|launch|run)(?: up)?(?: me)?(?: a| the| new)? (?P<agent>claude|codex|cod|hermes|hermès)(?: agent| session| here)?$"),
+     lambda m: [("new_tab", {"n": 1, "agent": {"cod": "codex", "hermès": "hermes"}.get(m.group("agent"), m.group("agent"))})]),
     (re.compile(r"^close(?: this| the)? tab$"), lambda m: [("close_tab", None)]),
     (re.compile(r"^(?:next|forward) tab$"), lambda m: [("select_tab", "next")]),
     (re.compile(r"^(?:previous|prev|last|back) tab$"), lambda m: [("select_tab", "prev")]),
