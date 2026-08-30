@@ -107,7 +107,7 @@ def set_state(state, text="", hold=4.0):
         subprocess.run(TMUX + ["set", "-g", "@voice", label], capture_output=True)
     else:
         subprocess.run(TMUX + ["set", "-gu", "@voice"], capture_output=True)
-    if state in ("listening", "asking", "thinking", "heard", "paused"):
+    if state in ("listening", "asking", "thinking", "heard", "paused") and not (state == "listening" and text):
         body = {"listening": "󰍬 listening — say the command", "asking": "󰍬 yes? — say the command",
                 "thinking": "…", "heard": f"heard: “{text}”", "paused": "paused — say “Draven, listen”"}[state]
         subprocess.Popen(["notify-send", "-a", "DravenIQ", "-r", NOTIFY_ID, "-t", str(int(hold * 1000)),
@@ -353,8 +353,11 @@ def load_wake_model():
     return Model(wakeword_model_paths=paths, ncpu=1), name
 
 
-def capture_command(mic, floor, max_s=10.0, silence_s=1.2, start_timeout=4.0, min_s=1.5):
-    """Returns (wav path or None, seconds of speech heard)."""
+def capture_command(mic, floor, max_s=10.0, silence_s=1.2, start_timeout=4.0, min_s=1.5, on_partial=None):
+    """Returns (wav path or None, seconds of speech heard). While capturing,
+    the meter file is written every chunk (the HUD follows the voice) and
+    `on_partial(audio)` is called every ~1.2 s of speech for a live
+    transcript."""
     """Frames after the wake until the speaker pauses. Timing is counted
     in FRAMES, so buffered speech (spoken while whisper was busy) is
     consumed at full speed and still measured correctly."""
@@ -369,9 +372,16 @@ def capture_command(mic, floor, max_s=10.0, silence_s=1.2, start_timeout=4.0, mi
         elapsed += step
         a = np.frombuffer(buf, dtype=np.int16)
         frames.append(a)
-        if rms(a) > thresh:
+        level = rms(a)
+        try:
+            METER.write_text(f"{level:.0f} 0.000 0.00")
+        except OSError:
+            pass
+        if level > thresh:
             spoke, quiet = True, 0.0
             loud += step
+            if on_partial and loud >= 1.2 and int(loud / 1.2) != int((loud - step) / 1.2):
+                on_partial(np.concatenate(frames))
         elif spoke:
             quiet += step
             if quiet >= silence_s and elapsed >= min_s:
@@ -507,7 +517,29 @@ def daemon(test_seconds=None):
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             tone()
             set_state("listening", hold=12)
-            wav, loud = capture_command(mic, floor)
+
+            def partial(audio, _busy=[False]):
+                if _busy[0]:
+                    return
+                _busy[0] = True
+
+                def work():
+                    try:
+                        VOICE_DIR.mkdir(parents=True, exist_ok=True)
+                        pw = VOICE_DIR / "partial.wav"
+                        with wave.open(str(pw), "wb") as w:
+                            w.setnchannels(1)
+                            w.setsampwidth(2)
+                            w.setframerate(RATE)
+                            w.writeframes(audio.tobytes())
+                        txt = tx.transcribe(str(pw))
+                        if txt:
+                            set_state("listening", txt[:60], hold=12)
+                    finally:
+                        _busy[0] = False
+                threading.Thread(target=work, daemon=True).start()
+
+            wav, loud = capture_command(mic, floor, on_partial=partial)
             if not wav:
                 voice_log("heard", text="", actions=[], secs=0, score=round(score, 3))
                 set_state("idle")
@@ -538,7 +570,7 @@ def daemon(test_seconds=None):
                 # woke on the name alone — the command is still coming (and was
                 # buffered while whisper ran): listen again
                 set_state("asking", hold=12)
-                wav, _ = capture_command(mic, floor, start_timeout=5.0)
+                wav, _ = capture_command(mic, floor, start_timeout=5.0, on_partial=partial)
                 if wav:
                     set_state("thinking", hold=12)
                     text = tx.transcribe(wav)

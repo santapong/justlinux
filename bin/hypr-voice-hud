@@ -29,6 +29,7 @@ from hyprdesk.layer import LayerWindow  # noqa: E402
 from hyprdesk.theme import colors  # noqa: E402
 
 STATE = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "hypr-voice.state"
+METER = STATE.with_name("hypr-voice.meter")
 FONT = "JetBrainsMono Nerd Font"
 W, H = 560, 64
 HOLD = {"listening": 15, "asking": 15, "thinking": 15, "heard": 7, "paused": 6, "off": 3}
@@ -52,6 +53,7 @@ class Hud(LayerWindow):
         self.state, self.text, self.ts = "idle", "", 0.0
         self.mtime = None
         self.visible = False
+        self.levels = [0.0] * 28   # the voice, as it happens
         area = Gtk.DrawingArea()
         area.set_size_request(W, H)
         area.connect("draw", self.draw)
@@ -94,6 +96,12 @@ class Hud(LayerWindow):
 
     def tick(self):
         if self.visible:
+            try:
+                lvl = float(METER.read_text().split()[0])
+            except (OSError, ValueError, IndexError):
+                lvl = 0.0
+            self.levels.append(min(1.0, lvl / 2500.0))
+            del self.levels[:-28]
             self.area.queue_draw()
         return True
 
@@ -135,16 +143,28 @@ class Hud(LayerWindow):
         cr.set_source_rgba(*rgb(ink if self.state != "heard" else pal["sub"]))
         cr.move_to(62, 26)
         cr.show_text(title)
-        body = self.text if self.state == "heard" else ""
+        body = self.text if self.state in ("heard", "listening") else ""
         if self.state in ("listening", "asking"):
-            n = int(t * 3) % 4
-            body = "●" * n + "○" * (3 - n)
+            # the voice itself: a small waveform of the last ~2 s of mic level
+            x0, base = W - 150, 40
+            cr.set_line_width(2)
+            for i, lv in enumerate(self.levels):
+                hgt = max(2.0, lv * 26)
+                a = 0.35 + 0.65 * (i / len(self.levels))
+                cr.set_source_rgba(*rgb(pal["accent"], a))
+                cr.move_to(x0 + i * 4.5, base - hgt / 2)
+                cr.line_to(x0 + i * 4.5, base + hgt / 2)
+                cr.stroke()
+            if not body:
+                n = int(t * 3) % 4
+                body = "●" * n + "○" * (3 - n)
         if body:
             cr.select_font_face(FONT, cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_NORMAL)
             cr.set_font_size(15)
             cr.set_source_rgba(*rgb(pal["fg"]))
             # ellipsize to the pill
-            while body and cr.text_extents(body).x_advance > W - 62 - 18:
+            limit = W - 62 - 18 - (150 if self.state in ("listening", "asking") else 0)
+            while body and cr.text_extents(body).x_advance > limit:
                 body = body[:-2] + "…"
             cr.move_to(62, 50)
             cr.show_text(body)
