@@ -299,8 +299,13 @@ def transcriber_main():
         if not line:
             return
         try:
-            segs, _ = model.transcribe(line.strip(), beam_size=1, language=lang,
-                                       vad_filter=True, condition_on_previous_text=False)
+            segs, _ = model.transcribe(
+                line.strip(), beam_size=2, language=lang, vad_filter=True,
+                condition_on_previous_text=False,
+                # bias decoding toward our vocabulary: "open tab" was coming
+                # back as "open card", the name as David/Darwin/Darren
+                initial_prompt="Hey Draven. Draven, open two tabs. Show the plan. New codex tab. "
+                               "New hermes tab. Close tab. Next tab. Settings. Tell Claude. Send.")
             text = " ".join(s.text for s in segs).strip()
         except Exception as e:  # noqa: BLE001 — never kill the ear
             text = ""
@@ -346,11 +351,12 @@ def load_wake_model():
 
 
 def capture_command(mic, floor, max_s=10.0, silence_s=1.2, start_timeout=4.0, min_s=1.5):
+    """Returns (wav path or None, seconds of speech heard)."""
     """Frames after the wake until the speaker pauses. Timing is counted
     in FRAMES, so buffered speech (spoken while whisper was busy) is
     consumed at full speed and still measured correctly."""
     import numpy as np
-    frames, spoke, quiet, elapsed = [], False, 0.0, 0.0
+    frames, spoke, quiet, elapsed, loud = [], False, 0.0, 0.0, 0.0
     thresh = max(floor * 2.5, 300.0)
     step = CHUNK / RATE
     while elapsed < max_s:
@@ -362,14 +368,15 @@ def capture_command(mic, floor, max_s=10.0, silence_s=1.2, start_timeout=4.0, mi
         frames.append(a)
         if rms(a) > thresh:
             spoke, quiet = True, 0.0
+            loud += step
         elif spoke:
             quiet += step
             if quiet >= silence_s and elapsed >= min_s:
                 break
         elif elapsed > start_timeout:
-            return None  # nothing said
+            return None, 0.0  # nothing said
     if not spoke:
-        return None
+        return None, 0.0
     audio = np.concatenate(frames)
     VOICE_DIR.mkdir(parents=True, exist_ok=True)
     wav = VOICE_DIR / "last-command.wav"
@@ -378,7 +385,7 @@ def capture_command(mic, floor, max_s=10.0, silence_s=1.2, start_timeout=4.0, mi
         w.setsampwidth(2)
         w.setframerate(RATE)
         w.writeframes(audio.tobytes())
-    return str(wav)
+    return str(wav), loud
 
 
 def daemon(test_seconds=None):
@@ -484,7 +491,7 @@ def daemon(test_seconds=None):
             voice_log("wake", score=round(score, 3), forced=forced)
             if paused and not forced:
                 # only "listen" / "wake up" gets through
-                wav = capture_command(mic, floor)
+                wav, _ = capture_command(mic, floor)
                 text = tx.transcribe(wav) if wav else ""
                 if any(v == "listen" for v, _ in parse(text)):
                     paused = False
@@ -494,16 +501,21 @@ def daemon(test_seconds=None):
             paused = False
             tone()
             set_state("listening", hold=12)
-            wav = capture_command(mic, floor)
+            wav, loud = capture_command(mic, floor)
             if not wav:
                 voice_log("heard", text="", actions=[], secs=0, score=round(score, 3))
                 set_state("idle")
                 continue
-            set_state("thinking", hold=12)
             t = time.time()
-            text = tx.transcribe(wav)
-            log(f"heard {text!r} ({time.time() - t:.1f}s)")
-            actions = parse(text)
+            if loud < 0.5 and not forced:
+                # only the tail of the wake word — do not spend 1–3 s of
+                # whisper on it, ask straight away
+                text, actions = "", []
+            else:
+                set_state("thinking", hold=12)
+                text = tx.transcribe(wav)
+                log(f"heard {text!r} ({time.time() - t:.1f}s)")
+                actions = parse(text)
             if not forced and text and not has_name(text):
                 # the wake model only APPROXIMATES the name: if what we heard
                 # never mentions Draven, it was not for us — ignore silently
@@ -516,7 +528,7 @@ def daemon(test_seconds=None):
                 # woke on the name alone — the command is still coming (and was
                 # buffered while whisper ran): listen again
                 set_state("asking", hold=12)
-                wav = capture_command(mic, floor, start_timeout=5.0)
+                wav, _ = capture_command(mic, floor, start_timeout=5.0)
                 if wav:
                     set_state("thinking", hold=12)
                     text = tx.transcribe(wav)
