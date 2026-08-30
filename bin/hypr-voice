@@ -233,11 +233,17 @@ def load_wake_model():
     from openwakeword.model import Model
     import openwakeword
     if CUSTOM_MODEL.exists():
-        path, name = str(CUSTOM_MODEL), "hey_draven"
+        paths, name = [str(CUSTOM_MODEL)], "hey_draven"
     else:
-        path = os.path.join(os.path.dirname(openwakeword.__file__), "resources/models/hey_jarvis_v0.1.onnx")
-        name = "hey_jarvis"
-    return Model(wakeword_model_paths=[path], ncpu=1), name
+        # no custom model yet: "hey draven" is phonetically close to the
+        # bundled "hey jarvis" / "hey marvin" / "hey mycroft" — listen to all
+        # three and wake on whichever scores (voice_models overrides)
+        want = cfg("voice_models", "hey_jarvis,hey_marvin,hey_mycroft").split(",")
+        base = os.path.join(os.path.dirname(openwakeword.__file__), "resources/models")
+        paths = [os.path.join(base, f"{w.strip()}_v0.1.onnx") for w in want if w.strip()]
+        paths = [x for x in paths if os.path.exists(x)] or [os.path.join(base, "hey_jarvis_v0.1.onnx")]
+        name = "+".join(os.path.basename(x).split("_v0")[0] for x in paths)
+    return Model(wakeword_model_paths=paths, ncpu=1), name
 
 
 def capture_command(stream, floor, max_s=8.0, silence_s=0.9, start_timeout=3.0):
