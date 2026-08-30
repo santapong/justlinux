@@ -9,6 +9,13 @@ mic ─ pw-record ─► openWakeWord (ONNX, 1 thread) ─ wake ─► record un
                                                              └► grammar (voice_intents.py) ─► action
 ```
 
+## Shortcuts
+
+| keys | does |
+|---|---|
+| `ALT+CTRL+V` | voice console — meters, what was heard, controls |
+| `ALT+CTRL+M` | push-to-talk: listen now, no wake word |
+
 ## Try it
 
 ```sh

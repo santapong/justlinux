@@ -61,7 +61,21 @@ fn hypr_json(args: &[&str]) -> serde_json::Value {
 
 // ---------------- default mode: focus or spawn ----------------
 
+
+/// Two binds (or two fast presses) must never open two windows: the first
+/// launcher holds this lock while it spawns; the second sees it and exits.
+fn launch_lock() -> Option<std::fs::File> {
+    use fs2::FileExt;
+    let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
+    let f = std::fs::OpenOptions::new().create(true).write(true).open(format!("{dir}/draveniq.launch")).ok()?;
+    if f.try_lock_exclusive().is_err() {
+        return None;
+    }
+    Some(f)
+}
+
 fn launch() {
+    let Some(_lock) = launch_lock() else { return }; // another launch is in flight
     if let Some(clients) = hypr_json(&["clients", "-j"]).as_array() {
         for c in clients {
             if c.get("class").and_then(|v| v.as_str()) == Some(KITTY_CLASS) {
