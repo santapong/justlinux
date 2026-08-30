@@ -4,6 +4,15 @@ All notable changes to this desktop. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## v2.2.0 — loose ends (2026-08-30)
+
+- **Hermes past sessions** in the DravenIQ tree (from `~/.hermes/state.db` via `sqlite3 -json`,
+  cached by DB mtime); Enter resumes with `hermes --resume <id>`.
+- **Plan viewer**: `/` search with `n`/`N`; clicking the `󰈙` mark on a tab opens its plan.
+- `bin/retire-claude-studio` (also run by install.sh's shim step): after the old Claude Studio
+  window is closed it turns `hypr-claude-studio` into a symlink to `draveniq`, removes the old
+  kitty overlay and stops the old tmux server if it holds nothing live.
+
 ## v2.1.0 — the voice that follows you (2026-08-30)
 
 - **Voice, working end to end** on the stock wake model: single-chunk wake, name check only on

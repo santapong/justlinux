@@ -512,6 +512,10 @@ pub fn run(path: &Path) {
     let mut dirty = true;
     let mut last_check = Instant::now();
     let mut follow = true; // stick to the end while Claude is still writing
+    let mut search: Option<String> = None; // Some = typing after '/'
+    let mut needle = String::new();
+    let mut hits: Vec<usize> = Vec::new();
+    let mut hit_i: usize = 0;
 
     loop {
         if dirty {
@@ -529,18 +533,24 @@ pub fn run(path: &Path) {
                 }
                 scroll = scroll.min(max);
                 let pct = if max == 0 { 100 } else { scroll * 100 / max };
+                let search_txt = match &search {
+                    Some(s) => format!("   /{s}▏"),
+                    None if !needle.is_empty() => format!("   /{needle} · {}/{}", if hits.is_empty() { 0 } else { hit_i + 1 }, hits.len()),
+                    None => String::new(),
+                };
                 let hdr = Line::from(vec![
                     Span::styled(format!("󰈙 {name}"), Style::default().fg(col(pal.accent)).add_modifier(Modifier::BOLD)),
                     Span::styled(
                         format!("   {} lines · {pct}%{}", lines.len(), if follow { " · following" } else { "" }),
                         Style::default().fg(col(pal.sub)),
                     ),
+                    Span::styled(search_txt, Style::default().fg(col(pal.accent2))),
                 ]);
                 f.render_widget(Paragraph::new(hdr), Rect { height: 1, ..area });
                 let view: Vec<Line<'static>> = lines.iter().skip(scroll).take(body.height as usize).cloned().collect();
                 f.render_widget(Paragraph::new(view), body);
                 let foot = Line::from(Span::styled(
-                    " q close · j/k scroll · G end (follow) · e edit · y path · o zoom · r reload",
+                    " q close · j/k scroll · G end (follow) · / search · n/N next/prev · e edit · y path · o zoom · r reload",
                     Style::default().fg(col(pal.sub)),
                 ));
                 f.render_widget(Paragraph::new(foot), Rect { y: area.y + area.height.saturating_sub(1), height: 1, ..area });
@@ -551,8 +561,44 @@ pub fn run(path: &Path) {
             match event::read() {
                 Ok(Event::Key(k)) => {
                     let page = terminal.size().map(|s| s.height as usize / 2).unwrap_or(10).max(1);
+                    if let Some(s) = search.as_mut() {
+                        match k.code {
+                            KeyCode::Esc => search = None,
+                            KeyCode::Enter => {
+                                needle = s.to_lowercase();
+                                search = None;
+                                hits = lines
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(_, l)| {
+                                        let txt: String = l.spans.iter().map(|sp| sp.content.as_ref()).collect();
+                                        !needle.is_empty() && txt.to_lowercase().contains(&needle)
+                                    })
+                                    .map(|(i, _)| i)
+                                    .collect();
+                                hit_i = 0;
+                                if let Some(&h) = hits.first() {
+                                    scroll = h.saturating_sub(2);
+                                    follow = false;
+                                }
+                            }
+                            KeyCode::Backspace => {
+                                s.pop();
+                            }
+                            KeyCode::Char(c) => s.push(c),
+                            _ => {}
+                        }
+                        dirty = true;
+                        continue;
+                    }
                     match k.code {
                         KeyCode::Char('q') | KeyCode::Esc => break,
+                        KeyCode::Char('/') => search = Some(String::new()),
+                        KeyCode::Char('n') | KeyCode::Char('N') if !hits.is_empty() => {
+                            hit_i = if k.code == KeyCode::Char('n') { (hit_i + 1) % hits.len() } else { (hit_i + hits.len() - 1) % hits.len() };
+                            scroll = hits[hit_i].saturating_sub(2);
+                            follow = false;
+                        }
                         KeyCode::Char('j') | KeyCode::Down => {
                             scroll += 1;
                             follow = false;

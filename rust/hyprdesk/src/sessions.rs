@@ -164,6 +164,53 @@ pub fn hermes_procs() -> Vec<ClaudeProc> {
     out
 }
 
+/// Past Hermes sessions from its sqlite store (`~/.hermes/state.db`), via
+/// the sqlite3 CLI in JSON mode — no driver crate for one query.
+/// (id, title, cwd, started_at, message_count), newest first.
+pub fn hermes_sessions(limit: usize) -> Vec<(String, String, String, f64, i64)> {
+    let db = crate::home().join(".hermes/state.db");
+    let Ok(meta) = fs::metadata(&db) else { return Vec::new() };
+    // one sqlite3 fork per DB change, not per 6 s reload (it cost 15 ms)
+    type Rows = Vec<(String, String, String, f64, i64)>;
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<(u64, u64, Rows)>>> = std::sync::OnceLock::new();
+    let key = (meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0), meta.len());
+    let cell = CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(g) = cell.lock() {
+        if let Some((m, l, rows)) = g.as_ref() {
+            if (*m, *l) == key {
+                return rows.clone();
+            }
+        }
+    }
+    let q = format!(
+        "select id, coalesce(title, display_name, '') as title, coalesce(cwd,'') as cwd, started_at, message_count \
+         from sessions where message_count > 0 order by started_at desc limit {limit}"
+    );
+    let Ok(out) = std::process::Command::new("sqlite3").args(["-json", "-readonly"]).arg(&db).arg(&q).output() else {
+        return Vec::new();
+    };
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else { return Vec::new() };
+    let rows: Rows = v.as_array()
+        .map(|a| {
+            a.iter()
+                .map(|r| {
+                    (
+                        r.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                        r.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                        r.get("cwd").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                        r.get("started_at").and_then(|x| x.as_f64()).unwrap_or(0.0),
+                        r.get("message_count").and_then(|x| x.as_i64()).unwrap_or(0),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Ok(mut g) = cell.lock() {
+        *g = Some((key.0, key.1, rows.clone()));
+    }
+    rows
+}
+
 /// [(mtime, path)] newest first; subagent/workflow transcripts are not
 /// resumable conversations and are skipped.
 pub fn recent_transcripts(limit: usize) -> Vec<(f64, PathBuf)> {
@@ -1069,6 +1116,20 @@ pub fn session_rows() -> Vec<Row> {
             tty: p.tty.clone(),
             dir: where_.clone(),
             detail: format!("🟢 hermes running in {where_} — Enter focuses its terminal"),
+            ..Default::default()
+        });
+    }
+    for (sid, title, cwd, started, n) in hermes_sessions(15) {
+        let label = nice(&cwd);
+        rows.push(Row {
+            kind: "past".into(),
+            agent: "hermes".into(),
+            label: label.clone(),
+            sid,
+            cwd: if cwd.is_empty() { home.clone() } else { cwd },
+            dir: label,
+            title: if title.is_empty() { format!("hermes · {n} messages") } else { title },
+            detail: format!("{} — hermes, {n} messages", ago(started)),
             ..Default::default()
         });
     }

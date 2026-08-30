@@ -1,0 +1,19 @@
+#!/bin/sh
+# Retire the old Claude Studio (socket claude-studio, class hyprclaudestudio)
+# AFTER its window is closed: the old binary becomes a symlink to draveniq,
+# the old kitty overlay goes, and the old tmux server is stopped if it holds
+# nothing live. Safe to re-run. Run by hand, or `draveniq --retire-old`.
+set -e
+if hyprctl clients -j 2>/dev/null | grep -q '"class": "hyprclaudestudio"'; then
+    echo "old Claude Studio window is still open — press q in it first"; exit 1
+fi
+if tmux -L claude-studio list-windows >/dev/null 2>&1; then
+    live=$(tmux -L claude-studio list-panes -s -F '#{pane_current_command}' | grep -c claude || true)
+    if [ "$live" -gt 0 ]; then
+        echo "old tmux server still runs $live claude pane(s) — close them (they stay resumable) then re-run"; exit 1
+    fi
+    tmux -L claude-studio kill-server 2>/dev/null || true
+fi
+ln -sf draveniq "$HOME/.local/bin/hypr-claude-studio"
+rm -f "$HOME/.config/kitty/claude-studio.conf" "$XDG_RUNTIME_DIR/claude-studio.active"
+echo "retired: hypr-claude-studio → draveniq (shim), old socket/config removed"
