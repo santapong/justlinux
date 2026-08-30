@@ -367,7 +367,7 @@ impl App {
         let rows: Vec<&Entry> = self
             .entries
             .iter()
-            .filter(|e| e.kind == "heard" || e.kind == "actions" || (e.kind == "wake" && e.forced))
+            .filter(|e| e.kind == "heard" || e.kind == "actions" || e.kind == "ignored" || (e.kind == "wake" && e.forced))
             .filter(|e| q.is_empty() || e.text.to_lowercase().contains(&q) || describe(&e.actions).to_lowercase().contains(&q))
             .collect();
         let h = chunks[2].height.saturating_sub(2) as usize;
@@ -376,6 +376,10 @@ impl App {
         for e in &rows[start..] {
             if e.kind == "wake" {
                 lines.push(Line::from(vec![Span::styled(format!(" {}  ", hms(e.ts)), sub), Span::styled("push-to-talk", sub)]));
+                continue;
+            }
+            if e.kind == "ignored" {
+                lines.push(Line::from(vec![Span::styled(format!(" {}  ", hms(e.ts)), sub), Span::styled(format!("“{}”", e.text), sub), Span::styled("  ignored — no “Draven” in it", sub)]));
                 continue;
             }
             let heard = if e.text.is_empty() { "(nothing heard)".to_string() } else { format!("“{}”", e.text) };

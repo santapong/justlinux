@@ -473,8 +473,11 @@ def daemon(test_seconds=None):
                     execute(acts)
                     if acts and acts[0][0] != "unknown":
                         last_actions = acts
-            hits = hits + 1 if score >= threshold else 0
-            if not forced and (hits < 2 or time.time() - last_wake < 2.0):
+            # ONE chunk over the line is enough: the name check after
+            # transcription makes a false wake cost only a transcription,
+            # while a 2-chunk debounce missed the user's single 0.3 peak
+            hits = 1 if score >= threshold else 0
+            if not forced and (hits < 1 or time.time() - last_wake < 2.0):
                 continue
             hits, last_wake = 0, time.time()
             model.reset()
