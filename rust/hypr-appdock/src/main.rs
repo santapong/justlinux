@@ -14,6 +14,13 @@
 //! Auto-hide maps/unmaps GTK windows in python; here a hidden dock's
 //! LayerSurface is destroyed and reveal recreates it — deterministic,
 //! and the respawn path is exercised constantly anyway.
+//!
+//! Auto-hide is decided per monitor: `dock_<mon>_autohide=on|off`
+//! (monitor name sanitized, e.g. dock_DP_1_autohide) overrides the
+//! global `dock_autohide`; unset falls back to it. A pinned (off) dock
+//! stays mapped like an empty-workspace dock and gets no reveal strip.
+//! `dock_show_on_empty=off` (or `dock_<mon>_show_on_empty`) drops the
+//! empty-workspace exception so an auto-hiding dock hides there too.
 
 mod apps;
 mod pins;
@@ -182,6 +189,8 @@ struct Surf {
     dirty: bool,
     pointer_in: bool,
     // docks only:
+    autohide: bool, // per-monitor dock_<mon>_autohide, global fallback
+    show_on_empty: bool, // keep mapped while the workspace has no windows
     ws: i64,
     icon: u32,
     btns: Vec<Btn>,
@@ -247,6 +256,16 @@ impl App {
         if self.bar_smart {
             self.bar_polling = true; // (re)enabled: tuck soon
         }
+    }
+
+    /// Per-monitor auto-hide: `dock_<san>_autohide` on|off wins, anything
+    /// else falls back to the global flag. A bottom-layer dock never hides
+    /// (it is under windows already), whatever the per-monitor key says.
+    fn mon_autohide(&self, san: &str) -> bool {
+        if matches!(self.layer_kind, Layer::Bottom) {
+            return false;
+        }
+        mon_flag(san, "autohide", self.autohide)
     }
 
     // ----- dock content -----
@@ -529,7 +548,7 @@ impl App {
         if st.fullscreen {
             return false;
         }
-        if !self.autohide || self.suspend || st.empty {
+        if !d.autohide || self.suspend || (st.empty && d.show_on_empty) {
             return true;
         }
         self.hovered(i)
@@ -734,6 +753,15 @@ fn bar_hovering(strip_hover: bool) -> bool {
     })
 }
 
+/// `dock_<san>_<key>` on|off wins; anything else is the global value.
+fn mon_flag(san: &str, key: &str, global: bool) -> bool {
+    match hyprdesk::conf_get(&format!("dock_{san}_{key}"), "").as_str() {
+        "on" => true,
+        "off" => false,
+        _ => global,
+    }
+}
+
 // ----- spawn -----
 
 fn spawn_surfs(app: &mut App, qh: &QueueHandle<App>, layer_shell: &LayerShell) {
@@ -745,6 +773,7 @@ fn spawn_surfs(app: &mut App, qh: &QueueHandle<App>, layer_shell: &LayerShell) {
         .filter_map(|o| app.output_state.info(&o).and_then(|i| i.name))
         .collect();
     let states = monitor_states();
+    let show_on_empty = hyprdesk::conf_get("dock_show_on_empty", "on") == "on";
     for name in mons {
         let san = sanitize(&name);
         // bar_smart strip is independent of the dock being enabled here
@@ -766,17 +795,25 @@ fn spawn_surfs(app: &mut App, qh: &QueueHandle<App>, layer_shell: &LayerShell) {
             v.parse::<i64>().unwrap_or(44).clamp(24, 96) as u32
         };
         let ws = states.get(&name).map(|s| s.ws).unwrap_or(1);
-        app.surfs.push(new_surf(&name, &san, EdgeKind::DockBottom, icon, ws));
+        let autohide = app.mon_autohide(&san);
+        let show_on_empty = mon_flag(&san, "show_on_empty", show_on_empty);
+        let mut dock = new_surf(&name, &san, EdgeKind::DockBottom, icon, ws);
+        dock.autohide = autohide;
+        dock.show_on_empty = show_on_empty;
+        app.surfs.push(dock);
         let di = app.surfs.len() - 1;
         app.rebuild_dock(di);
-        if app.autohide {
+        if autohide {
             app.surfs.push(new_surf(&name, &san, EdgeKind::StripBottom, 0, 0));
         }
         if app.dock_top {
-            app.surfs.push(new_surf(&name, &san, EdgeKind::DockTop, icon, ws));
+            let mut dock = new_surf(&name, &san, EdgeKind::DockTop, icon, ws);
+            dock.autohide = autohide;
+            dock.show_on_empty = show_on_empty;
+            app.surfs.push(dock);
             let ti = app.surfs.len() - 1;
             app.rebuild_dock(ti);
-            if app.autohide {
+            if autohide {
                 app.surfs.push(new_surf(&name, &san, EdgeKind::StripTop, 0, 0));
             }
         }
@@ -806,6 +843,8 @@ fn new_surf(mon: &str, san: &str, kind: EdgeKind, icon: u32, ws: i64) -> Surf {
         configured: false,
         dirty: true,
         pointer_in: false,
+        autohide: true,
+        show_on_empty: true,
         ws,
         icon,
         btns: Vec::new(),
@@ -1087,7 +1126,11 @@ fn main() {
                     .get(&app.surfs[i].mon)
                     .cloned()
                     .unwrap_or_default();
-                if app.autohide && !app.suspend && !app.hovered(i) && !st.empty {
+                if app.surfs[i].autohide
+                    && !app.suspend
+                    && !app.hovered(i)
+                    && !(st.empty && app.surfs[i].show_on_empty)
+                {
                     app.unmap_surf(i);
                 }
             }
@@ -1130,7 +1173,7 @@ fn main() {
                     for i in 0..app.surfs.len() {
                         if app.surfs[i].is_dock()
                             && app.surfs[i].layer.is_some()
-                            && app.autohide
+                            && app.surfs[i].autohide
                             && !app.hovered(i)
                         {
                             let st = app
@@ -1138,7 +1181,7 @@ fn main() {
                                 .get(&app.surfs[i].mon)
                                 .cloned()
                                 .unwrap_or_default();
-                            if !st.empty {
+                            if !(st.empty && app.surfs[i].show_on_empty) {
                                 app.unmap_surf(i);
                             }
                         }
